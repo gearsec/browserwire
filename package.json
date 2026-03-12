@@ -1,0 +1,40 @@
+{
+  "name": "browserwire",
+  "version": "0.1.0",
+  "description": "Contract layer between AI agents and websites — auto-discovered, typed browser APIs",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gearsec/browserwire.git"
+  },
+  "homepage": "https://github.com/gearsec/browserwire",
+  "keywords": ["browser", "automation", "ai-agent", "api", "discovery"],
+  "bin": {
+    "browserwire": "cli/index.js"
+  },
+  "files": [
+    "cli/",
+    "src/",
+    "extension/",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "cli:dev": "node cli/index.js",
+    "cli:debug": "node cli/index.js --debug"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.8.2",
+    "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "@rrweb/record": "^2.0.0-alpha.20",
+    "ws": "^8.19.0"
+  }
+}

@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BrowserWire</title>
+    <style>
+      :root {
+        --bg: #f4f1ea;
+        --panel: #fffaf0;
+        --text: #222;
+        --muted: #5f5a4d;
+        --ok: #2f7d32;
+        --warn: #915f00;
+        --err: #b3261e;
+        --border: #ded7c8;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font:
+          14px/1.4 "Georgia",
+          "Times New Roman",
+          serif;
+        color: var(--text);
+        background: radial-gradient(circle at top, #fffaf0 0%, var(--bg) 70%);
+      }
+
+      .wrap {
+        padding: 14px;
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 12px;
+        box-shadow: 0 5px 14px rgba(0, 0, 0, 0.06);
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 16px;
+      }
+
+      .row {
+        display: flex;
+        gap: 8px;
+        margin: 10px 0;
+      }
+
+      input,
+      button {
+        font: inherit;
+      }
+
+      input {
+        width: 100%;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px;
+        background: #fff;
+      }
+
+      button {
+        border: 1px solid #8f8572;
+        background: #ece2cd;
+        border-radius: 8px;
+        padding: 8px 10px;
+        cursor: pointer;
+      }
+
+      button.primary {
+        background: #2f7d32;
+        color: #fff;
+        border-color: #256b28;
+      }
+
+      button.checkpoint {
+        background: #5c6bc0;
+        color: #fff;
+        border-color: #4a57a8;
+      }
+
+      button.danger {
+        background: #b3261e;
+        color: #fff;
+        border-color: #8e1e18;
+      }
+
+      #checkpointNote {
+        width: 100%;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px;
+        background: #fff;
+        font: inherit;
+        font-size: 13px;
+        resize: vertical;
+        min-height: 48px;
+        display: none;
+      }
+
+      #checkpointNote.visible {
+        display: block;
+      }
+
+      #checkpointOverlay {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(255, 250, 240, 0.9);
+        z-index: 999;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+      }
+
+      #checkpointOverlay.visible {
+        display: flex;
+      }
+
+      .overlay-spinner {
+        width: 32px;
+        height: 32px;
+        border: 3px solid var(--border);
+        border-top-color: #5c6bc0;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+
+      .overlay-text {
+        font-size: 14px;
+        color: var(--muted);
+      }
+
+      #backendStatus,
+      #sessionStatus {
+        margin: 6px 0;
+      }
+
+      .ok {
+        color: var(--ok);
+      }
+
+      .warn {
+        color: var(--warn);
+      }
+
+      .err {
+        color: var(--err);
+      }
+
+      .stats {
+        margin: 8px 0;
+        padding: 8px;
+        background: #fff;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        font-size: 13px;
+        display: none;
+      }
+
+      .stats.visible {
+        display: block;
+      }
+
+      .stats .stat-row {
+        display: flex;
+        justify-content: space-between;
+        padding: 2px 0;
+      }
+
+      .stats .stat-label {
+        color: var(--muted);
+      }
+
+      .stats .stat-value {
+        font-weight: bold;
+      }
+
+      pre {
+        margin: 10px 0 0;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px;
+        height: 200px;
+        overflow: auto;
+        background: #fff;
+        font-family: "Menlo", "Consolas", monospace;
+        font-size: 12px;
+      }
+
+      #apiStatus {
+        margin: 8px 0;
+        padding: 8px;
+        background: #e8f5e9;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        font-size: 13px;
+        display: none;
+      }
+
+      #apiStatus a {
+        color: var(--ok);
+        font-weight: bold;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <h1>BrowserWire</h1>
+        <label for="wsUrl">Backend URL</label>
+        <div class="row">
+          <input id="wsUrl" type="text" value="ws://127.0.0.1:8787" />
+        </div>
+        <div class="row">
+          <button id="connect">Connect Backend</button>
+          <button id="disconnect">Disconnect Backend</button>
+        </div>
+        <div class="row">
+          <button id="startExploring" class="primary">Start Exploring</button>
+          <button id="stopExploring" class="danger">Stop Exploring</button>
+        </div>
+        <div class="row" id="checkpointRow" style="display:none">
+          <button id="checkpoint" class="checkpoint">Checkpoint</button>
+        </div>
+        <textarea id="checkpointNote" placeholder="Optional: describe what you just explored..."></textarea>
+        <div id="backendStatus" class="warn">Backend: Disconnected</div>
+        <div id="sessionStatus" class="warn">Session: Idle</div>
+        <div id="siteOrigin" style="display:none; margin:4px 0; font-size:13px; color:var(--muted)"></div>
+        <div id="sessionStats" class="stats">
+          <div class="stat-row">
+            <span class="stat-label">Snapshots</span>
+            <span class="stat-value" id="statSnapshots">0</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Entities</span>
+            <span class="stat-value" id="statEntities">0</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Actions</span>
+            <span class="stat-value" id="statActions">0</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Views</span>
+            <span class="stat-value" id="statViews">0</span>
+          </div>
+          <div class="stat-row" id="statBufferedRow">
+            <span class="stat-label">Buffered</span>
+            <span class="stat-value" id="statBuffered">0</span>
+          </div>
+        </div>
+        <div id="apiStatus"></div>
+
+        <pre id="log" aria-live="polite"></pre>
+      </div>
+    </div>
+
+    <!-- Blocking overlay shown while checkpoint is processing -->
+    <div id="checkpointOverlay">
+      <div class="overlay-spinner"></div>
+      <div class="overlay-text">Processing checkpoint…</div>
+    </div>
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>

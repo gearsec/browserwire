@@ -1,0 +1,539 @@
+import { createServer } from "node:http";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { WebSocketServer } from "ws";
+import {
+  createEnvelope,
+  MessageType,
+  parseEnvelope,
+  PROTOCOL_VERSION
+} from "../extension/shared/protocol.js";
+import { classifyInteractables } from "./discovery/classify.js";
+import { groupEntities } from "./discovery/entities.js";
+import { synthesizeAllLocators } from "./discovery/locators.js";
+import { compileManifest } from "./discovery/compile.js";
+import { enrichManifest } from "./discovery/enrich.js";
+import { DiscoverySession } from "./discovery/session.js";
+import { createBridge } from "./api/bridge.js";
+import { createHttpHandler } from "./api/router.js";
+import { ManifestStore } from "./manifest-store.js";
+
+const CLIENT_STATUS_INTERVAL_MS = 15000;
+
+/** Active discovery sessions keyed by sessionId */
+const activeSessions = new Map();
+
+/** Module-level state shared between HTTP and WS */
+const manifestStore = new ManifestStore();
+const siteManifests = new Map();   // origin → manifest (in-memory cache)
+let extensionSocket = null;
+const bridge = createBridge();
+
+export const startServer = async ({
+  host = "127.0.0.1",
+  port = 8787,
+  debug = false
+} = {}) => {
+  // Load persisted site manifests on startup
+  const sites = await manifestStore.listSites();
+  for (const site of sites) {
+    const m = await manifestStore.load(site.origin);
+    if (m) {
+      siteManifests.set(site.origin, m);
+      const slug = ManifestStore.originSlug(site.origin);
+      console.log(`[browserwire-cli] loaded manifest for ${site.origin} → http://${host}:${port}/api/sites/${slug}/docs`);
+    }
+  }
+  if (sites.length > 0) {
+    console.log(`[browserwire-cli] loaded ${sites.length} site manifest(s)`);
+  }
+
+  const httpHandler = createHttpHandler({
+    getManifestBySlug: (slug) => {
+      for (const [origin, m] of siteManifests) {
+        if (ManifestStore.originSlug(origin) === slug) return m;
+      }
+      return null;
+    },
+    listSites: () => [...siteManifests.entries()].map(([origin, m]) => ({
+      origin,
+      slug: ManifestStore.originSlug(origin),
+      domain: m.domain || null,
+      entityCount: m.entities?.length || 0,
+      actionCount: m.actions?.length || 0,
+      viewCount: m.views?.length || 0,
+      updatedAt: m.metadata?.updatedAt || m.metadata?.createdAt || null
+    })),
+    bridge,
+    getSocket: () => extensionSocket,
+    host,
+    port
+  });
+
+  const httpServer = createServer(httpHandler);
+  const wss = new WebSocketServer({ server: httpServer });
+
+  httpServer.listen(port, host, () => {
+    console.log(`[browserwire-cli] listening on http://${host}:${port}`);
+    console.log(`[browserwire-cli] site index at http://${host}:${port}/api/docs`);
+  });
+
+  wss.on("connection", (socket, req) => {
+    const clientId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const source = req.socket.remoteAddress || "unknown";
+
+    console.log(`[browserwire-cli] client connected ${clientId} from ${source}`);
+
+    const statusTimer = setInterval(() => {
+      if (socket.readyState === 1) {
+        socket.send(
+          JSON.stringify(
+            createEnvelope(MessageType.STATUS, {
+              state: "connected",
+              serverTime: new Date().toISOString()
+            })
+          )
+        );
+      }
+    }, CLIENT_STATUS_INTERVAL_MS);
+
+    socket.on("message", async (data) => {
+      const message = parseEnvelope(data.toString());
+
+      if (!message) {
+        socket.send(
+          JSON.stringify(
+            createEnvelope(MessageType.ERROR, {
+              code: "invalid_message",
+              message: "Expected JSON message with a string 'type' field."
+            })
+          )
+        );
+        return;
+      }
+
+      if (message.type === MessageType.HELLO) {
+        // Track as extension socket
+        extensionSocket = socket;
+
+        socket.send(
+          JSON.stringify(
+            createEnvelope(
+              MessageType.HELLO_ACK,
+              {
+                accepted: true,
+                server: "browserwire-cli",
+                protocolVersion: PROTOCOL_VERSION
+              },
+              message.requestId
+            )
+          )
+        );
+        return;
+      }
+
+      if (message.type === MessageType.PING) {
+        socket.send(
+          JSON.stringify(
+            createEnvelope(
+              MessageType.PONG,
+              {
+                serverTime: new Date().toISOString()
+              },
+              message.requestId
+            )
+          )
+        );
+        return;
+      }
+
+      // ─── Bridge result messages (from extension executing REST API commands) ──
+
+      if (
+        message.type === MessageType.EXECUTE_RESULT ||
+        message.type === MessageType.READ_RESULT ||
+        message.type === MessageType.WORKFLOW_RESULT
+      ) {
+        if (bridge.handleWsResult(message)) return;
+        // Not matched — fall through to log
+      }
+
+      // ─── Discovery Session Messages ─────────────────────────
+
+      if (message.type === MessageType.DISCOVERY_SESSION_START) {
+        const payload = message.payload || {};
+        const sessionId = payload.sessionId || crypto.randomUUID();
+        const site = payload.url || "unknown";
+
+        const session = new DiscoverySession(sessionId, site);
+        activeSessions.set(sessionId, session);
+
+        // Derive origin and seed with prior manifest if available
+        let origin = null;
+        try { origin = new URL(site).origin; } catch { /* ignore */ }
+        session._siteOrigin = origin;
+
+        if (origin) {
+          const prior = siteManifests.get(origin) || await manifestStore.load(origin);
+          if (prior) {
+            session.seedWithManifest(prior);
+            console.log(`[browserwire-cli] session seeded with prior manifest for ${origin}`);
+          }
+        }
+
+        console.log(
+          `[browserwire-cli] session started: ${sessionId} site=${site}`
+        );
+
+        socket.send(
+          JSON.stringify(
+            createEnvelope(
+              MessageType.DISCOVERY_SESSION_STATUS,
+              session.getStats(),
+              message.requestId
+            )
+          )
+        );
+        return;
+      }
+
+      if (message.type === MessageType.DISCOVERY_SESSION_STOP) {
+        const payload = message.payload || {};
+        const sessionId = payload.sessionId;
+        const session = activeSessions.get(sessionId);
+
+        if (!session) {
+          console.warn(`[browserwire-cli] session stop for unknown session: ${sessionId}`);
+          socket.send(
+            JSON.stringify(
+              createEnvelope(
+                MessageType.ERROR,
+                { code: "unknown_session", message: `Session ${sessionId} not found` },
+                message.requestId
+              )
+            )
+          );
+          return;
+        }
+
+        console.log(`[browserwire-cli] session stopping: ${sessionId}`);
+
+        // Process any remaining buffered snapshots sent with the stop payload
+        const remainingSnapshots = Array.isArray(payload.pendingSnapshots) ? payload.pendingSnapshots : [];
+        const finalizeSession = remainingSnapshots.length > 0
+          ? (async () => {
+              console.log(`[browserwire-cli] processing ${remainingSnapshots.length} remaining buffered snapshots before finalize`);
+              for (const snap of remainingSnapshots) {
+                await session.addSnapshot(snap);
+              }
+              return session.finalize();
+            })()
+          : session.finalize();
+
+        finalizeSession
+          .then((result) => {
+            const { manifest, draftManifest, enrichedManifest } = result;
+
+            if (!manifest) {
+              console.log(`[browserwire-cli] session ${sessionId} produced no manifest`);
+              return;
+            }
+
+            // Write output files
+            const sessionDir = resolve(process.cwd(), `logs/session-${sessionId}`);
+
+            return mkdir(sessionDir, { recursive: true })
+              .then(() => Promise.all([
+                writeFile(
+                  resolve(sessionDir, "manifest-draft.json"),
+                  JSON.stringify(draftManifest || manifest, null, 2),
+                  "utf8"
+                ),
+                writeFile(
+                  resolve(sessionDir, "manifest.json"),
+                  JSON.stringify(manifest, null, 2),
+                  "utf8"
+                ),
+                writeFile(
+                  resolve(sessionDir, "session.json"),
+                  JSON.stringify({
+                    sessionId: session.sessionId,
+                    site: session.site,
+                    startedAt: session.startedAt,
+                    stoppedAt: new Date().toISOString(),
+                    snapshotCount: session.snapshots.length,
+                    snapshots: session.snapshots.map((s) => ({
+                      snapshotId: s.snapshotId,
+                      trigger: s.trigger,
+                      url: s.url,
+                      title: s.title,
+                      capturedAt: s.capturedAt,
+                      stats: s.stats
+                    }))
+                  }, null, 2),
+                  "utf8"
+                )
+              ]))
+              .then(async () => {
+                console.log(`[browserwire-cli] session ${sessionId} output written to ${sessionDir}`);
+
+                // Save to site-centric manifest store
+                const origin = session._siteOrigin;
+                if (origin) {
+                  siteManifests.set(origin, enrichedManifest);
+                  await manifestStore.save(origin, enrichedManifest, sessionId);
+                  const slug = ManifestStore.originSlug(origin);
+                  console.log(`[browserwire-cli] REST API ready at http://${host}:${port}/api/sites/${slug}/docs`);
+                }
+
+                // Send manifest to extension immediately so sidepanel can render
+                socket.send(JSON.stringify(createEnvelope(
+                  MessageType.MANIFEST_READY,
+                  { sessionId, manifest: enrichedManifest }
+                )));
+              });
+          })
+          .then(() => {
+            socket.send(
+              JSON.stringify(
+                createEnvelope(
+                  MessageType.DISCOVERY_SESSION_STATUS,
+                  { ...session.getStats(), finalized: true },
+                  message.requestId
+                )
+              )
+            );
+          })
+          .catch((error) => {
+            console.error(`[browserwire-cli] session finalization failed:`, error);
+          })
+          .finally(() => {
+            activeSessions.delete(sessionId);
+          });
+
+        return;
+      }
+
+      if (message.type === MessageType.CHECKPOINT) {
+        const payload = message.payload || {};
+        const { sessionId, snapshots = [], note } = payload;
+        const session = activeSessions.get(sessionId);
+
+        if (!session) {
+          console.warn(`[browserwire-cli] checkpoint for unknown session: ${sessionId}`);
+          socket.send(JSON.stringify(createEnvelope(MessageType.ERROR, {
+            code: "unknown_session", message: `Session ${sessionId} not found`
+          }, message.requestId)));
+          return;
+        }
+
+        console.log(`[browserwire-cli] checkpoint: sessionId=${sessionId} snapshots=${snapshots.length}${note ? ` note="${note}"` : ""}`);
+
+        const processCheckpoint = async () => {
+          for (const snap of snapshots) {
+            await session.addSnapshot(snap);
+          }
+          return session.compileCheckpoint(note);
+        };
+
+        processCheckpoint()
+          .then(async (result) => {
+            const { manifest, checkpointIndex } = result;
+
+            const sessionDir = resolve(process.cwd(), `logs/session-${sessionId}`);
+
+            if (manifest) {
+              await mkdir(sessionDir, { recursive: true });
+              await writeFile(
+                resolve(sessionDir, `checkpoint-${checkpointIndex}.json`),
+                JSON.stringify(manifest, null, 2),
+                "utf8"
+              );
+              console.log(`[browserwire-cli] checkpoint-${checkpointIndex} written for session ${sessionId}`);
+
+              // Save to site-centric manifest store
+              if (session._siteOrigin) {
+                siteManifests.set(session._siteOrigin, manifest);
+                manifestStore.save(session._siteOrigin, manifest, sessionId).catch(console.error);
+              }
+            }
+
+            socket.send(JSON.stringify(createEnvelope(
+              MessageType.CHECKPOINT_COMPLETE,
+              { sessionId, manifest: manifest || null, checkpointIndex },
+              message.requestId
+            )));
+          })
+          .catch((error) => {
+            console.error(`[browserwire-cli] checkpoint processing failed:`, error);
+            socket.send(JSON.stringify(createEnvelope(MessageType.ERROR, {
+              code: "checkpoint_failed", message: error.message
+            }, message.requestId)));
+          });
+
+        return;
+      }
+
+      if (message.type === MessageType.DISCOVERY_INCREMENTAL) {
+        const payload = message.payload || {};
+        const sessionId = payload.sessionId;
+        const session = activeSessions.get(sessionId);
+
+        if (!session) {
+          console.warn(`[browserwire-cli] incremental snapshot for unknown session: ${sessionId}`);
+          return;
+        }
+
+        const skeletonCount = Array.isArray(payload.skeleton) ? payload.skeleton.length : 0;
+        const screenshotKB = payload.screenshot ? Math.round(payload.screenshot.length * 0.75 / 1024) : 0;
+        console.log(
+          `[browserwire-cli] incremental snapshot: sessionId=${sessionId} skeleton=${skeletonCount} trigger=${payload.trigger?.kind || "unknown"} screenshot=${payload.screenshot ? screenshotKB + "KB" : "null"}`
+        );
+
+        session.addSnapshot(payload)
+          .then((stats) => {
+            // Broadcast updated stats back to extension
+            socket.send(
+              JSON.stringify(
+                createEnvelope(
+                  MessageType.DISCOVERY_SESSION_STATUS,
+                  stats
+                )
+              )
+            );
+
+            // Write screenshot as JPEG (always) + full snapshot JSON (debug only)
+            const snapName = payload.snapshotId || `snap_${stats.snapshotCount}`;
+            const snapDir = resolve(process.cwd(), `logs/session-${sessionId}`);
+
+            if (payload.screenshot) {
+              mkdir(snapDir, { recursive: true })
+                .then(() => writeFile(
+                  resolve(snapDir, `${snapName}.jpg`),
+                  Buffer.from(payload.screenshot, "base64")
+                ))
+                .catch((err) => {
+                  console.error(`[browserwire-cli] failed to write screenshot:`, err);
+                });
+            }
+
+            if (debug) {
+              mkdir(snapDir, { recursive: true })
+                .then(() => writeFile(
+                  resolve(snapDir, `${snapName}.json`),
+                  JSON.stringify({ ...payload, screenshot: payload.screenshot ? "<base64>" : null }, null, 2),
+                  "utf8"
+                ))
+                .catch((err) => {
+                  console.error(`[browserwire-cli] failed to write snapshot:`, err);
+                });
+            }
+          })
+          .catch((error) => {
+            console.error(`[browserwire-cli] snapshot processing failed:`, error);
+          });
+
+        return;
+      }
+
+      // ─── Legacy One-Shot Discovery (kept for backward compat) ──
+
+      if (message.type === MessageType.DISCOVERY_SNAPSHOT) {
+        const payload = message.payload || {};
+        const elements = Array.isArray(payload.elements) ? payload.elements : [];
+        const a11y = Array.isArray(payload.a11y) ? payload.a11y : [];
+        const url = payload.url || "unknown";
+        const title = payload.title || "unknown";
+        const pageText = typeof payload.pageText === "string" ? payload.pageText : "";
+
+        console.log(
+          `[browserwire-cli] discovery snapshot url=${url} title="${title}" elements=${elements.length} a11y=${a11y.length}`
+        );
+
+        const { interactables, stats } = classifyInteractables(elements, a11y);
+        const { entities, stats: entityStats } = groupEntities(elements, a11y, interactables);
+        const { locators, stats: locatorStats } = synthesizeAllLocators(elements, a11y, interactables);
+        const { manifest, stats: manifestStats } = compileManifest({
+          url, title,
+          capturedAt: payload.capturedAt,
+          elements, a11y, interactables, entities, locators
+        });
+
+        console.log(
+          `[browserwire-cli] manifest compiled: ${manifestStats.entityCount} entities, ${manifestStats.actionCount} actions`
+        );
+
+        const manifestLogPath = resolve(process.cwd(), "logs/discovery-manifest.json");
+        mkdir(dirname(manifestLogPath), { recursive: true })
+          .then(() => enrichManifest(manifest, pageText, payload.capturedAt))
+          .then((result) => {
+            const finalManifest = result ? result.enriched : manifest;
+            return writeFile(manifestLogPath, JSON.stringify(finalManifest, null, 2), "utf8");
+          })
+          .then(() => {
+            console.log(`[browserwire-cli] manifest written to ${manifestLogPath}`);
+          })
+          .catch((error) => {
+            console.error(`[browserwire-cli] manifest write failed:`, error);
+            return writeFile(manifestLogPath, JSON.stringify(manifest, null, 2), "utf8").catch(() => {});
+          });
+
+        socket.send(
+          JSON.stringify(
+            createEnvelope(
+              MessageType.DISCOVERY_ACK,
+              {
+                elementCount: elements.length,
+                a11yCount: a11y.length,
+                interactableCount: interactables.length,
+                entityCount: manifestStats.entityCount,
+                actionCount: manifestStats.actionCount,
+                url,
+                ackedAt: new Date().toISOString()
+              },
+              message.requestId
+            )
+          )
+        );
+        return;
+      }
+
+      // ─── Unsupported ──────────────────────────────────────────
+
+      socket.send(
+        JSON.stringify(
+          createEnvelope(
+            MessageType.ERROR,
+            {
+              code: "unsupported_type",
+              message: `Unsupported message type '${message.type}'.`
+            },
+            message.requestId
+          )
+        )
+      );
+    });
+
+    socket.on("close", () => {
+      clearInterval(statusTimer);
+      console.log(`[browserwire-cli] client disconnected ${clientId}`);
+
+      // If this was the extension socket, reject all pending bridge requests
+      if (socket === extensionSocket) {
+        extensionSocket = null;
+        bridge.rejectAll("Extension disconnected");
+      }
+    });
+
+    socket.on("error", (error) => {
+      clearInterval(statusTimer);
+      console.error(`[browserwire-cli] socket error ${clientId}`, error);
+    });
+  });
+
+  wss.on("close", () => {
+    console.log("[browserwire-cli] server stopped");
+  });
+
+  return httpServer;
+};
