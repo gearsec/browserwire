@@ -15,11 +15,13 @@
   },
   "files": [
     "cli/",
-    "src/",
     "extension/",
     "LICENSE",
     "README.md"
   ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",

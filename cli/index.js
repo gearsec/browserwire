@@ -34,6 +34,12 @@ loadEnv(resolve(process.cwd(), ".env"));
 const args = process.argv.slice(2);
 const debug = args.includes("--debug");
 
+if (args.includes("--extension-path")) {
+  const extPath = resolve(import.meta.dirname, "../extension");
+  console.log(extPath);
+  process.exit(0);
+}
+
 // --- Server mode: run discovery pipeline + REST API ---
 const host = process.env.BROWSERWIRE_HOST || "127.0.0.1";
 const port = Number(process.env.BROWSERWIRE_PORT || 8787);
