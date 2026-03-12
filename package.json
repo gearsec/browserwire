@@ -26,10 +26,14 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "cli:dev": "node cli/index.js",
-    "cli:debug": "node cli/index.js --debug"
+    "cli:debug": "node cli/index.js --debug",
+    "ext:package": "node scripts/package-extension.js",
+    "ext:publish": "node scripts/publish-cws.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "archiver": "^7.0.1",
+    "chrome-webstore-upload": "^3.0.4",
     "typescript": "^5.8.2",
     "vitest": "^3.2.4"
   },
