@@ -23,26 +23,34 @@ Chrome Extension (discovers)     CLI Backend (builds manifest)     REST API (ser
 ## Quick start
 
 ```bash
-# Install dependencies
-npm install
-
-# Configure your LLM provider
-cp .env.example .env
-# Edit .env with your API key and preferred provider
+# Install BrowserWire
+npm install -g browserwire
 
 # Load the Chrome extension
-# 1. Open chrome://extensions
-# 2. Enable "Developer mode"
-# 3. Click "Load unpacked" → select the extension/ directory
+# 1. Get the extension path
+npx browserwire --extension-path
+# 2. Open chrome://extensions
+# 3. Enable "Developer mode"
+# 4. Click "Load unpacked" → select the path printed above
 
-# Start the CLI server
-npm run cli:dev
+# Configure your LLM provider (set in your shell or a .env file in the current directory)
+export BROWSERWIRE_LLM_PROVIDER=openai   # or anthropic, gemini, ollama
+export BROWSERWIRE_LLM_API_KEY=sk-...
+
+# Start the server
+browserwire
 
 # Browse to any site, click "Start Exploring" in the BrowserWire sidepanel
 # The CLI will discover and build a manifest for the site
 
 # View discovered APIs
 open http://localhost:8787/api/sites
+```
+
+You can also run without installing globally:
+
+```bash
+npx browserwire
 ```
 
 ## Extension permissions
@@ -97,6 +105,17 @@ curl http://localhost:8787/api/sites/example-com/docs
 curl -X POST http://localhost:8787/api/sites/example-com/execute \
   -H "Content-Type: application/json" \
   -d '{"actionId": "action_submit_login", "inputs": {"email": "user@example.com"}}'
+```
+
+## Development
+
+To work on BrowserWire from source:
+
+```bash
+git clone https://github.com/gearsec/browserwire.git
+cd browserwire
+npm install
+npm run cli:dev
 ```
 
 ## Contributing
