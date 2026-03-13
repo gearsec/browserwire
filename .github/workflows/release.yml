@@ -35,10 +35,13 @@ jobs:
           node-version: 22
           cache: npm
           registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@latest
       - run: npm ci
       - name: Set version from tag
         run: npm version "${GITHUB_REF#refs/tags/v}" --no-git-tag-version --allow-same-version
       - run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   release:
     needs: test
