@@ -1,61 +1,29 @@
 /**
- * llm-client.js — Thin LLM provider abstraction for Stage 7.
+ * llm-client.js — Thin LLM provider abstraction.
  *
- * Supports OpenAI-compatible, Anthropic, and Ollama endpoints via
- * environment variables:
- *
- *   BROWSERWIRE_LLM_PROVIDER  = openai | anthropic | ollama
- *   BROWSERWIRE_LLM_MODEL     = model name (default varies by provider)
- *   BROWSERWIRE_LLM_API_KEY   = API key (not needed for ollama)
- *   BROWSERWIRE_LLM_BASE_URL  = custom endpoint (default varies by provider)
+ * LLM configuration is managed by cli/config.js (centralized config module).
+ * This module reads from the config singleton via getConfig().
  */
+
+import { getConfig } from "../config.js";
 
 const MAX_RETRIES = 3;
 const BASE_RETRY_DELAY_MS = 5000;
 
-const PROVIDER_DEFAULTS = {
-  openai: {
-    baseUrl: "https://api.openai.com/v1",
-    model: "gpt-4o",
-    path: "/chat/completions"
-  },
-  gemini: {
-    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
-    model: "gemini-2.5-flash",
-    path: "/chat/completions"
-  },
-  anthropic: {
-    baseUrl: "https://api.anthropic.com",
-    model: "claude-sonnet-4-20250514",
-    path: "/v1/messages"
-  },
-  ollama: {
-    baseUrl: "http://localhost:11434",
-    model: "llama3",
-    path: "/api/chat"
-  }
-};
-
 /**
- * Read LLM configuration from environment variables.
+ * Read LLM configuration from the centralized config singleton.
  * Returns null if no provider is configured.
  */
 export const getLLMConfig = () => {
-  const provider = process.env.BROWSERWIRE_LLM_PROVIDER;
-  if (!provider) return null;
-
-  const defaults = PROVIDER_DEFAULTS[provider];
-  if (!defaults) {
-    console.warn(`[browserwire-cli] unknown LLM provider: ${provider}`);
-    return null;
-  }
+  const cfg = getConfig();
+  if (!cfg.llmProvider) return null;
 
   return {
-    provider,
-    model: process.env.BROWSERWIRE_LLM_MODEL || defaults.model,
-    apiKey: process.env.BROWSERWIRE_LLM_API_KEY || "",
-    baseUrl: process.env.BROWSERWIRE_LLM_BASE_URL || defaults.baseUrl,
-    path: defaults.path
+    provider: cfg.llmProvider,
+    model: cfg.llmModel,
+    apiKey: cfg.llmApiKey || "",
+    baseUrl: cfg.llmBaseUrl,
+    path: cfg.llmPath
   };
 };
 

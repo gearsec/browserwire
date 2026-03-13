@@ -40,6 +40,9 @@ export BROWSERWIRE_LLM_API_KEY=sk-...
 # Start the server
 browserwire
 
+# See all options
+browserwire --help
+
 # Browse to any site, click "Start Exploring" in the BrowserWire sidepanel
 # The CLI will discover and build a manifest for the site
 
@@ -72,7 +75,11 @@ BrowserWire requires the `<all_urls>` permission because it needs to inspect wha
 
 ## Configuration
 
-BrowserWire uses environment variables for LLM configuration. Copy `.env.example` to `.env` and configure:
+BrowserWire loads configuration from multiple sources. **Precedence** (highest wins): CLI flags > environment variables / `.env` > config file > defaults.
+
+### Environment variables
+
+Copy `.env.example` to `.env` and configure, or set these in your shell:
 
 | Variable | Description | Required |
 |----------|-------------|----------|
@@ -80,6 +87,34 @@ BrowserWire uses environment variables for LLM configuration. Copy `.env.example
 | `BROWSERWIRE_LLM_API_KEY` | API key for the provider | Yes (except ollama) |
 | `BROWSERWIRE_LLM_MODEL` | Model name (default varies by provider) | No |
 | `BROWSERWIRE_LLM_BASE_URL` | Custom endpoint URL (for ollama or proxies) | No |
+| `BROWSERWIRE_HOST` | Server listen address (default: `127.0.0.1`) | No |
+| `BROWSERWIRE_PORT` | Server listen port (default: `8787`) | No |
+
+### Config file
+
+You can optionally create `~/.browserwire/config.json` for persistent settings:
+
+```json
+{
+  "llmProvider": "openai",
+  "llmApiKey": "sk-...",
+  "llmModel": "gpt-4o",
+  "llmBaseUrl": "https://api.openai.com/v1",
+  "host": "127.0.0.1",
+  "port": 8787
+}
+```
+
+All keys are optional. The file itself is optional. Environment variables and CLI flags always override config file values.
+
+### CLI flags
+
+```
+browserwire --host 0.0.0.0 --port 3000 --debug
+browserwire --llm-provider openai --llm-api-key sk-... --llm-model gpt-4o
+```
+
+Run `browserwire --help` to see all options. Use `--version` to print the version number.
 
 ### Provider defaults
 
