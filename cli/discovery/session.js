@@ -206,6 +206,8 @@ const buildViewDefs = (perceptionViews, entityNameToId, capturedAt) => {
       containerLocator,
       itemLocator,
       fields,
+      ...(v.apiRequest ? { apiRequest: v.apiRequest } : {}),
+      ...(v.apiFields ? { apiFields: v.apiFields } : {}),
       provenance
     };
   });
@@ -503,6 +505,14 @@ const mergeViews = (allSnapshotViews) => {
       const existing = merged.get(key);
       if (!existing || view.fields.length > existing.fields.length) {
         merged.set(key, { ...view });
+      } else if (existing) {
+        // Keep apiRequest/apiFields from whichever snapshot provided them
+        if (!existing.apiRequest && view.apiRequest) {
+          existing.apiRequest = view.apiRequest;
+        }
+        if (!existing.apiFields && view.apiFields) {
+          existing.apiFields = view.apiFields;
+        }
       }
     }
   }
@@ -636,6 +646,7 @@ export class DiscoverySession {
     const title = payload.title || "unknown";
     const skeleton = Array.isArray(payload.skeleton) ? payload.skeleton : [];
     const pageState = payload.pageState || null;
+    const networkLog = Array.isArray(payload.networkLog) ? payload.networkLog : [];
 
     console.log(
       `[browserwire-cli] session ${this.sessionId} snapshot #${snapshotNum}: ` +
@@ -653,7 +664,8 @@ export class DiscoverySession {
         screenshot: payload.screenshot || null,
         pageText,
         url,
-        title
+        title,
+        networkLog
       });
     } catch (error) {
       console.warn(`[browserwire-cli]   perception failed: ${error.message}`);
@@ -683,6 +695,8 @@ export class DiscoverySession {
       url,
       title,
       capturedAt,
+      skeleton,
+      networkLog,
       elements: result?.elements || [],
       a11y: result?.a11y || [],
       interactables: result?.interactables || [],
@@ -818,7 +832,9 @@ export class DiscoverySession {
               containerLocator: view.containerLocator?.strategies || [],
               itemLocator: view.itemLocator || null,
               fields: view.fields || [],
-              isList: view.isList || false
+              isList: view.isList || false,
+              apiRequest: view.apiRequest || null,
+              apiFields: view.apiFields || null
             };
           }
         }

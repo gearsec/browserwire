@@ -1,95 +1,76 @@
 /**
  * content-script.js — Dynamic Discovery Observer
  *
- * Uses rrweb's event stream to detect user interactions and DOM settle,
- * then triggers M1 scans (via discovery.js) and sends tagged snapshots
- * to the CLI server.
+ * 3-state machine: IDLE → SETTLING → scan → IDLE
  *
- * rrweb events used:
- *   - MouseInteraction (source=2): click, focus, blur, touch — interaction trigger
- *   - Mutation (source=0): DOM changes — settle detection signal
- *   - Input (source=5): text/select/checkbox changes — input trigger
+ * Uses native DOM events (click, input, MutationObserver) instead of rrweb.
+ * Two timers only:
+ *   - settleTimer: 500ms debounce, resets on DOM mutations
+ *   - hardTimer: 4s cap from first unscanned interaction, never resets
  */
 
-const SETTLE_DEBOUNCE_MS = 300;
-const SETTLE_HARD_TIMEOUT_MS = 3000;
+const SETTLE_DEBOUNCE_MS = 500;
+const SETTLE_HARD_TIMEOUT_MS = 4000;
+const DEBUG = false;
 
-/** rrweb IncrementalSource constants */
-const RRWEB_SOURCE = {
-  MUTATION: 0,
-  MOUSE_INTERACTION: 2,
-  INPUT: 5
-};
-
-/** rrweb EventType constants */
-const RRWEB_TYPE = {
-  INCREMENTAL: 3,
-  META: 4
-};
-
-// ─── Network Idle Tracking ──────────────────────────────────────────
+// ─── Network Capture (received from MAIN world network-hook.js) ─────
 
 let _pendingNetwork = 0;
-let _networkHooked = false;
+const _networkLog = [];
+const NETWORK_LOG_CAP = 100;
+
+const drainNetworkLog = () => _networkLog.splice(0);
 
 const isNetworkIdle = () => _pendingNetwork === 0;
 
-const onNetworkSettle = () => {
-  if (!discoveryState.active || !discoveryState.pendingSettle) return;
-  if (!isNetworkIdle()) return;
-  // Network just drained — reschedule settle with short paint-flush delay
-  if (discoveryState.settleTimer) clearTimeout(discoveryState.settleTimer);
-  discoveryState.settleTimer = setTimeout(() => {
-    if (discoveryState.pendingSettle) triggerScan(discoveryState.pendingTrigger);
-  }, 100);
-};
+// ─── State ──────────────────────────────────────────────────────────
 
-const hookNetwork = () => {
-  if (_networkHooked) return;
-  _networkHooked = true;
-
-  const _origFetch = window.fetch;
-  window.fetch = function(...args) {
-    if (discoveryState.active) _pendingNetwork++;
-    return _origFetch.apply(this, args).finally(() => {
-      if (discoveryState.active) { _pendingNetwork = Math.max(0, _pendingNetwork - 1); onNetworkSettle(); }
-    });
-  };
-
-  const _origSend = XMLHttpRequest.prototype.send;
-  XMLHttpRequest.prototype.send = function(...args) {
-    if (discoveryState.active) {
-      _pendingNetwork++;
-      this.addEventListener('loadend', () => {
-        if (discoveryState.active) { _pendingNetwork = Math.max(0, _pendingNetwork - 1); onNetworkSettle(); }
-      }, { once: true });
-    }
-    return _origSend.apply(this, args);
-  };
-};
-
-const discoveryState = {
+const state = {
   active: false,
   sessionId: null,
-  stopRecording: null,
   snapshotCount: 0,
-  /** Whether we're waiting for DOM to settle after an interaction */
-  pendingSettle: false,
-  /** Info about the interaction that triggered the current settle wait */
+  lastUrl: window.location.href,
+  phase: "idle",        // "idle" | "settling"
   pendingTrigger: null,
   settleTimer: null,
-  hardTimer: null,
-  /** Last known URL — for SPA navigation detection */
-  lastUrl: window.location.href
+  hardTimer: null
 };
 
-const getRecordApi = () => {
-  if (typeof rrweb !== "undefined" && rrweb && typeof rrweb.record === "function") {
-    return rrweb;
+// ─── Timers ─────────────────────────────────────────────────────────
+
+const clearTimers = () => {
+  if (state.settleTimer) { clearTimeout(state.settleTimer); state.settleTimer = null; }
+  if (state.hardTimer) { clearTimeout(state.hardTimer); state.hardTimer = null; }
+};
+
+// ─── Network message handler ────────────────────────────────────────
+
+const onNetworkIdle = () => {
+  if (state.phase !== "settling") return;
+  if (!isNetworkIdle()) return;
+  // Network just drained — short paint-flush then settle check
+  if (!state.settleTimer) {
+    state.settleTimer = setTimeout(onSettle, 100);
   }
-
-  return null;
 };
+
+window.addEventListener("message", (event) => {
+  if (event.source !== window) return;
+  const msg = event.data;
+  if (!msg || msg.source !== "browserwire-network-hook") return;
+
+  if (msg.type === "req_start") {
+    if (state.active && state.phase === "settling") _pendingNetwork++;
+  } else if (msg.type === "req_end") {
+    if (state.active && _pendingNetwork > 0) {
+      _pendingNetwork = Math.max(0, _pendingNetwork - 1);
+      onNetworkIdle();
+    }
+  } else if (msg.type === "entry") {
+    _networkLog.push(msg.detail);
+    if (_networkLog.length > NETWORK_LOG_CAP) _networkLog.shift();
+  }
+});
 
 // ─── Trigger Context Capture ────────────────────────────────────────
 
@@ -113,7 +94,6 @@ const getParentContext = (el) => {
   let node = el?.parentElement;
 
   while (node && node !== document.body) {
-    // Check landmark
     if (!nearestLandmark) {
       const role = node.getAttribute("role") || LANDMARK_TAGS[node.tagName.toLowerCase()] || null;
       if (role && LANDMARK_ROLES.has(role)) {
@@ -121,7 +101,6 @@ const getParentContext = (el) => {
       }
     }
 
-    // Check heading (first heading sibling or child near this path)
     if (!nearestHeading) {
       for (const child of node.children) {
         if (HEADING_TAGS.has(child.tagName.toLowerCase())) {
@@ -175,70 +154,31 @@ const captureTriggerContext = (el, kind) => {
   };
 };
 
-// ─── rrweb Event Filters ────────────────────────────────────────────
+// ─── Scan Execution ─────────────────────────────────────────────────
 
-const isInteractionEvent = (event) => {
-  if (event.type !== RRWEB_TYPE.INCREMENTAL) return false;
-  const source = event.data?.source;
-  return source === RRWEB_SOURCE.MOUSE_INTERACTION || source === RRWEB_SOURCE.INPUT;
-};
+const executeScan = () => {
+  clearTimers();
+  const trigger = state.pendingTrigger;
+  state.phase = "idle";
+  state.pendingTrigger = null;
 
-const isMutationEvent = (event) =>
-  event.type === RRWEB_TYPE.INCREMENTAL && event.data?.source === RRWEB_SOURCE.MUTATION;
+  if (DEBUG) console.debug("[browserwire] executeScan", trigger?.kind, "snapshot#", state.snapshotCount + 1);
 
-const isMetaEvent = (event) =>
-  event.type === RRWEB_TYPE.META;
-
-// ─── DOM Settle Detection ───────────────────────────────────────────
-
-const clearSettleTimers = () => {
-  if (discoveryState.settleTimer) {
-    clearTimeout(discoveryState.settleTimer);
-    discoveryState.settleTimer = null;
-  }
-  if (discoveryState.hardTimer) {
-    clearTimeout(discoveryState.hardTimer);
-    discoveryState.hardTimer = null;
-  }
-};
-
-/**
- * Resolve target element from rrweb MouseInteraction event.
- * rrweb stores a numeric id that maps to the mirrored node.
- * We try rrweb.mirror first, then fall back to document lookup.
- */
-const resolveTarget = (event) => {
-  const id = event.data?.id;
-  if (!id) return null;
-
-  // rrweb uses a mirror to map ids to elements
-  if (typeof rrweb !== "undefined" && rrweb.mirror && typeof rrweb.mirror.getNode === "function") {
-    return rrweb.mirror.getNode(id) || null;
-  }
-
-  return null;
-};
-
-const triggerScan = (trigger) => {
-  clearSettleTimers();
-  discoveryState.pendingSettle = false;
-  discoveryState.pendingTrigger = null;
-
-  // runSkeletonScan is defined in discovery.js, also injected as content script
   if (typeof runSkeletonScan !== "function") {
+    if (DEBUG) console.debug("[browserwire] runSkeletonScan unavailable — skipping");
     return;
   }
 
   try {
     const skeletonResult = runSkeletonScan();
-    discoveryState.snapshotCount += 1;
+    state.snapshotCount += 1;
 
     chrome.runtime.sendMessage({
       source: "content",
       type: "discovery_incremental",
       payload: {
-        snapshotId: `snap_${discoveryState.sessionId}_${discoveryState.snapshotCount}`,
-        sessionId: discoveryState.sessionId,
+        snapshotId: `snap_${state.sessionId}_${state.snapshotCount}`,
+        sessionId: state.sessionId,
         trigger,
         skeleton: skeletonResult.skeleton,
         pageText: skeletonResult.pageText,
@@ -246,113 +186,118 @@ const triggerScan = (trigger) => {
         title: skeletonResult.title,
         devicePixelRatio: skeletonResult.devicePixelRatio,
         capturedAt: skeletonResult.capturedAt,
-        pageState: skeletonResult.pageState
+        pageState: skeletonResult.pageState,
+        networkLog: drainNetworkLog()
       }
     }, () => {
       void chrome.runtime.lastError;
     });
   } catch (error) {
-    // Scan failed — log but don't crash
     console.warn("[browserwire] skeleton scan failed:", error);
   }
 };
 
-const onInteraction = (event) => {
-  if (!discoveryState.active) return;
+// ─── Settle Cycle (3-State Machine) ─────────────────────────────────
 
-  const target = resolveTarget(event);
-  const kind = event.data?.source === RRWEB_SOURCE.INPUT ? "input" : "click";
-  const trigger = captureTriggerContext(target, kind);
-
-  // Start watching for DOM settle
-  discoveryState.pendingSettle = true;
-  discoveryState.pendingTrigger = trigger;
-
-  // Reset settle timer
-  clearSettleTimers();
-  discoveryState.settleTimer = setTimeout(() => {
-    if (!discoveryState.pendingSettle) return;
-    if (isNetworkIdle()) {
-      triggerScan(discoveryState.pendingTrigger);
-    } else {
-      // Network still active — reschedule; hard timer is the backstop
-      discoveryState.settleTimer = setTimeout(() => {
-        if (discoveryState.pendingSettle) triggerScan(discoveryState.pendingTrigger);
-      }, SETTLE_DEBOUNCE_MS);
-    }
-  }, SETTLE_DEBOUNCE_MS);
-
-  // Hard timeout — scan even if mutations keep firing
-  discoveryState.hardTimer = setTimeout(() => {
-    if (discoveryState.pendingSettle) {
-      triggerScan(discoveryState.pendingTrigger);
-    }
-  }, SETTLE_HARD_TIMEOUT_MS);
+const onSettle = () => {
+  state.settleTimer = null;
+  if (state.phase !== "settling") return;
+  if (isNetworkIdle()) {
+    executeScan();
+  }
+  // else: network still active — wait for onNetworkIdle or hardTimer
 };
 
-const onMutation = () => {
-  if (!discoveryState.active || !discoveryState.pendingSettle) return;
+const forceScan = () => {
+  state.hardTimer = null;
+  if (state.phase !== "settling") return;
+  if (DEBUG) console.debug("[browserwire] hard cap reached — forcing scan");
+  executeScan();
+};
 
-  // DOM still changing — reset the settle debounce
-  if (discoveryState.settleTimer) {
-    clearTimeout(discoveryState.settleTimer);
+const beginSettleCycle = (trigger) => {
+  if (state.phase === "settling") {
+    // Already settling — update trigger, reset debounce, keep hard cap
+    state.pendingTrigger = trigger;
+    _pendingNetwork = 0;
+    if (state.settleTimer) clearTimeout(state.settleTimer);
+    state.settleTimer = setTimeout(onSettle, SETTLE_DEBOUNCE_MS);
+    return;
   }
 
-  discoveryState.settleTimer = setTimeout(() => {
-    if (!discoveryState.pendingSettle) return;
-    if (isNetworkIdle()) {
-      triggerScan(discoveryState.pendingTrigger);
-    } else {
-      // Network still active — reschedule; hard timer is the backstop
-      discoveryState.settleTimer = setTimeout(() => {
-        if (discoveryState.pendingSettle) triggerScan(discoveryState.pendingTrigger);
-      }, SETTLE_DEBOUNCE_MS);
-    }
-  }, SETTLE_DEBOUNCE_MS);
+  state.phase = "settling";
+  state.pendingTrigger = trigger;
+  _pendingNetwork = 0;
+  state.settleTimer = setTimeout(onSettle, SETTLE_DEBOUNCE_MS);
+  state.hardTimer = setTimeout(forceScan, SETTLE_HARD_TIMEOUT_MS);
 };
 
-const onNavigation = () => {
-  if (!discoveryState.active) return;
+// ─── Native Event Listeners ─────────────────────────────────────────
 
-  const trigger = captureTriggerContext(null, "navigation");
-  discoveryState.pendingSettle = true;
-  discoveryState.pendingTrigger = trigger;
+let _mutationObserver = null;
 
-  // After navigation, wait for DOM to settle before scanning
-  clearSettleTimers();
-  discoveryState.settleTimer = setTimeout(() => {
-    if (!discoveryState.pendingSettle) return;
-    if (isNetworkIdle()) {
-      triggerScan(discoveryState.pendingTrigger);
-    } else {
-      // Network still active — reschedule; hard timer is the backstop
-      discoveryState.settleTimer = setTimeout(() => {
-        if (discoveryState.pendingSettle) triggerScan(discoveryState.pendingTrigger);
-      }, SETTLE_DEBOUNCE_MS);
-    }
-  }, SETTLE_DEBOUNCE_MS);
+const onClickCapture = (event) => {
+  if (!state.active) return;
+  const trigger = captureTriggerContext(event.target, "click");
+  if (DEBUG) console.debug("[browserwire] click", trigger?.target?.text?.slice(0, 40));
+  beginSettleCycle(trigger);
+};
 
-  discoveryState.hardTimer = setTimeout(() => {
-    if (discoveryState.pendingSettle) {
-      triggerScan(discoveryState.pendingTrigger);
-    }
-  }, SETTLE_HARD_TIMEOUT_MS);
+const onInputCapture = (event) => {
+  if (!state.active) return;
+  const trigger = captureTriggerContext(event.target, "input");
+  if (DEBUG) console.debug("[browserwire] input", trigger?.target?.tag);
+  beginSettleCycle(trigger);
+};
+
+const onMutationBatch = () => {
+  if (state.phase !== "settling") return;
+  // DOM still changing — reset settle debounce (hard cap stays)
+  if (state.settleTimer) clearTimeout(state.settleTimer);
+  state.settleTimer = setTimeout(onSettle, SETTLE_DEBOUNCE_MS);
+};
+
+const attachListeners = () => {
+  document.addEventListener("click", onClickCapture, true);
+  document.addEventListener("input", onInputCapture, true);
+
+  _mutationObserver = new MutationObserver(onMutationBatch);
+  _mutationObserver.observe(document.documentElement, {
+    childList: true,
+    subtree: true
+  });
+};
+
+const detachListeners = () => {
+  document.removeEventListener("click", onClickCapture, true);
+  document.removeEventListener("input", onInputCapture, true);
+
+  if (_mutationObserver) {
+    _mutationObserver.disconnect();
+    _mutationObserver = null;
+  }
 };
 
 // ─── SPA Navigation Detection ───────────────────────────────────────
 
-window.addEventListener("popstate", () => {
-  if (discoveryState.active && window.location.href !== discoveryState.lastUrl) {
-    discoveryState.lastUrl = window.location.href;
-    onNavigation();
-  }
-});
+const handleNavigation = () => {
+  if (!state.active) return;
+  if (window.location.href === state.lastUrl) return;
+  state.lastUrl = window.location.href;
+  const trigger = captureTriggerContext(null, "navigation");
+  if (DEBUG) console.debug("[browserwire] navigation", window.location.href);
+  beginSettleCycle(trigger);
+};
 
-window.addEventListener("hashchange", () => {
-  if (discoveryState.active && window.location.href !== discoveryState.lastUrl) {
-    discoveryState.lastUrl = window.location.href;
-    onNavigation();
-  }
+window.addEventListener("popstate", handleNavigation);
+window.addEventListener("hashchange", handleNavigation);
+
+// Listen for pushState/replaceState from the MAIN world hook.
+window.addEventListener("message", (event) => {
+  if (event.source !== window) return;
+  const msg = event.data;
+  if (!msg || msg.source !== "browserwire-network-hook" || msg.type !== "pushstate") return;
+  handleNavigation();
 });
 
 // ─── Session Lifecycle ──────────────────────────────────────────────
@@ -362,93 +307,86 @@ const startExploring = (sessionId) => {
     return { ok: false, error: "invalid_session" };
   }
 
-  if (discoveryState.active && discoveryState.sessionId === sessionId) {
+  if (state.active && state.sessionId === sessionId) {
     return { ok: true, alreadyRunning: true };
   }
 
-  if (discoveryState.active) {
+  if (state.active) {
     stopExploring();
   }
 
-  const recordApi = getRecordApi();
-  if (!recordApi) {
-    return { ok: false, error: "rrweb_unavailable" };
-  }
+  state.active = true;
+  _pendingNetwork = 0;
+  state.sessionId = sessionId;
+  state.snapshotCount = 0;
+  state.lastUrl = window.location.href;
+  state.phase = "idle";
+  state.pendingTrigger = null;
 
-  try {
-    discoveryState.active = true;
-    hookNetwork(); // one-time wrapping of fetch/XHR
-    _pendingNetwork = 0; // reset counter at session start
-    discoveryState.sessionId = sessionId;
-    discoveryState.snapshotCount = 0;
-    discoveryState.lastUrl = window.location.href;
-    discoveryState.pendingSettle = false;
-    discoveryState.pendingTrigger = null;
+  attachListeners();
 
-    // Start rrweb recording — only used for event detection, not sent to server
-    discoveryState.stopRecording = recordApi.record({
-      emit(event) {
-        if (!discoveryState.active) return;
+  // Kick off initial settle cycle — the normal state machine produces the first snapshot
+  beginSettleCycle(captureTriggerContext(null, "initial"));
 
-        if (isInteractionEvent(event)) {
-          onInteraction(event);
-        }
-        if (isMutationEvent(event)) {
-          onMutation();
-        }
-        if (isMetaEvent(event)) {
-          // URL/title change detected by rrweb
-          if (window.location.href !== discoveryState.lastUrl) {
-            discoveryState.lastUrl = window.location.href;
-            onNavigation();
-          }
-        }
-      }
-    });
-
-    // Initial scan — wait for readyState=complete + paint-flush buffer
-    const initialTrigger = captureTriggerContext(null, "initial");
-    const doInitialScan = () => setTimeout(() => triggerScan(initialTrigger), 200);
-    if (document.readyState === 'complete') {
-      doInitialScan();
-    } else {
-      document.addEventListener('readystatechange', function onReady() {
-        if (document.readyState === 'complete') {
-          document.removeEventListener('readystatechange', onReady);
-          doInitialScan();
-        }
-      });
-    }
-
-    return { ok: true, sessionId };
-  } catch (error) {
-    stopExploring();
-    return {
-      ok: false,
-      error: error instanceof Error ? error.message : "explore_start_failed"
-    };
-  }
+  return { ok: true, sessionId };
 };
 
 const stopExploring = () => {
-  clearSettleTimers();
+  clearTimers();
+  detachListeners();
 
-  if (typeof discoveryState.stopRecording === "function") {
-    discoveryState.stopRecording();
+  state.active = false;
+  state.sessionId = null;
+  state.snapshotCount = 0;
+  state.phase = "idle";
+  state.pendingTrigger = null;
+};
+
+// ─── API Request Matching ───────────────────────────────────────────
+
+const matchesApiRequest = (entry, apiRequest) => {
+  if (entry.method !== apiRequest.method) return false;
+
+  try {
+    const pathname = new URL(entry.url, window.location.origin).pathname;
+    const regexPath = apiRequest.pathPattern
+      .replace(/:[a-zA-Z_][a-zA-Z0-9_]*/g, '[^/]+')
+      .replace(/\//g, '\\/');
+    if (!new RegExp(`^${regexPath}$`).test(pathname)) return false;
+  } catch { return false; }
+
+  const matchOn = apiRequest.matchOn;
+  if (!matchOn) return true;
+
+  if (matchOn.operationName) {
+    const opName = entry.requestBody?.operationName;
+    if (opName !== matchOn.operationName) return false;
   }
 
-  discoveryState.active = false;
-  discoveryState.sessionId = null;
-  discoveryState.snapshotCount = 0;
-  discoveryState.stopRecording = null;
-  discoveryState.pendingSettle = false;
-  discoveryState.pendingTrigger = null;
+  if (matchOn.queryParams && Array.isArray(matchOn.queryParams)) {
+    const entryParams = entry.queryParams || {};
+    for (const key of matchOn.queryParams) {
+      if (!(key in entryParams)) return false;
+    }
+  }
+
+  return true;
 };
 
 // ─── Message Listener ───────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || message.source !== "background") {
+    return false;
+  }
+
+  if (message.command === "get_network_log") {
+    const apiRequest = message.apiRequest;
+    let entries = _networkLog.splice(0);
+    if (apiRequest) {
+      entries = entries.filter(e => matchesApiRequest(e, apiRequest));
+    }
+    sendResponse({ ok: true, entries });
     return false;
   }
 
@@ -463,7 +401,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return false;
   }
 
-  // Keep legacy discovery_scan for backward compat (called on initial scan too)
   if (message.command === "discovery_scan") {
     try {
       if (typeof runDiscoveryScan === "function") {
@@ -485,7 +422,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 window.addEventListener("beforeunload", () => {
-  if (discoveryState.active) {
+  if (state.active) {
     stopExploring();
   }
 });

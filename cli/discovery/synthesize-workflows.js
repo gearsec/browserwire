@@ -34,6 +34,8 @@ You will receive:
 - Fill fields (interactionKind=type → fill), select dropdowns (interactionKind=select → select), submit (form-submit click → submit, toggle → click)
 - Provide outcomes with success/failure signals
 - Examples: create_event, register_for_event, update_profile
+- **Single-action writes are valid**: A write workflow can be as simple as navigate → click. Any individually useful action that causes a mutation (delete, approve, reject, archive, toggle publish, mark complete) should be its own workflow.
+- Examples of single-action writes: delete_event (navigate → click), approve_request (navigate → click), toggle_published (navigate → click), archive_item (navigate → click)
 
 **MIXED workflows** (kind: "mixed") — interact then read:
 - Navigate, interact (search/filter), then read_view for results
@@ -45,8 +47,10 @@ You will receive:
 - Only reference actionIds from actions[] and viewIds from views[]
 - read_view MUST be the LAST step for read/mixed workflows
 - For write: infer step type from interactionKind: type→fill, select→select, form-submit click→submit, toggle→click
-- Map every workflow input to exactly one fill/select step via inputParam
-- Max 8 workflows — prioritize the most useful
+- Map every workflow input to exactly one fill/select step via inputParam, OR to a navigate URL :param — both are valid
+- Every :param placeholder in a navigate URL MUST have a corresponding entry in inputs[] (e.g., /events/:id requires an input named "id")
+- Include ALL useful workflows — every action that a developer would want to call as an API should become a workflow
+- Skip cosmetic/utility actions that are not useful as APIs (e.g., toggle dark mode, expand sidebar, close modal, scroll to top)
 - URL: use routePattern from pages[]; replace :param with the input variable name
 
 ## Output format (JSON only, no prose)
@@ -78,6 +82,22 @@ You will receive:
       ],
       "outcomes": {
         "success": { "kind": "url_change", "value": "/events/[0-9]+" },
+        "failure": { "kind": "element_appears", "value": ".error-message, .alert-danger" }
+      }
+    },
+    {
+      "name": "delete_event",
+      "kind": "write",
+      "description": "Deletes an event by clicking its delete button",
+      "inputs": [
+        { "name": "id", "type": "string", "required": true, "description": "Event ID" }
+      ],
+      "steps": [
+        { "type": "navigate", "url": "/events/:id" },
+        { "type": "click", "actionId": "action_click_delete_event" }
+      ],
+      "outcomes": {
+        "success": { "kind": "url_change", "value": "/events" },
         "failure": { "kind": "element_appears", "value": ".error-message, .alert-danger" }
       }
     }
@@ -149,17 +169,25 @@ const validateWorkflow = (raw, actionIds, viewIds, capturedAt) => {
     }
   }
 
-  // For write: require at least one fill/select + submit/click
+  // For write: require at least one interaction step
   if (raw.kind === "write") {
-    const hasFillOrSelect = steps.some((s) => s.type === "fill" || s.type === "select");
-    const hasSubmitOrClick = steps.some((s) => s.type === "submit" || s.type === "click");
-    if (!hasFillOrSelect || !hasSubmitOrClick) return null;
+    const hasInteraction = steps.some((s) =>
+      ["fill", "select", "click", "submit"].includes(s.type)
+    );
+    if (!hasInteraction) return null;
   }
 
-  // Validate inputs — only keep inputs referenced in a step
+  // Validate inputs — keep inputs referenced by step inputParam OR navigate URL :params
   const referencedParams = new Set(
     steps.filter((s) => s.inputParam).map((s) => s.inputParam)
   );
+  for (const step of steps) {
+    if (step.type === "navigate" && step.url) {
+      for (const match of step.url.matchAll(/:([a-zA-Z_][a-zA-Z0-9_]*)/g)) {
+        referencedParams.add(match[1]);
+      }
+    }
+  }
 
   const inputs = (Array.isArray(raw.inputs) ? raw.inputs : [])
     .filter((i) => i && typeof i.name === "string" && referencedParams.has(i.name))
@@ -287,8 +315,7 @@ export const synthesizeWorkflows = async (manifest) => {
 
   const workflows = rawWorkflows
     .map((raw) => validateWorkflow(raw, actionIds, viewIds, capturedAt))
-    .filter(Boolean)
-    .slice(0, 8);
+    .filter(Boolean);
 
   console.log(`[browserwire-cli] workflow synthesis: ${workflows.length} workflows synthesized (${rawWorkflows.length} raw)`);
   return workflows;

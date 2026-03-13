@@ -36,6 +36,45 @@ For each view, provide CSS selectors for data extraction:
 - itemSelector: for lists, CSS selector for each repeating item (relative to container)
 - fields: for each data field, a CSS selector relative to the item/container
 
+## Network API Context
+
+You may receive a summary of API requests/responses the web app made during this interaction, including request bodies and query parameters.
+
+Use this to:
+- Identify which API call populates each view — include as "apiRequest" on the view
+- Discover entity IDs not visible in the DOM (guild_id, channel_id, user_id, etc.)
+- Find fields in API responses that aren't rendered in the UI
+
+For each view, if you can determine the backing API call, include an "apiRequest" object:
+
+For REST endpoints:
+  "apiRequest": { "method": "GET", "pathPattern": "/api/v9/guilds/:id/channels" }
+
+For REST with important query params:
+  "apiRequest": { "method": "GET", "pathPattern": "/api/search", "matchOn": { "queryParams": ["type", "category"] } }
+
+For GraphQL (CRITICAL — same /graphql endpoint, different operations):
+  "apiRequest": { "method": "POST", "pathPattern": "/graphql", "matchOn": { "operationName": "GetChannels" } }
+
+When a view has an apiRequest, also include "apiFields" — a mapping from your view field names to the JSON path in the API response:
+
+  "apiFields": {
+    "username": "username",
+    "status": "activities[0].state",
+    "avatar_url": "avatar"
+  }
+
+Rules for apiFields:
+- Keys must match field names in the view's "fields" array
+- Values are dot-notation JSON paths into the API response body
+- For arrays, use [0] to indicate the first element shape
+- Only include fields you can confirm exist in the API response shape shown
+
+Rules:
+- Replace specific IDs in paths with :id placeholders
+- For GraphQL endpoints, you MUST include matchOn.operationName — path alone is not sufficient
+- For REST endpoints where query params determine the response shape, include matchOn.queryParams
+
 ## Pages (Routes)
 
 What page/route is this? Identify:
@@ -75,6 +114,8 @@ Respond with ONLY valid JSON (no markdown fences, no explanation):
       "fields": [
         { "name": "field_name", "type": "string|number|boolean|date", "selector": "CSS selector relative to item/container" }
       ],
+      "apiRequest": { "method": "string", "pathPattern": "string", "matchOn": { "operationName?": "string", "queryParams?": ["string"] } },
+      "apiFields": { "field_name": "json.path.in.response", "...": "..." },
       "entityScanIds": [/* numbers: s-IDs of elements within this view's data region */]
     }
   ],
@@ -155,6 +196,62 @@ For each action, provide a "locator" field with a semantic selector:
 - A button labeled "Submit" → //button[normalize-space()='Submit'] or button[type='submit']
 - Use name, aria-label, data-testid, placeholder, or visible text before resorting to structural selectors
 - If no reliable semantic locator can be determined, omit the locator field entirely`;
+
+// ---------------------------------------------------------------------------
+// Network context builder
+// ---------------------------------------------------------------------------
+
+const describeShape = (obj, maxDepth, depth = 0) => {
+  if (obj === null) return "null";
+  if (Array.isArray(obj)) return obj.length ? `[${describeShape(obj[0], maxDepth, depth)}]` : "[]";
+  if (typeof obj !== "object") return typeof obj;
+  if (depth >= maxDepth) return "{...}";
+  const keys = Object.keys(obj).slice(0, 12);
+  const parts = keys.map(k => `${k}: ${describeShape(obj[k], maxDepth, depth + 1)}`);
+  return `{ ${parts.join(", ")}${Object.keys(obj).length > 12 ? ", ..." : ""} }`;
+};
+
+const buildNetworkContext = (networkLog) => {
+  if (!networkLog?.length) return "";
+
+  const grouped = new Map();
+  for (const entry of networkLog) {
+    try {
+      const path = new URL(entry.url).pathname
+        .replace(/\/[0-9a-f]{8,}(?:-[0-9a-f]{4,}){0,4}/gi, '/:id')
+        .replace(/\/\d+/g, '/:id');
+      const opName = entry.requestBody?.operationName;
+      const key = opName ? `${entry.method} ${path} [${opName}]` : `${entry.method} ${path}`;
+      if (!grouped.has(key)) grouped.set(key, entry);
+    } catch {}
+  }
+
+  const lines = ["API requests observed during this interaction (fetch/XHR only):"];
+  let budget = 2300;
+  for (const [pattern, sample] of grouped) {
+    let line = `- ${pattern} → ${sample.status}`;
+
+    if (sample.queryParams && Object.keys(sample.queryParams).length > 0) {
+      const params = Object.keys(sample.queryParams).slice(0, 8).join(", ");
+      line += `\n  Query params: ${params}`;
+    }
+
+    if (sample.requestBody != null) {
+      line += `\n  Request body: ${describeShape(sample.requestBody, 2)}`;
+    }
+
+    if (sample.responseBody != null) {
+      line += `\n  Response shape: ${describeShape(sample.responseBody, 2)}`;
+      if (Array.isArray(sample.responseBody))
+        line += ` (${sample.responseBody.length} items)`;
+    }
+
+    if (budget - line.length < 0) break;
+    budget -= line.length;
+    lines.push(line);
+  }
+  return lines.join("\n");
+};
 
 // ---------------------------------------------------------------------------
 // HTML skeleton builder
@@ -319,6 +416,33 @@ const validatePerception = (rawResponse, validScanIds) => {
         ? v.entityScanIds.filter((id) => typeof id === "number" && validScanIds.has(id))
         : [];
 
+      // Parse optional apiRequest
+      let apiRequest = null;
+      if (v.apiRequest && typeof v.apiRequest === "object") {
+        const ar = v.apiRequest;
+        if (typeof ar.method === "string" && typeof ar.pathPattern === "string") {
+          apiRequest = { method: ar.method, pathPattern: ar.pathPattern };
+          if (ar.matchOn && typeof ar.matchOn === "object") {
+            const matchOn = {};
+            if (typeof ar.matchOn.operationName === "string") matchOn.operationName = ar.matchOn.operationName;
+            if (Array.isArray(ar.matchOn.queryParams)) matchOn.queryParams = ar.matchOn.queryParams.filter(p => typeof p === "string");
+            if (Object.keys(matchOn).length > 0) apiRequest.matchOn = matchOn;
+          }
+        }
+      }
+
+      // Parse optional apiFields (mapping from view field names to JSON paths in API response)
+      let apiFields = null;
+      if (apiRequest && v.apiFields && typeof v.apiFields === "object" && !Array.isArray(v.apiFields)) {
+        apiFields = {};
+        for (const [fieldName, jsonPath] of Object.entries(v.apiFields)) {
+          if (typeof fieldName === "string" && typeof jsonPath === "string") {
+            apiFields[fieldName] = jsonPath;
+          }
+        }
+        if (Object.keys(apiFields).length === 0) apiFields = null;
+      }
+
       views.push({
         name: v.name,
         description: typeof v.description === "string" ? v.description : "",
@@ -327,6 +451,8 @@ const validatePerception = (rawResponse, validScanIds) => {
         containerSelector: v.containerSelector,
         itemSelector: typeof v.itemSelector === "string" ? v.itemSelector : null,
         fields: validFields,
+        ...(apiRequest ? { apiRequest } : {}),
+        ...(apiFields ? { apiFields } : {}),
         entityScanIds
       });
     }
@@ -418,7 +544,7 @@ export const perceiveSnapshot = async (payload) => {
     return null;
   }
 
-  const { skeleton = [], screenshot, pageText, url, title } = payload;
+  const { skeleton = [], screenshot, pageText, url, title, networkLog } = payload;
 
   if (skeleton.length === 0) {
     console.warn("[browserwire-cli] empty skeleton, skipping perception");
@@ -428,10 +554,13 @@ export const perceiveSnapshot = async (payload) => {
   const htmlSkeleton = buildHtmlSkeleton(skeleton);
   const validScanIds = new Set(skeleton.map((e) => e.scanId));
 
+  const networkContext = buildNetworkContext(networkLog);
+
   const skeletonKB = Math.round(htmlSkeleton.length / 1024 * 10) / 10;
   console.log(
     `[browserwire-cli] perceiving: ${skeleton.length} skeleton elements (${skeletonKB}KB html), ` +
-    `screenshot=${screenshot ? "yes" : "no"}`
+    `screenshot=${screenshot ? "yes" : "no"}` +
+    (networkLog?.length ? `, networkLog=${networkLog.length}` : "")
   );
 
   const context = [
@@ -440,7 +569,11 @@ export const perceiveSnapshot = async (payload) => {
     pageText ? `\nPage text (excerpt): ${pageText.slice(0, 500)}` : ""
   ].filter(Boolean).join("\n");
 
-  const userContent = `${context}\n\nHTML Skeleton:\n${htmlSkeleton}`;
+  const userContent = [
+    context,
+    `\nHTML Skeleton:\n${htmlSkeleton}`,
+    networkContext ? `\n${networkContext}` : ""
+  ].filter(Boolean).join("\n");
 
   let rawResponse;
   try {

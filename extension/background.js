@@ -389,6 +389,31 @@ const startExploring = async () => {
 
   const sessionId = crypto.randomUUID();
 
+  // Reload the tab so network requests from page load are captured in the first snapshot
+  try {
+    await chrome.tabs.reload(tab.id);
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        chrome.tabs.onUpdated.removeListener(listener);
+        reject(new Error("tab_reload_timeout"));
+      }, 15000);
+      const listener = (tabId, changeInfo) => {
+        if (tabId === tab.id && changeInfo.status === "complete") {
+          chrome.tabs.onUpdated.removeListener(listener);
+          clearTimeout(timeout);
+          resolve();
+        }
+      };
+      chrome.tabs.onUpdated.addListener(listener);
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "tab_reload_failed",
+      state: getState()
+    };
+  }
+
   let response;
   try {
     response = await sendTabMessage(tab.id, {
@@ -579,6 +604,16 @@ const handleDiscoveryIncremental = async (message, sender) => {
     );
   } catch (error) {
     addLog(`screenshot capture failed: ${error.message}`);
+  }
+
+  // Size guard for network log — truncate response bodies if too large
+  if (payload.networkLog) {
+    const logStr = JSON.stringify(payload.networkLog);
+    if (logStr.length > 200_000) {
+      payload.networkLog = payload.networkLog.map(e => ({
+        ...e, responseBody: null, bodyTruncated: true
+      }));
+    }
   }
 
   // Buffer locally — do NOT forward to backend yet
@@ -1244,6 +1279,66 @@ const waitForNavigation = async (tabId, timeoutMs = 10000) => {
 };
 
 /**
+ * Walk a dot-notation JSON path (e.g. "user.name", "activities[0].state") into an object.
+ */
+const getByJsonPath = (obj, path) => {
+  if (obj == null || !path) return undefined;
+  const segments = path.replace(/\[(\d+)\]/g, '.$1').split('.');
+  let current = obj;
+  for (const seg of segments) {
+    if (current == null) return undefined;
+    current = current[seg];
+  }
+  return current;
+};
+
+/**
+ * Extract specific fields from API response data using apiFields mapping.
+ * For arrays, extracts the fields from each element.
+ */
+const extractApiFields = (data, apiFields) => {
+  if (!apiFields || typeof apiFields !== 'object') return data;
+
+  const extractOne = (item) => {
+    const row = {};
+    for (const [fieldName, jsonPath] of Object.entries(apiFields)) {
+      const val = getByJsonPath(item, jsonPath);
+      if (val !== undefined) row[fieldName] = val;
+    }
+    return row;
+  };
+
+  if (Array.isArray(data)) return data.map(extractOne);
+  return extractOne(data);
+};
+
+/**
+ * Read API data from the content script's network log, matching by request signature.
+ * If apiFields is provided, extracts only the mapped fields from the response.
+ */
+const readNetworkData = async (tabId, apiRequest, apiFields) => {
+  try {
+    const result = await chrome.tabs.sendMessage(tabId, {
+      source: "background",
+      command: "get_network_log",
+      apiRequest
+    });
+    if (result?.ok && result.entries?.length > 0) {
+      const bodies = result.entries.map(e => e.responseBody).filter(Boolean);
+      if (bodies.length === 0) return null;
+      let data;
+      if (bodies.length === 1) data = bodies[0];
+      else if (Array.isArray(bodies[0])) data = bodies.flat();
+      else data = bodies;
+
+      if (apiFields) return extractApiFields(data, apiFields);
+      return data;
+    }
+  } catch {}
+  return null;
+};
+
+/**
  * Execute a multi-step workflow in a given tab.
  * Returns { ok, data?, outcome?, error?, message? } directly.
  */
@@ -1254,12 +1349,32 @@ const runWorkflowSteps = async (tabId, baseOrigin, steps, outcomes, inputs) => {
   for (const step of (steps || [])) {
     try {
       if (step.type === "navigate") {
-        await navigateTabAndWait(tabId, step.url, baseOrigin);
+        // Replace :param placeholders with input values
+        const url = step.url.replace(/:([a-zA-Z_][a-zA-Z0-9_]*)/g, (match, param) => {
+          const value = inputs?.[param];
+          return value != null ? encodeURIComponent(value) : match;
+        });
+        await navigateTabAndWait(tabId, url, baseOrigin);
         continue;
       }
 
       if (step.type === "read_view") {
         hasReadView = true;
+
+        // Try network-first if apiRequest signature is available
+        if (step.viewConfig?.apiRequest) {
+          // Wait for network to settle before reading
+          await new Promise(r => setTimeout(r, 1000));
+          const apiData = await readNetworkData(tabId, step.viewConfig.apiRequest, step.viewConfig.apiFields);
+          if (apiData != null) {
+            console.log("[browserwire] read_view: got data from network API");
+            lastReadData = apiData;
+            continue;
+          }
+          console.log("[browserwire] read_view: no network match, falling back to DOM");
+        }
+
+        // DOM fallback (existing logic)
         const viewConfig = {
           containerLocator: step.viewConfig?.containerLocator || [],
           itemLocator: step.viewConfig?.itemLocator || null,

@@ -291,7 +291,17 @@ export const startServer = async ({
                   url: s.url,
                   title: s.title,
                   capturedAt: s.capturedAt,
-                  stats: s.stats
+                  stats: s.stats,
+                  skeletonCount: s.skeleton?.length ?? 0,
+                  networkLog: s.networkLog || [],
+                  viewCount: s.views?.length ?? 0,
+                  views: (s.views || []).map(v => ({
+                    id: v.id,
+                    name: v.name,
+                    apiRequest: v.apiRequest || null,
+                    apiFields: v.apiFields || null,
+                    fieldCount: v.fields?.length ?? 0
+                  }))
                 }))
               }, null, 2),
               "utf8"
@@ -422,17 +432,15 @@ export const startServer = async ({
                 });
             }
 
-            if (debug) {
-              mkdir(snapDir, { recursive: true })
-                .then(() => writeFile(
-                  resolve(snapDir, `${snapName}.json`),
-                  JSON.stringify({ ...payload, screenshot: payload.screenshot ? "<base64>" : null }, null, 2),
-                  "utf8"
-                ))
-                .catch((err) => {
-                  console.error(`[browserwire-cli] failed to write snapshot:`, err);
-                });
-            }
+            mkdir(snapDir, { recursive: true })
+              .then(() => writeFile(
+                resolve(snapDir, `${snapName}.json`),
+                JSON.stringify({ ...payload, screenshot: payload.screenshot ? "<base64>" : null }, null, 2),
+                "utf8"
+              ))
+              .catch((err) => {
+                console.error(`[browserwire-cli] failed to write snapshot:`, err);
+              });
           })
           .catch((error) => {
             console.error(`[browserwire-cli] snapshot processing failed:`, error);
