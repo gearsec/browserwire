@@ -6,3 +6,4 @@ generated/
 .DS_Store
 *.log
 dist/
+.claude/
