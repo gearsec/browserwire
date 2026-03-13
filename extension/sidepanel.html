@@ -80,19 +80,13 @@
         border-color: #256b28;
       }
 
-      button.checkpoint {
-        background: #5c6bc0;
-        color: #fff;
-        border-color: #4a57a8;
-      }
-
       button.danger {
         background: #b3261e;
         color: #fff;
         border-color: #8e1e18;
       }
 
-      #checkpointNote {
+      #sessionNote {
         width: 100%;
         border: 1px solid var(--border);
         border-radius: 8px;
@@ -105,42 +99,8 @@
         display: none;
       }
 
-      #checkpointNote.visible {
+      #sessionNote.visible {
         display: block;
-      }
-
-      #checkpointOverlay {
-        display: none;
-        position: fixed;
-        inset: 0;
-        background: rgba(255, 250, 240, 0.9);
-        z-index: 999;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        gap: 12px;
-      }
-
-      #checkpointOverlay.visible {
-        display: flex;
-      }
-
-      .overlay-spinner {
-        width: 32px;
-        height: 32px;
-        border: 3px solid var(--border);
-        border-top-color: #5c6bc0;
-        border-radius: 50%;
-        animation: spin 0.8s linear infinite;
-      }
-
-      @keyframes spin {
-        to { transform: rotate(360deg); }
-      }
-
-      .overlay-text {
-        font-size: 14px;
-        color: var(--muted);
       }
 
       #backendStatus,
@@ -203,11 +163,10 @@
       #apiStatus {
         margin: 8px 0;
         padding: 8px;
-        background: #e8f5e9;
+        background: #fff;
         border: 1px solid var(--border);
         border-radius: 8px;
         font-size: 13px;
-        display: none;
       }
 
       #apiStatus a {
@@ -232,10 +191,7 @@
           <button id="startExploring" class="primary">Start Exploring</button>
           <button id="stopExploring" class="danger">Stop Exploring</button>
         </div>
-        <div class="row" id="checkpointRow" style="display:none">
-          <button id="checkpoint" class="checkpoint">Checkpoint</button>
-        </div>
-        <textarea id="checkpointNote" placeholder="Optional: describe what you just explored..."></textarea>
+        <textarea id="sessionNote" placeholder="Optional: describe what you explored..."></textarea>
         <div id="backendStatus" class="warn">Backend: Disconnected</div>
         <div id="sessionStatus" class="warn">Session: Idle</div>
         <div id="siteOrigin" style="display:none; margin:4px 0; font-size:13px; color:var(--muted)"></div>
@@ -261,17 +217,16 @@
             <span class="stat-value" id="statBuffered">0</span>
           </div>
         </div>
-        <div id="apiStatus"></div>
+        <div id="processingStatus" class="stats">
+          <div style="font-weight:bold; margin-bottom:4px;">Backend Processing</div>
+          <div id="processingList"></div>
+        </div>
+        <div id="apiStatus">API docs: <a href="http://127.0.0.1:8787/api/docs" target="_blank">http://127.0.0.1:8787/api/docs</a></div>
 
         <pre id="log" aria-live="polite"></pre>
       </div>
     </div>
 
-    <!-- Blocking overlay shown while checkpoint is processing -->
-    <div id="checkpointOverlay">
-      <div class="overlay-spinner"></div>
-      <div class="overlay-text">Processing checkpoint…</div>
-    </div>
     <script type="module" src="sidepanel.js"></script>
   </body>
 </html>

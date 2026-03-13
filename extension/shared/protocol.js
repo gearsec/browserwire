@@ -19,8 +19,7 @@ export const MessageType = Object.freeze({
   READ_ENTITY: "read_entity",
   READ_RESULT: "read_result",
   MANIFEST_READY: "manifest_ready",
-  CHECKPOINT: "checkpoint",
-  CHECKPOINT_COMPLETE: "checkpoint_complete",
+  BATCH_PROCESSING_STATUS: "batch_processing_status",
   EXECUTE_WORKFLOW: "execute_workflow",
   WORKFLOW_RESULT: "workflow_result"
 });

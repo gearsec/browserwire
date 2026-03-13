@@ -23,6 +23,9 @@ const CLIENT_STATUS_INTERVAL_MS = 15000;
 /** Active discovery sessions keyed by sessionId */
 const activeSessions = new Map();
 
+/** Per-origin finalization queue to serialize manifest writes */
+const originQueues = new Map();
+
 /** Module-level state shared between HTTP and WS */
 const manifestStore = new ManifestStore();
 const siteManifests = new Map();   // origin → manifest (in-memory cache)
@@ -200,6 +203,8 @@ export const startServer = async ({
       if (message.type === MessageType.DISCOVERY_SESSION_STOP) {
         const payload = message.payload || {};
         const sessionId = payload.sessionId;
+        const batchId = payload.batchId || null;
+        const note = payload.note || null;
         const session = activeSessions.get(sessionId);
 
         if (!session) {
@@ -216,160 +221,164 @@ export const startServer = async ({
           return;
         }
 
-        console.log(`[browserwire-cli] session stopping: ${sessionId}`);
+        if (note) session.note = note;
 
-        // Process any remaining buffered snapshots sent with the stop payload
-        const remainingSnapshots = Array.isArray(payload.pendingSnapshots) ? payload.pendingSnapshots : [];
-        const finalizeSession = remainingSnapshots.length > 0
-          ? (async () => {
-              console.log(`[browserwire-cli] processing ${remainingSnapshots.length} remaining buffered snapshots before finalize`);
-              for (const snap of remainingSnapshots) {
-                await session.addSnapshot(snap);
-              }
-              return session.finalize();
-            })()
-          : session.finalize();
+        console.log(`[browserwire-cli] session stopping: ${sessionId}${batchId ? ` batchId=${batchId}` : ""}`);
 
-        finalizeSession
-          .then((result) => {
-            const { manifest, draftManifest, enrichedManifest } = result;
+        const origin = session._siteOrigin;
 
-            if (!manifest) {
-              console.log(`[browserwire-cli] session ${sessionId} produced no manifest`);
-              return;
-            }
-
-            // Write output files
-            const sessionDir = resolve(process.cwd(), `logs/session-${sessionId}`);
-
-            return mkdir(sessionDir, { recursive: true })
-              .then(() => Promise.all([
-                writeFile(
-                  resolve(sessionDir, "manifest-draft.json"),
-                  JSON.stringify(draftManifest || manifest, null, 2),
-                  "utf8"
-                ),
-                writeFile(
-                  resolve(sessionDir, "manifest.json"),
-                  JSON.stringify(manifest, null, 2),
-                  "utf8"
-                ),
-                writeFile(
-                  resolve(sessionDir, "session.json"),
-                  JSON.stringify({
-                    sessionId: session.sessionId,
-                    site: session.site,
-                    startedAt: session.startedAt,
-                    stoppedAt: new Date().toISOString(),
-                    snapshotCount: session.snapshots.length,
-                    snapshots: session.snapshots.map((s) => ({
-                      snapshotId: s.snapshotId,
-                      trigger: s.trigger,
-                      url: s.url,
-                      title: s.title,
-                      capturedAt: s.capturedAt,
-                      stats: s.stats
-                    }))
-                  }, null, 2),
-                  "utf8"
-                )
-              ]))
-              .then(async () => {
-                console.log(`[browserwire-cli] session ${sessionId} output written to ${sessionDir}`);
-
-                // Save to site-centric manifest store
-                const origin = session._siteOrigin;
-                if (origin) {
-                  siteManifests.set(origin, enrichedManifest);
-                  await manifestStore.save(origin, enrichedManifest, sessionId);
-                  const slug = ManifestStore.originSlug(origin);
-                  console.log(`[browserwire-cli] REST API ready at http://${host}:${port}/api/sites/${slug}/docs`);
-                }
-
-                // Send manifest to extension immediately so sidepanel can render
-                socket.send(JSON.stringify(createEnvelope(
-                  MessageType.MANIFEST_READY,
-                  { sessionId, manifest: enrichedManifest }
-                )));
-              });
-          })
-          .then(() => {
-            socket.send(
-              JSON.stringify(
-                createEnvelope(
-                  MessageType.DISCOVERY_SESSION_STATUS,
-                  { ...session.getStats(), finalized: true },
-                  message.requestId
-                )
-              )
-            );
-          })
-          .catch((error) => {
-            console.error(`[browserwire-cli] session finalization failed:`, error);
-          })
-          .finally(() => {
-            activeSessions.delete(sessionId);
-          });
-
-        return;
-      }
-
-      if (message.type === MessageType.CHECKPOINT) {
-        const payload = message.payload || {};
-        const { sessionId, snapshots = [], note } = payload;
-        const session = activeSessions.get(sessionId);
-
-        if (!session) {
-          console.warn(`[browserwire-cli] checkpoint for unknown session: ${sessionId}`);
-          socket.send(JSON.stringify(createEnvelope(MessageType.ERROR, {
-            code: "unknown_session", message: `Session ${sessionId} not found`
-          }, message.requestId)));
-          return;
-        }
-
-        console.log(`[browserwire-cli] checkpoint: sessionId=${sessionId} snapshots=${snapshots.length}${note ? ` note="${note}"` : ""}`);
-
-        const processCheckpoint = async () => {
-          for (const snap of snapshots) {
-            await session.addSnapshot(snap);
+        // Helper: the actual finalization work for this session
+        const doFinalize = async () => {
+          // Notify extension that processing is now active
+          if (batchId) {
+            socket.send(JSON.stringify(createEnvelope(
+              MessageType.BATCH_PROCESSING_STATUS,
+              { batchId, sessionId, status: "processing" }
+            )));
           }
-          return session.compileCheckpoint(note);
+
+          // Re-seed with the latest manifest so merges are cumulative
+          if (origin) {
+            const freshPrior = siteManifests.get(origin);
+            if (freshPrior) session.seedWithManifest(freshPrior);
+          }
+
+          // Process any remaining buffered snapshots sent with the stop payload
+          const remainingSnapshots = Array.isArray(payload.pendingSnapshots) ? payload.pendingSnapshots : [];
+          if (remainingSnapshots.length > 0) {
+            console.log(`[browserwire-cli] processing ${remainingSnapshots.length} remaining buffered snapshots before finalize`);
+            for (const snap of remainingSnapshots) {
+              await session.addSnapshot(snap);
+            }
+          }
+
+          const result = await session.finalize();
+          const { manifest, draftManifest, enrichedManifest } = result;
+
+          if (!manifest) {
+            console.log(`[browserwire-cli] session ${sessionId} produced no manifest`);
+            if (batchId) {
+              socket.send(JSON.stringify(createEnvelope(
+                MessageType.BATCH_PROCESSING_STATUS,
+                { batchId, sessionId, status: "complete", manifest: null }
+              )));
+            }
+            return;
+          }
+
+          // Write output files
+          const sessionDir = resolve(process.cwd(), `logs/session-${sessionId}`);
+          await mkdir(sessionDir, { recursive: true });
+          await Promise.all([
+            writeFile(
+              resolve(sessionDir, "manifest-draft.json"),
+              JSON.stringify(draftManifest || manifest, null, 2),
+              "utf8"
+            ),
+            writeFile(
+              resolve(sessionDir, "manifest.json"),
+              JSON.stringify(manifest, null, 2),
+              "utf8"
+            ),
+            writeFile(
+              resolve(sessionDir, "session.json"),
+              JSON.stringify({
+                sessionId: session.sessionId,
+                site: session.site,
+                startedAt: session.startedAt,
+                stoppedAt: new Date().toISOString(),
+                note: session.note || null,
+                snapshotCount: session.snapshots.length,
+                snapshots: session.snapshots.map((s) => ({
+                  snapshotId: s.snapshotId,
+                  trigger: s.trigger,
+                  url: s.url,
+                  title: s.title,
+                  capturedAt: s.capturedAt,
+                  stats: s.stats
+                }))
+              }, null, 2),
+              "utf8"
+            )
+          ]);
+
+          console.log(`[browserwire-cli] session ${sessionId} output written to ${sessionDir}`);
+
+          // Save to site-centric manifest store
+          if (origin) {
+            siteManifests.set(origin, enrichedManifest);
+            await manifestStore.save(origin, enrichedManifest, sessionId);
+            const slug = ManifestStore.originSlug(origin);
+            console.log(`[browserwire-cli] REST API ready at http://${host}:${port}/api/sites/${slug}/docs`);
+          }
+
+          // Send batch complete + manifest ready
+          if (batchId) {
+            socket.send(JSON.stringify(createEnvelope(
+              MessageType.BATCH_PROCESSING_STATUS,
+              { batchId, sessionId, status: "complete", manifest: enrichedManifest }
+            )));
+          }
+          socket.send(JSON.stringify(createEnvelope(
+            MessageType.MANIFEST_READY,
+            { sessionId, manifest: enrichedManifest }
+          )));
+
+          socket.send(
+            JSON.stringify(
+              createEnvelope(
+                MessageType.DISCOVERY_SESSION_STATUS,
+                { ...session.getStats(), finalized: true },
+                message.requestId
+              )
+            )
+          );
         };
 
-        processCheckpoint()
-          .then(async (result) => {
-            const { manifest, checkpointIndex } = result;
-
-            const sessionDir = resolve(process.cwd(), `logs/session-${sessionId}`);
-
-            if (manifest) {
-              await mkdir(sessionDir, { recursive: true });
-              await writeFile(
-                resolve(sessionDir, `checkpoint-${checkpointIndex}.json`),
-                JSON.stringify(manifest, null, 2),
-                "utf8"
-              );
-              console.log(`[browserwire-cli] checkpoint-${checkpointIndex} written for session ${sessionId}`);
-
-              // Save to site-centric manifest store
-              if (session._siteOrigin) {
-                siteManifests.set(session._siteOrigin, manifest);
-                manifestStore.save(session._siteOrigin, manifest, sessionId).catch(console.error);
-              }
-            }
-
+        // For sessions with a known origin, serialize finalization through a per-origin queue.
+        // Sessions with no origin (unknown URL) run immediately without queuing.
+        if (origin) {
+          // Immediately notify extension that this batch is queued
+          if (batchId) {
             socket.send(JSON.stringify(createEnvelope(
-              MessageType.CHECKPOINT_COMPLETE,
-              { sessionId, manifest: manifest || null, checkpointIndex },
-              message.requestId
+              MessageType.BATCH_PROCESSING_STATUS,
+              { batchId, sessionId, status: "pending" }
             )));
-          })
-          .catch((error) => {
-            console.error(`[browserwire-cli] checkpoint processing failed:`, error);
-            socket.send(JSON.stringify(createEnvelope(MessageType.ERROR, {
-              code: "checkpoint_failed", message: error.message
-            }, message.requestId)));
+          }
+
+          const prev = originQueues.get(origin) || Promise.resolve();
+          const work = prev.then(() => doFinalize().catch((error) => {
+            console.error(`[browserwire-cli] session finalization failed:`, error);
+            if (batchId) {
+              socket.send(JSON.stringify(createEnvelope(
+                MessageType.BATCH_PROCESSING_STATUS,
+                { batchId, sessionId, status: "error", error: error.message }
+              )));
+            }
+          }).finally(() => {
+            activeSessions.delete(sessionId);
+          }));
+          originQueues.set(origin, work.catch(() => {}));
+        } else {
+          // No origin — run immediately (no queuing)
+          if (batchId) {
+            socket.send(JSON.stringify(createEnvelope(
+              MessageType.BATCH_PROCESSING_STATUS,
+              { batchId, sessionId, status: "processing" }
+            )));
+          }
+          doFinalize().catch((error) => {
+            console.error(`[browserwire-cli] session finalization failed:`, error);
+            if (batchId) {
+              socket.send(JSON.stringify(createEnvelope(
+                MessageType.BATCH_PROCESSING_STATUS,
+                { batchId, sessionId, status: "error", error: error.message }
+              )));
+            }
+          }).finally(() => {
+            activeSessions.delete(sessionId);
           });
+        }
 
         return;
       }

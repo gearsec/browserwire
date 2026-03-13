@@ -8,11 +8,9 @@ const connectButton = document.querySelector("#connect");
 const disconnectButton = document.querySelector("#disconnect");
 const startExploringButton = document.querySelector("#startExploring");
 const stopExploringButton = document.querySelector("#stopExploring");
-const checkpointButton = document.querySelector("#checkpoint");
-const checkpointRow = document.querySelector("#checkpointRow");
-const checkpointNoteInput = document.querySelector("#checkpointNote");
-const checkpointOverlay = document.querySelector("#checkpointOverlay");
-const apiStatusNode = document.querySelector("#apiStatus");
+const sessionNoteInput = document.querySelector("#sessionNote");
+const processingStatusNode = document.querySelector("#processingStatus");
+const processingListNode = document.querySelector("#processingList");
 
 const siteOriginNode = document.querySelector("#siteOrigin");
 const statSnapshots = document.querySelector("#statSnapshots");
@@ -41,6 +39,30 @@ const mapLevel = (state) => {
   }
 
   return "warn";
+};
+
+const renderProcessingStatus = (batches) => {
+  if (!batches || batches.length === 0) {
+    processingStatusNode.classList.remove("visible");
+    return;
+  }
+
+  processingStatusNode.classList.add("visible");
+  processingListNode.innerHTML = batches.map((b) => {
+    let indicator;
+    if (b.status === "pending") {
+      indicator = "⏸";
+    } else if (b.status === "processing" || b.status === "sent") {
+      indicator = "⏳";
+    } else if (b.status === "complete") {
+      indicator = "✓";
+    } else {
+      indicator = "✗";
+    }
+    const label = b.batchId ? b.batchId.slice(0, 8) + "…" : "batch";
+    const detail = b.error ? ` (${b.error})` : "";
+    return `<div class="stat-row"><span class="stat-label">${indicator} ${label}</span><span class="stat-value">${b.status}${detail}</span></div>`;
+  }).join("");
 };
 
 const renderState = (state) => {
@@ -82,18 +104,18 @@ const renderState = (state) => {
     statViews.textContent = session.viewCount || 0;
     sessionStatsNode.classList.add("visible");
 
-    // Show checkpoint controls during active session
-    checkpointRow.style.display = "";
-    checkpointNoteInput.classList.add("visible");
+    // Show session note textarea during active session
+    sessionNoteInput.classList.add("visible");
   } else {
     setLineStatus(sessionStatusNode, "Session: Idle", "warn");
     siteOriginNode.style.display = "none";
     sessionStatsNode.classList.remove("visible");
 
-    // Hide checkpoint controls when idle
-    checkpointRow.style.display = "none";
-    checkpointNoteInput.classList.remove("visible");
+    // Hide session note when idle
+    sessionNoteInput.classList.remove("visible");
   }
+
+  renderProcessingStatus(state.processingBatches);
 };
 
 const sendBackgroundCommand = async (command, payload = {}) => {
@@ -148,28 +170,15 @@ startExploringButton.addEventListener("click", async () => {
 });
 
 stopExploringButton.addEventListener("click", async () => {
+  const note = sessionNoteInput.value.trim();
   try {
-    await sendBackgroundCommand("stop_exploring");
+    await sendBackgroundCommand("stop_exploring", { note: note || undefined });
+    sessionNoteInput.value = "";
     log("Exploration stopped");
   } catch (error) {
     log(`Stop exploring failed: ${error.message}`);
   }
 });
-
-checkpointButton.addEventListener("click", async () => {
-  const note = checkpointNoteInput.value.trim();
-  try {
-    await sendBackgroundCommand("checkpoint", { note });
-    log(`Checkpoint triggered${note ? `: "${note}"` : ""}`);
-  } catch (error) {
-    log(`Checkpoint failed: ${error.message}`);
-  }
-});
-
-const showApiStatus = () => {
-  apiStatusNode.style.display = "block";
-  apiStatusNode.innerHTML = 'API ready at <a href="http://127.0.0.1:8787/api/docs" target="_blank">http://127.0.0.1:8787/api/docs</a>';
-};
 
 chrome.runtime.onMessage.addListener((message) => {
   if (!message || message.source !== "background") {
@@ -187,18 +196,18 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 
   if (message.event === "manifest_ready") {
-    showApiStatus();
+    log("Manifest ready");
   }
 
-  if (message.event === "checkpoint_started") {
-    checkpointOverlay.classList.add("visible");
-  }
-
-  if (message.event === "checkpoint_complete") {
-    checkpointOverlay.classList.remove("visible");
-    checkpointNoteInput.value = "";
-    showApiStatus();
-    log(`Checkpoint complete${message.checkpointIndex !== undefined ? ` (${message.checkpointIndex})` : ""}`);
+  if (message.event === "batch_status") {
+    renderProcessingStatus(null);
+    // Re-fetch full state to get current processingBatches
+    sendBackgroundCommand("get_state").catch(() => {});
+    if (message.status === "complete") {
+      log(`Batch ${message.batchId?.slice(0, 8) || ""}… processing complete`);
+    } else if (message.status === "error") {
+      log(`Batch ${message.batchId?.slice(0, 8) || ""}… error: ${message.error || "unknown"}`);
+    }
   }
 
   if (message.event === "buffered") {

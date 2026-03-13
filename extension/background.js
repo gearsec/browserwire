@@ -20,6 +20,7 @@ let activeSession = null;
 let currentManifest = null;
 let logs = [];
 let pendingSnapshots = [];
+const processingBatches = new Map();
 
 // ─── Per-Tab In-Flight Network Request Tracking ─────────────────────
 // Maps tabId → Set of requestIds currently in flight
@@ -89,6 +90,7 @@ const getState = () => ({
   backendState: getBackendState(),
   reconnectAttempt,
   session: activeSession,
+  processingBatches: [...processingBatches.entries()].map(([id, b]) => ({ batchId: id, ...b })),
   logs
 });
 
@@ -170,20 +172,33 @@ const onBackendMessage = (rawMessage) => {
     return;
   }
 
-  if (message.type === MessageType.CHECKPOINT_COMPLETE) {
-    const { manifest, checkpointIndex } = message.payload || {};
-    if (activeSession) {
-      activeSession = { ...activeSession, checkpointing: false };
+  if (message.type === MessageType.BATCH_PROCESSING_STATUS) {
+    const { batchId, status, manifest, error } = message.payload || {};
+    if (!batchId) return;
+
+    if (status === "pending") {
+      processingBatches.set(batchId, { ...(processingBatches.get(batchId) || {}), status: "pending", updatedAt: Date.now() });
+      addLog(`batch ${batchId.slice(0, 8)}… pending (queued)`);
+    } else if (status === "processing") {
+      const existing = processingBatches.get(batchId);
+      processingBatches.set(batchId, { ...(existing || {}), status: "processing", updatedAt: Date.now() });
+      addLog(`batch ${batchId.slice(0, 8)}… processing`);
+    } else if (status === "complete") {
+      processingBatches.delete(batchId);
+      if (manifest) {
+        currentManifest = manifest;
+        const actionCount = manifest?.actions?.length ?? 0;
+        const viewCount = manifest?.views?.length ?? 0;
+        addLog(`batch ${batchId.slice(0, 8)}… complete: ${actionCount} actions, ${viewCount} views`);
+      } else {
+        addLog(`batch ${batchId.slice(0, 8)}… complete: no manifest`);
+      }
+    } else if (status === "error") {
+      processingBatches.set(batchId, { ...(processingBatches.get(batchId) || {}), status: "error", error: error || "unknown", updatedAt: Date.now() });
+      addLog(`batch ${batchId.slice(0, 8)}… error: ${error || "unknown"}`);
     }
-    if (manifest) {
-      currentManifest = manifest;
-      const actionCount = manifest?.actions?.length ?? 0;
-      const viewCount = manifest?.views?.length ?? 0;
-      addLog(`checkpoint-${checkpointIndex} complete: ${actionCount} actions, ${viewCount} views`);
-    } else {
-      addLog(`checkpoint-${checkpointIndex} complete: no manifest produced`);
-    }
-    notifyAllContexts({ event: "checkpoint_complete", manifest: manifest || null, checkpointIndex });
+
+    notifyAllContexts({ event: "batch_status", batchId, status, manifest: manifest || null, error: error || null });
     broadcastState();
     return;
   }
@@ -272,6 +287,13 @@ const connectBackend = (nextUrl) => {
   socket.addEventListener("close", () => {
     clearTimers();
     socket = null;
+
+    // Mark all in-flight batches as error
+    for (const [batchId, batch] of processingBatches) {
+      if (batch.status === "sent" || batch.status === "processing") {
+        processingBatches.set(batchId, { ...batch, status: "error", error: "Backend disconnected", updatedAt: Date.now() });
+      }
+    }
 
     addLog("backend disconnected");
     broadcastState();
@@ -410,16 +432,24 @@ const startExploring = async () => {
   };
 };
 
-const stopExploring = async () => {
+const stopExploring = async (note) => {
   if (!activeSession) {
     return { ok: true, idle: true, state: getState() };
   }
 
   const sessionToStop = activeSession;
   const remainingSnapshots = pendingSnapshots.slice();
+  const batchId = crypto.randomUUID();
   activeSession = null;
-  currentManifest = null;
   pendingSnapshots = [];
+
+  // Register batch as sent
+  processingBatches.set(batchId, {
+    sessionId: sessionToStop.sessionId,
+    status: "sent",
+    snapshotCount: remainingSnapshots.length,
+    startedAt: Date.now()
+  });
 
   try {
     await sendTabMessage(sessionToStop.tabId, {
@@ -433,14 +463,16 @@ const stopExploring = async () => {
 
   sendToBackend(MessageType.DISCOVERY_SESSION_STOP, {
     sessionId: sessionToStop.sessionId,
+    batchId,
+    note: note || null,
     stoppedAt: new Date().toISOString(),
     pendingSnapshots: remainingSnapshots
   });
 
   if (remainingSnapshots.length > 0) {
-    addLog(`exploration stopped (flushed ${remainingSnapshots.length} buffered snapshots)`);
+    addLog(`exploration stopped (flushed ${remainingSnapshots.length} buffered snapshots, batch ${batchId.slice(0, 8)}…)`);
   } else {
-    addLog("exploration stopped");
+    addLog(`exploration stopped (batch ${batchId.slice(0, 8)}…)`);
   }
   broadcastState();
 
@@ -551,47 +583,6 @@ const handleDiscoveryIncremental = async (message, sender) => {
   broadcastState();
 };
 
-/**
- * Trigger a checkpoint: send all buffered snapshots to the backend for processing,
- * then clear the local buffer. The backend responds with CHECKPOINT_COMPLETE.
- */
-const handleCheckpoint = (note) => {
-  if (!activeSession) {
-    return { ok: false, error: "no_active_session", state: getState() };
-  }
-
-  if (activeSession.checkpointing) {
-    return { ok: false, error: "checkpoint_in_progress", state: getState() };
-  }
-
-  const sessionId = activeSession.sessionId;
-  const snapshotsToSend = pendingSnapshots.slice();
-  const checkpointIndex = activeSession.checkpointIndex || 0;
-
-  // Mark as checkpointing and clear buffer
-  activeSession = { ...activeSession, checkpointing: true, checkpointIndex: checkpointIndex + 1 };
-  pendingSnapshots = [];
-
-  const sent = sendToBackend(MessageType.CHECKPOINT, {
-    sessionId,
-    snapshots: snapshotsToSend,
-    note: note || "",
-    checkpointIndex
-  });
-
-  if (!sent) {
-    // Restore snapshots if send failed
-    pendingSnapshots = snapshotsToSend;
-    activeSession = { ...activeSession, checkpointing: false };
-    return { ok: false, error: "backend_not_connected", state: getState() };
-  }
-
-  addLog(`checkpoint triggered: ${snapshotsToSend.length} snapshots sent${note ? ` ("${note}")` : ""}`);
-  notifyAllContexts({ event: "checkpoint_started", snapshotCount: snapshotsToSend.length });
-  broadcastState();
-
-  return { ok: true, state: getState() };
-};
 
 // ─── Action Execution (unchanged) ───────────────────────────────────
 
@@ -1418,11 +1409,7 @@ const handleSidepanelCommand = async (message) => {
   }
 
   if (message.command === "stop_exploring") {
-    return stopExploring();
-  }
-
-  if (message.command === "checkpoint") {
-    return handleCheckpoint(message.note || "");
+    return stopExploring(message.note);
   }
 
   return {
@@ -1481,17 +1468,26 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
   const session = activeSession;
   const remainingSnapshots = pendingSnapshots.slice();
+  const batchId = crypto.randomUUID();
   activeSession = null;
   pendingSnapshots = [];
 
+  processingBatches.set(batchId, {
+    sessionId: session.sessionId,
+    status: "sent",
+    snapshotCount: remainingSnapshots.length,
+    startedAt: Date.now()
+  });
+
   sendToBackend(MessageType.DISCOVERY_SESSION_STOP, {
     sessionId: session.sessionId,
+    batchId,
     reason: "tab_closed",
     stoppedAt: new Date().toISOString(),
     pendingSnapshots: remainingSnapshots
   });
 
-  addLog(`exploration stopped because tab ${tabId} closed`);
+  addLog(`exploration stopped because tab ${tabId} closed (batch ${batchId.slice(0, 8)}…)`);
   broadcastState();
 });
 

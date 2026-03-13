@@ -603,8 +603,7 @@ export class DiscoverySession {
     this.snapshots = [];
     this.status = "active";
     this.lastEnrichedManifest = null;
-    this.checkpointCount = 0;
-    this.checkpointNotes = [];
+    this.note = null;
     this.priorManifest = null;
     /** Queue to serialize concurrent addSnapshot calls */
     this._queue = Promise.resolve();
@@ -699,7 +698,7 @@ export class DiscoverySession {
   }
 
   /**
-   * Internal merge logic shared by finalize() and compileCheckpoint().
+   * Internal merge logic used by finalize().
    * Merges all current per-snapshot enriched manifests into one unified manifest.
    */
   async _buildMergedManifest() {
@@ -868,41 +867,6 @@ export class DiscoverySession {
     };
   }
 
-  /**
-   * Compile a checkpoint manifest from current snapshots without stopping the session.
-   * Increments checkpointCount and records the note. Does NOT set status = "stopped".
-   *
-   * @param {string} [note] - Optional annotation about what was just explored
-   * @returns {{ manifest, draftManifest, enrichedManifest, checkpointIndex, stats }}
-   */
-  async compileCheckpoint(note) {
-    await this._queue;
-
-    const checkpointIndex = this.checkpointCount;
-    this.checkpointCount += 1;
-    if (note) this.checkpointNotes.push(note);
-
-    if (this.snapshots.length === 0) {
-      console.log(`[browserwire-cli] session ${this.sessionId} checkpoint-${checkpointIndex}: no snapshots`);
-      return { manifest: null, draftManifest: null, enrichedManifest: null, checkpointIndex, stats: this.getStats() };
-    }
-
-    console.log(
-      `[browserwire-cli] session ${this.sessionId} checkpoint-${checkpointIndex}: ` +
-      `${this.snapshots.length} snapshots${note ? ` ("${note}")` : ""}`
-    );
-
-    const manifest = await this._buildMergedManifest();
-
-    return {
-      manifest,
-      draftManifest: manifest,
-      enrichedManifest: manifest,
-      checkpointIndex,
-      stats: this.getStats()
-    };
-  }
-
   getStats() {
     let totalEntities = 0;
     let totalActions = 0;
@@ -923,7 +887,6 @@ export class DiscoverySession {
       entityCount: totalEntities,
       actionCount: totalActions,
       viewCount: totalViews,
-      checkpointCount: this.checkpointCount,
       status: this.status
     };
   }
