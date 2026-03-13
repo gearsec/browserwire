@@ -21,10 +21,7 @@ const inputsToSchema = (inputs) => {
 };
 
 export const generateOpenApiSpec = (manifest, { host = "127.0.0.1", port = 8787, pathPrefix = "" } = {}) => {
-  const actions = manifest.actions || [];
-  const views = manifest.views || [];
   const workflows = manifest.workflowActions || [];
-  const entities = manifest.entities || [];
 
   const paths = {};
 
@@ -39,67 +36,6 @@ export const generateOpenApiSpec = (manifest, { host = "127.0.0.1", port = 8787,
       }
     }
   };
-
-  // Actions
-  for (const action of actions) {
-    const name = sanitizeName(action.semanticName || action.name);
-    const path = `${pathPrefix}/actions/${name}`;
-    const bodySchema = inputsToSchema(action.inputs);
-
-    paths[path] = {
-      post: {
-        summary: action.description || action.name,
-        operationId: `action_${name}`,
-        tags: ["Actions"],
-        ...(bodySchema ? {
-          requestBody: {
-            required: true,
-            content: { "application/json": { schema: bodySchema } }
-          }
-        } : {}),
-        responses: {
-          200: {
-            description: "Action result",
-            content: { "application/json": { schema: {
-              type: "object",
-              properties: {
-                ok: { type: "boolean" },
-                result: { type: "object" },
-                error: { type: "string" }
-              }
-            }}}
-          }
-        }
-      }
-    };
-  }
-
-  // Views
-  for (const view of views) {
-    const name = sanitizeName(view.semanticName || view.name);
-    const path = `${pathPrefix}/views/${name}`;
-
-    paths[path] = {
-      get: {
-        summary: view.description || view.name,
-        operationId: `view_${name}`,
-        tags: ["Views"],
-        responses: {
-          200: {
-            description: "View data",
-            content: { "application/json": { schema: {
-              type: "object",
-              properties: {
-                ok: { type: "boolean" },
-                data: view.isList ? { type: "array", items: { type: "object" } } : { type: "object" },
-                count: { type: "integer" }
-              }
-            }}}
-          }
-        }
-      }
-    };
-  }
 
   // Workflows
   for (const workflow of workflows) {
@@ -128,32 +64,6 @@ export const generateOpenApiSpec = (manifest, { host = "127.0.0.1", port = 8787,
                 data: { type: "object" },
                 outcome: { type: "string" },
                 error: { type: "string" }
-              }
-            }}}
-          }
-        }
-      }
-    };
-  }
-
-  // Entities
-  for (const entity of entities) {
-    const name = sanitizeName(entity.semanticName || entity.name);
-    const path = `${pathPrefix}/entities/${name}`;
-
-    paths[path] = {
-      get: {
-        summary: `Read state of ${entity.semanticName || entity.name}`,
-        operationId: `entity_${name}`,
-        tags: ["Entities"],
-        responses: {
-          200: {
-            description: "Entity state",
-            content: { "application/json": { schema: {
-              type: "object",
-              properties: {
-                ok: { type: "boolean" },
-                state: { type: "object" }
               }
             }}}
           }

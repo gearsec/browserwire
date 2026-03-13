@@ -9,6 +9,7 @@ import {
 const DEFAULT_WS_URL = "ws://127.0.0.1:8787";
 const HEARTBEAT_INTERVAL_MS = 20000;
 const MAX_LOG_ENTRIES = 200;
+const AUTO_CONNECT_MAX_ATTEMPTS = 5;
 
 let wsUrl = DEFAULT_WS_URL;
 let socket = null;
@@ -16,11 +17,13 @@ let reconnectTimer = null;
 let heartbeatTimer = null;
 let reconnectAttempt = 0;
 let shouldReconnect = false;
+let autoConnectGaveUp = false;
 let activeSession = null;
 let currentManifest = null;
 let logs = [];
 let pendingSnapshots = [];
 const processingBatches = new Map();
+const extensionOpenedTabs = new Set();
 
 // ─── Per-Tab In-Flight Network Request Tracking ─────────────────────
 // Maps tabId → Set of requestIds currently in flight
@@ -55,7 +58,10 @@ chrome.webRequest.onCompleted.addListener(onRequestFinished, { urls: ["<all_urls
 chrome.webRequest.onErrorOccurred.addListener(onRequestFinished, { urls: ["<all_urls>"] });
 
 // Clean up when a tab is closed
-chrome.tabs.onRemoved.addListener((tabId) => { pendingRequests.delete(tabId); });
+chrome.tabs.onRemoved.addListener((tabId) => {
+  pendingRequests.delete(tabId);
+  extensionOpenedTabs.delete(tabId);
+});
 
 const notifyAllContexts = (payload) => {
   chrome.runtime.sendMessage({ source: "background", ...payload }, () => {
@@ -89,6 +95,7 @@ const getState = () => ({
   wsUrl,
   backendState: getBackendState(),
   reconnectAttempt,
+  autoConnectGaveUp,
   session: activeSession,
   processingBatches: [...processingBatches.entries()].map(([id, b]) => ({ batchId: id, ...b })),
   logs
@@ -121,6 +128,15 @@ const sendToBackend = (type, payload = {}, requestId = crypto.randomUUID()) => {
 
 const scheduleReconnect = () => {
   reconnectAttempt += 1;
+
+  if (reconnectAttempt >= AUTO_CONNECT_MAX_ATTEMPTS) {
+    shouldReconnect = false;
+    autoConnectGaveUp = true;
+    addLog("auto-connect gave up after max attempts");
+    broadcastState();
+    return;
+  }
+
   const delay = Math.min(30000, 500 * 2 ** reconnectAttempt);
   addLog(`backend reconnect scheduled in ${Math.round(delay / 1000)}s`);
   reconnectTimer = setTimeout(() => {
@@ -213,16 +229,6 @@ const onBackendMessage = (rawMessage) => {
     return;
   }
 
-  if (message.type === MessageType.EXECUTE_ACTION) {
-    handleExecuteAction(message);
-    return;
-  }
-
-  if (message.type === MessageType.READ_ENTITY) {
-    handleReadEntity(message);
-    return;
-  }
-
   if (message.type === MessageType.EXECUTE_WORKFLOW) {
     handleExecuteWorkflow(message);
     return;
@@ -238,6 +244,7 @@ const connectBackend = (nextUrl) => {
     wsUrl = nextUrl;
   }
 
+  autoConnectGaveUp = false;
   shouldReconnect = true;
 
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
@@ -266,6 +273,7 @@ const connectBackend = (nextUrl) => {
 
   socket.addEventListener("open", () => {
     reconnectAttempt = 0;
+    autoConnectGaveUp = false;
     addLog("backend connected");
 
     sendToBackend(MessageType.HELLO, {
@@ -341,6 +349,7 @@ const getTargetTab = async () => {
   return queryActiveTab();
 };
 
+
 const sendTabMessage = (tabId, message) =>
   new Promise((resolve, reject) => {
     chrome.tabs.sendMessage(tabId, message, (response) => {
@@ -413,6 +422,8 @@ const startExploring = async () => {
     entityCount: 0,
     actionCount: 0
   };
+
+  extensionOpenedTabs.add(tab.id);
 
   sendToBackend(MessageType.DISCOVERY_SESSION_START, {
     sessionId,
@@ -1066,56 +1077,6 @@ const PAGE_READ_VIEW = (payload) => {
   }
 };
 
-/**
- * Handle EXECUTE_ACTION from the WS server.
- */
-const handleExecuteAction = async (message) => {
-  const tab = await getTargetTab();
-  if (!tab || typeof tab.id !== "number") {
-    sendToBackend(MessageType.EXECUTE_RESULT, {
-      ok: false, error: "no_active_tab", message: "No active tab"
-    }, message.requestId);
-    return;
-  }
-
-  try {
-    const result = await executeInTab(tab.id, PAGE_EXECUTE_ACTION, [message.payload]);
-    sendToBackend(MessageType.EXECUTE_RESULT, result, message.requestId);
-  } catch (error) {
-    sendToBackend(MessageType.EXECUTE_RESULT, {
-      ok: false, error: "ERR_EXECUTION_FAILED", message: error.message || "Script execution failed"
-    }, message.requestId);
-  }
-};
-
-/**
- * Handle READ_ENTITY from the WS server.
- * Routes to PAGE_READ_VIEW if the payload contains view extraction fields,
- * otherwise falls back to the simple entity state reader.
- */
-const handleReadEntity = async (message) => {
-  const tab = await getTargetTab();
-  if (!tab || typeof tab.id !== "number") {
-    sendToBackend(MessageType.READ_RESULT, {
-      ok: false, error: "no_active_tab", message: "No active tab"
-    }, message.requestId);
-    return;
-  }
-
-  try {
-    // Route to view extractor if payload has containerLocator + fields
-    const handler = (message.payload?.containerLocator && message.payload?.fields)
-      ? PAGE_READ_VIEW
-      : PAGE_READ_ENTITY;
-    const result = await executeInTab(tab.id, handler, [message.payload]);
-    sendToBackend(MessageType.READ_RESULT, result, message.requestId);
-  } catch (error) {
-    sendToBackend(MessageType.READ_RESULT, {
-      ok: false, error: "ERR_READ_FAILED", message: error.message || "Script execution failed"
-    }, message.requestId);
-  }
-};
-
 // ─── Workflow Execution ─────────────────────────────────────────────
 
 /**
@@ -1372,25 +1333,42 @@ const runWorkflowSteps = async (tabId, baseOrigin, steps, outcomes, inputs) => {
  * Handle EXECUTE_WORKFLOW from the WS server.
  */
 const handleExecuteWorkflow = async (message) => {
-  const { steps, outcomes, inputs } = message.payload || {};
+  const { steps, outcomes, inputs, origin } = message.payload || {};
   const requestId = message.requestId;
 
-  const tab = await getTargetTab();
-  if (!tab || typeof tab.id !== "number") {
-    sendToBackend(MessageType.WORKFLOW_RESULT, {
-      ok: false, error: "no_active_tab", message: "No active tab"
-    }, requestId);
-    return;
-  }
+  // Create a dedicated background tab for this workflow
+  const tab = await chrome.tabs.create({ url: "about:blank", active: false });
 
-  const baseOrigin = tab.url ? new URL(tab.url).origin : "";
-  const result = await runWorkflowSteps(tab.id, baseOrigin, steps, outcomes, inputs);
-  sendToBackend(MessageType.WORKFLOW_RESULT, result, requestId);
+  try {
+    // Navigate to the site origin so content scripts can run on the right domain
+    if (origin) {
+      await navigateTabAndWait(tab.id, origin, "");
+    }
+
+    const baseOrigin = origin || "";
+    const result = await runWorkflowSteps(tab.id, baseOrigin, steps, outcomes, inputs);
+    sendToBackend(MessageType.WORKFLOW_RESULT, result, requestId);
+  } catch (error) {
+    sendToBackend(MessageType.WORKFLOW_RESULT, {
+      ok: false, error: "ERR_WORKFLOW_FAILED", message: error.message || "Workflow execution failed"
+    }, requestId);
+  } finally {
+    // Always clean up the tab
+    try { await chrome.tabs.remove(tab.id); } catch { /* already closed */ }
+  }
 };
 
 // ─── Sidepanel Command Handler ──────────────────────────────────────
 
 const handleSidepanelCommand = async (message) => {
+  if (message.command === "sidepanel_opened") {
+    // Auto-connect if not already connected and haven't given up
+    if (!socket && !shouldReconnect && !autoConnectGaveUp) {
+      return connectBackend();
+    }
+    return { ok: true, state: getState() };
+  }
+
   if (message.command === "get_state") {
     return { ok: true, state: getState() };
   }
@@ -1506,3 +1484,8 @@ chrome.runtime.onStartup.addListener(() => {
   addLog("extension started");
   broadcastState();
 });
+
+// Auto-connect on service worker load
+if (!socket && !shouldReconnect && !autoConnectGaveUp) {
+  connectBackend();
+}

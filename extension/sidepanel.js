@@ -81,6 +81,22 @@ const renderState = (state) => {
     mapLevel(backendState)
   );
 
+  // Smart button visibility
+  if (backendState === "connected") {
+    connectButton.style.display = "none";
+    disconnectButton.style.display = "";
+    wsUrlInput.disabled = true;
+  } else if (backendState === "disconnected" && state.autoConnectGaveUp) {
+    connectButton.style.display = "";
+    disconnectButton.style.display = "none";
+    wsUrlInput.disabled = false;
+  } else {
+    // connecting / reconnecting — hide both, status text is enough
+    connectButton.style.display = "none";
+    disconnectButton.style.display = "none";
+    wsUrlInput.disabled = true;
+  }
+
   if (state.session && state.session.sessionId) {
     const session = state.session;
     setLineStatus(
@@ -215,6 +231,6 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 });
 
-sendBackgroundCommand("get_state").catch((error) => {
+sendBackgroundCommand("sidepanel_opened").catch((error) => {
   log(`Unable to fetch initial state: ${error.message}`);
 });

@@ -45,31 +45,13 @@ const readBody = (req) =>
  * Build name->definition lookup maps from a manifest.
  */
 const buildLookups = (manifest) => {
-  const actionMap = new Map();
-  for (const action of manifest.actions || []) {
-    const name = sanitize(action.semanticName || action.name);
-    actionMap.set(name, action);
-  }
-
-  const viewMap = new Map();
-  for (const view of manifest.views || []) {
-    const name = sanitize(view.semanticName || view.name);
-    viewMap.set(name, view);
-  }
-
   const workflowMap = new Map();
   for (const workflow of manifest.workflowActions || []) {
     const name = sanitize(workflow.name);
     workflowMap.set(name, workflow);
   }
 
-  const entityMap = new Map();
-  for (const entity of manifest.entities || []) {
-    const name = sanitize(entity.semanticName || entity.name);
-    entityMap.set(name, entity);
-  }
-
-  return { actionMap, viewMap, workflowMap, entityMap };
+  return { workflowMap };
 };
 
 const sanitize = (name) =>
@@ -159,10 +141,11 @@ export const createHttpHandler = ({ getManifestBySlug, listSites, bridge, getSoc
       const slug = siteMatch[1];
       const subPath = siteMatch[2] || "";
 
-      const manifest = getManifestBySlug(slug);
-      if (!manifest) {
+      const lookup = getManifestBySlug(slug);
+      if (!lookup) {
         return json(res, 404, { ok: false, error: `No manifest found for site '${slug}'` });
       }
+      const { manifest, origin } = lookup;
 
       // GET /api/sites/:slug/manifest
       if (subPath === "/manifest" && req.method === "GET") {
@@ -187,48 +170,6 @@ export const createHttpHandler = ({ getManifestBySlug, listSites, bridge, getSoc
 
       const lookups = buildLookups(manifest);
 
-      // POST /api/sites/:slug/actions/:name
-      const actionMatch = subPath.match(/^\/actions\/([^/]+)$/);
-      if (actionMatch && req.method === "POST") {
-        const action = lookups.actionMap.get(actionMatch[1]);
-        if (!action) return json(res, 404, { ok: false, error: `Action '${actionMatch[1]}' not found` });
-
-        let body = {};
-        try { body = await readBody(req); } catch { return json(res, 400, { ok: false, error: "Invalid JSON body" }); }
-
-        try {
-          const result = await bridge.sendAndAwait(socket, MessageType.EXECUTE_ACTION, {
-            actionId: action.id,
-            strategies: action.locatorSet?.strategies || [],
-            interactionKind: action.interactionKind || "click",
-            inputs: body
-          }, 30000);
-          return json(res, 200, result);
-        } catch (err) {
-          return json(res, 500, { ok: false, error: err.message });
-        }
-      }
-
-      // GET /api/sites/:slug/views/:name
-      const viewMatch = subPath.match(/^\/views\/([^/]+)$/);
-      if (viewMatch && req.method === "GET") {
-        const view = lookups.viewMap.get(viewMatch[1]);
-        if (!view) return json(res, 404, { ok: false, error: `View '${viewMatch[1]}' not found` });
-
-        try {
-          const result = await bridge.sendAndAwait(socket, MessageType.READ_ENTITY, {
-            viewId: view.id,
-            containerLocator: view.containerLocator?.strategies || [],
-            itemLocator: view.itemLocator || null,
-            fields: view.fields || [],
-            isList: view.isList || false
-          }, 30000);
-          return json(res, 200, result);
-        } catch (err) {
-          return json(res, 500, { ok: false, error: err.message });
-        }
-      }
-
       // POST /api/sites/:slug/workflows/:name
       const workflowMatch = subPath.match(/^\/workflows\/([^/]+)$/);
       if (workflowMatch && req.method === "POST") {
@@ -242,28 +183,9 @@ export const createHttpHandler = ({ getManifestBySlug, listSites, bridge, getSoc
           const result = await bridge.sendAndAwait(socket, MessageType.EXECUTE_WORKFLOW, {
             steps: workflow.steps || [],
             outcomes: workflow.outcomes || {},
-            inputs: body
+            inputs: body,
+            origin
           }, 60000);
-          return json(res, 200, result);
-        } catch (err) {
-          return json(res, 500, { ok: false, error: err.message });
-        }
-      }
-
-      // GET /api/sites/:slug/entities/:name
-      const entityMatch = subPath.match(/^\/entities\/([^/]+)$/);
-      if (entityMatch && req.method === "GET") {
-        const entity = lookups.entityMap.get(entityMatch[1]);
-        if (!entity) return json(res, 404, { ok: false, error: `Entity '${entityMatch[1]}' not found` });
-
-        const entityAction = (manifest.actions || []).find((a) => a.entityId === entity.id);
-        const strategies = entityAction?.locatorSet?.strategies || [];
-
-        try {
-          const result = await bridge.sendAndAwait(socket, MessageType.READ_ENTITY, {
-            entityId: entity.id,
-            strategies
-          }, 30000);
           return json(res, 200, result);
         } catch (err) {
           return json(res, 500, { ok: false, error: err.message });

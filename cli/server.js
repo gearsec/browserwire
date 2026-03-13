@@ -54,7 +54,7 @@ export const startServer = async ({
   const httpHandler = createHttpHandler({
     getManifestBySlug: (slug) => {
       for (const [origin, m] of siteManifests) {
-        if (ManifestStore.originSlug(origin) === slug) return m;
+        if (ManifestStore.originSlug(origin) === slug) return { manifest: m, origin };
       }
       return null;
     },
@@ -152,11 +152,7 @@ export const startServer = async ({
 
       // ─── Bridge result messages (from extension executing REST API commands) ──
 
-      if (
-        message.type === MessageType.EXECUTE_RESULT ||
-        message.type === MessageType.READ_RESULT ||
-        message.type === MessageType.WORKFLOW_RESULT
-      ) {
+      if (message.type === MessageType.WORKFLOW_RESULT) {
         if (bridge.handleWsResult(message)) return;
         // Not matched — fall through to log
       }
