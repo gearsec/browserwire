@@ -1,6 +1,6 @@
 # BrowserWire
 
-[![Discord](https://img.shields.io/discord/1234567890?logo=discord&label=Discord&color=5865F2)](https://discord.gg/dnG6KMPzT)
+[![Discord](https://img.shields.io/discord/1482040670632808662?logo=discord&label=Discord&color=5865F2)](https://discord.gg/dnG6KMPzT)
 
 A contract layer between AI agents and websites. BrowserWire discovers typed APIs from live web pages so your agents can call operations like `submit_login(email, password)` instead of scraping the DOM. Point it at any site, explore, and get a versioned manifest of everything the page can do — served as a REST API your agent already knows how to call.
 
