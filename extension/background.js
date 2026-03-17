@@ -4,6 +4,7 @@ import {
   parseEnvelope,
   PROTOCOL_VERSION
 } from "./shared/protocol.js";
+import { encode, decode } from "./shared/codec.js";
 
 
 const DEFAULT_WS_URL = "ws://127.0.0.1:8787";
@@ -122,7 +123,7 @@ const sendToBackend = (type, payload = {}, requestId = crypto.randomUUID()) => {
     return false;
   }
 
-  socket.send(JSON.stringify(createEnvelope(type, payload, requestId)));
+  socket.send(encode(type, payload, requestId));
   return true;
 };
 
@@ -145,10 +146,17 @@ const scheduleReconnect = () => {
 };
 
 const onBackendMessage = (rawMessage) => {
-  const message = parseEnvelope(rawMessage);
+  // Try binary (protobuf) first, then JSON fallback
+  let message;
+  if (rawMessage instanceof ArrayBuffer || rawMessage instanceof Uint8Array) {
+    const bytes = rawMessage instanceof ArrayBuffer ? new Uint8Array(rawMessage) : rawMessage;
+    message = decode(bytes);
+  } else {
+    message = parseEnvelope(rawMessage);
+  }
 
   if (!message) {
-    addLog("received non-JSON message from backend");
+    addLog("received undecodable message from backend");
     return;
   }
 
@@ -260,6 +268,7 @@ const connectBackend = (nextUrl) => {
   addLog(`connecting to ${wsUrl}`);
   try {
     socket = new WebSocket(wsUrl);
+    socket.binaryType = "arraybuffer";
   } catch (error) {
     shouldReconnect = false;
     addLog("invalid backend websocket URL");
@@ -320,6 +329,7 @@ const connectBackend = (nextUrl) => {
 
 const disconnectBackend = () => {
   shouldReconnect = false;
+  autoConnectGaveUp = true;
   reconnectAttempt = 0;
   clearTimers();
 
@@ -921,13 +931,39 @@ const PAGE_READ_VIEW = (payload) => {
     return raw || null;
   };
 
+  // Shadow-DOM-aware query helpers
+  const qsDeep = (root, sel) => {
+    try { return root.querySelector(sel) || root.shadowRoot?.querySelector(sel) || null; }
+    catch { return null; }
+  };
+
+  const qsaDeep = (root, sel) => {
+    try {
+      const light = root.querySelectorAll(sel);
+      if (light.length > 0) return light;
+      return root.shadowRoot?.querySelectorAll(sel) || [];
+    } catch { return []; }
+  };
+
   const extractField = (root, field) => {
     if (!field || !field.locator) return null;
     const selector = field.locator.value;
 
+    // 0. Attribute extraction (when field specifies an attribute to extract)
+    if (field.locator.attribute) {
+      let el = qsDeep(root, selector);
+      // Self-match: if root IS the target (e.g., item=shreddit-post, selector=shreddit-post)
+      if (!el) try { if (root.matches?.(selector)) el = root; } catch {}
+      if (el) {
+        const val = el.getAttribute(field.locator.attribute);
+        if (val != null) return coerceValue(val.trim(), field.type);
+      }
+      return null;  // Don't fall through — attribute fields never use textContent
+    }
+
     // 1. Direct CSS selector
     try {
-      const el = root.querySelector(selector);
+      const el = qsDeep(root, selector);
       if (el) return coerceValue((el.textContent || "").trim(), field.type);
     } catch { /* invalid selector */ }
 
@@ -939,10 +975,10 @@ const PAGE_READ_VIEW = (payload) => {
         const [, leadClass, rest] = leadClassMatch;
         if (root.matches && root.matches(leadClass)) {
           // Try :scope > rest
-          const scopeEl = root.querySelector(`:scope > ${rest}`);
+          const scopeEl = qsDeep(root, `:scope > ${rest}`);
           if (scopeEl) return coerceValue((scopeEl.textContent || "").trim(), field.type);
           // Try just the structural part
-          const restEl = root.querySelector(rest);
+          const restEl = qsDeep(root, rest);
           if (restEl) return coerceValue((restEl.textContent || "").trim(), field.type);
         }
       }
@@ -953,7 +989,7 @@ const PAGE_READ_VIEW = (payload) => {
     try {
       if (/title|name/i.test(field.name)) {
         for (const tag of ["a", "button"]) {
-          const els = root.querySelectorAll(`${tag}[aria-label]`);
+          const els = qsaDeep(root, `${tag}[aria-label]`);
           for (const el of els) {
             const label = (el.getAttribute("aria-label") || "").trim();
             if (label.length > 3) return coerceValue(label, field.type);
@@ -967,7 +1003,7 @@ const PAGE_READ_VIEW = (payload) => {
     try {
       const nameParts = field.name.split("_").filter(p => p.length > 2);
       for (const part of nameParts) {
-        const matches = root.querySelectorAll(`:scope > [class*="${part}"], :scope > * > [class*="${part}"]`);
+        const matches = qsaDeep(root, `:scope > [class*="${part}"], :scope > * > [class*="${part}"]`);
         for (const el of matches) {
           if (el !== root) {
             const raw = (el.textContent || "").trim();
@@ -989,17 +1025,22 @@ const PAGE_READ_VIEW = (payload) => {
   const extractFieldsByTextBlocks = (root, fieldDefs) => {
     if (!fieldDefs || fieldDefs.length === 0) return {};
     const blocks = [];
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode(n) {
-        const t = (n.textContent || "").replace(ZERO_WIDTH_RE, "").trim();
-        return t.length > 1 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    const walkRoot = (r) => {
+      const walker = document.createTreeWalker(r, NodeFilter.SHOW_TEXT, {
+        acceptNode(n) {
+          const t = (n.textContent || "").replace(ZERO_WIDTH_RE, "").trim();
+          return t.length > 1 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+        }
+      });
+      let node;
+      while ((node = walker.nextNode()) && blocks.length < fieldDefs.length + 10) {
+        const text = (node.textContent || "").replace(ZERO_WIDTH_RE, "").trim();
+        if (text.length > 1 && !blocks.includes(text)) blocks.push(text);
       }
-    });
-    let node;
-    while ((node = walker.nextNode()) && blocks.length < fieldDefs.length + 10) {
-      const text = (node.textContent || "").replace(ZERO_WIDTH_RE, "").trim();
-      if (text.length > 1 && !blocks.includes(text)) blocks.push(text);
-    }
+    };
+    walkRoot(root);
+    // Pierce shadow DOM if light DOM yielded nothing
+    if (blocks.length === 0 && root.shadowRoot) walkRoot(root.shadowRoot);
     const row = {};
     for (let i = 0; i < fieldDefs.length; i++) {
       row[fieldDefs[i].name] = i < blocks.length ? blocks[i] : null;
@@ -1015,6 +1056,14 @@ const PAGE_READ_VIEW = (payload) => {
       items = container.querySelectorAll(typeof selector === "string" ? selector : selector.value);
     } catch {
       return { ok: false, error: "ERR_TARGET_NOT_FOUND", message: "Item selector invalid" };
+    }
+
+    // Try container's shadow root
+    if ((!items || items.length === 0) && container.shadowRoot) {
+      try {
+        const sel = itemLocator.value || itemLocator;
+        items = container.shadowRoot.querySelectorAll(typeof sel === "string" ? sel : sel.value);
+      } catch {}
     }
 
     // If no items found with the item selector, try document-wide before generic fallbacks
@@ -1367,9 +1416,16 @@ const runWorkflowSteps = async (tabId, baseOrigin, steps, outcomes, inputs) => {
           await new Promise(r => setTimeout(r, 1000));
           const apiData = await readNetworkData(tabId, step.viewConfig.apiRequest, step.viewConfig.apiFields);
           if (apiData != null) {
-            console.log("[browserwire] read_view: got data from network API");
-            lastReadData = apiData;
-            continue;
+            // Quality gate: check that the data has substance
+            const hasSubstance = Array.isArray(apiData)
+              ? apiData.length > 0 && apiData.some(row => Object.values(row).some(v => v != null && v !== ''))
+              : Object.values(apiData).some(v => v != null && v !== '');
+            if (hasSubstance) {
+              console.log("[browserwire] read_view: got data from network API");
+              lastReadData = apiData;
+              continue;
+            }
+            console.log("[browserwire] read_view: network API data empty, falling back to DOM");
           }
           console.log("[browserwire] read_view: no network match, falling back to DOM");
         }

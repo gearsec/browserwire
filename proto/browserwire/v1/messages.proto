@@ -1,0 +1,204 @@
+syntax = "proto3";
+
+package browserwire.v1;
+
+import "browserwire/v1/manifest.proto";
+import "browserwire/v1/skeleton.proto";
+
+// ─── Envelope ────────────────────────────────────────────────────────
+// Single top-level message sent over WebSocket binary frames.
+// The oneof discriminator replaces the JSON string `type` field.
+
+message Envelope {
+  string request_id = 1;
+
+  oneof payload {
+    Hello hello = 2;
+    HelloAck hello_ack = 3;
+    Ping ping = 4;
+    Pong pong = 5;
+    Status status = 6;
+    Error error = 7;
+    DiscoverySnapshot discovery_snapshot = 8;
+    DiscoveryAck discovery_ack = 9;
+    DiscoverySessionStart discovery_session_start = 10;
+    DiscoverySessionStop discovery_session_stop = 11;
+    DiscoveryIncremental discovery_incremental = 12;
+    DiscoverySessionStatus discovery_session_status = 13;
+    ManifestReady manifest_ready = 14;
+    BatchProcessingStatus batch_processing_status = 15;
+    ExecuteWorkflow execute_workflow = 16;
+    WorkflowResult workflow_result = 17;
+  }
+}
+
+// ─── Handshake ───────────────────────────────────────────────────────
+
+message Hello {
+  string client = 1;
+  string version = 2;
+}
+
+message HelloAck {
+  bool accepted = 1;
+  string server = 2;
+  string protocol_version = 3;
+}
+
+// ─── Heartbeat ───────────────────────────────────────────────────────
+
+message Ping {
+  string source = 1;
+}
+
+message Pong {
+  string server_time = 1;
+}
+
+// ─── Status / Error ──────────────────────────────────────────────────
+
+message Status {
+  string state = 1;
+  string server_time = 2;
+}
+
+message Error {
+  string code = 1;
+  string message = 2;
+}
+
+// ─── Legacy One-Shot Discovery ───────────────────────────────────────
+
+message DiscoverySnapshot {
+  string url = 1;
+  string title = 2;
+  string captured_at = 3;
+  string page_text = 4;
+  repeated SkeletonEntry elements = 5;
+  repeated SkeletonEntry a11y = 6;
+}
+
+message DiscoveryAck {
+  int32 element_count = 1;
+  int32 a11y_count = 2;
+  int32 interactable_count = 3;
+  int32 entity_count = 4;
+  int32 action_count = 5;
+  string url = 6;
+  string acked_at = 7;
+}
+
+// ─── Session Lifecycle ───────────────────────────────────────────────
+
+message DiscoverySessionStart {
+  string session_id = 1;
+  int32 tab_id = 2;
+  string url = 3;
+  string title = 4;
+  string started_at = 5;
+}
+
+// Snapshot sent with stop payload for batched processing
+message SnapshotPayload {
+  string snapshot_id = 1;
+  string session_id = 2;
+  Trigger trigger = 3;
+  repeated SkeletonEntry skeleton = 4;
+  string page_text = 5;
+  string url = 6;
+  string title = 7;
+  double device_pixel_ratio = 8;
+  string captured_at = 9;
+  PageState page_state = 10;
+  repeated NetworkLogEntry network_log = 11;
+  bytes embedded_data = 12;       // UTF-8 JSON
+  bytes screenshot = 13;          // raw JPEG bytes
+  int32 tab_id = 14;
+  int32 frame_id = 15;
+}
+
+message DiscoverySessionStop {
+  string session_id = 1;
+  string batch_id = 2;
+  string note = 3;
+  string stopped_at = 4;
+  repeated SnapshotPayload pending_snapshots = 5;
+}
+
+// ─── Incremental Discovery ──────────────────────────────────────────
+
+message DiscoveryIncremental {
+  string snapshot_id = 1;
+  string session_id = 2;
+  Trigger trigger = 3;
+  repeated SkeletonEntry skeleton = 4;
+  string page_text = 5;
+  string url = 6;
+  string title = 7;
+  double device_pixel_ratio = 8;
+  string captured_at = 9;
+  PageState page_state = 10;
+  repeated NetworkLogEntry network_log = 11;
+  bytes embedded_data = 12;       // UTF-8 JSON
+  bytes screenshot = 13;          // raw JPEG bytes
+  int32 tab_id = 14;
+  int32 frame_id = 15;
+}
+
+// ─── Session Status ─────────────────────────────────────────────────
+
+message DiscoverySessionStatus {
+  string session_id = 1;
+  int32 snapshot_count = 2;
+  int32 entity_count = 3;
+  int32 action_count = 4;
+  int32 view_count = 5;
+  bool finalized = 6;
+}
+
+// ─── Manifest Ready ─────────────────────────────────────────────────
+
+message ManifestReady {
+  string session_id = 1;
+  BrowserWireManifest manifest = 2;
+}
+
+// ─── Batch Processing ───────────────────────────────────────────────
+
+enum BatchStatus {
+  BATCH_STATUS_UNSPECIFIED = 0;
+  BATCH_STATUS_PENDING = 1;
+  BATCH_STATUS_PROCESSING = 2;
+  BATCH_STATUS_COMPLETE = 3;
+  BATCH_STATUS_ERROR = 4;
+}
+
+message BatchProcessingStatus {
+  string batch_id = 1;
+  string session_id = 2;
+  BatchStatus status = 3;
+  BrowserWireManifest manifest = 4;    // present when status == COMPLETE
+  string error = 5;                     // present when status == ERROR
+}
+
+// ─── Workflow Execution ─────────────────────────────────────────────
+
+message ExecuteWorkflow {
+  string workflow_name = 1;
+  map<string, string> inputs = 2;
+  string origin = 3;
+}
+
+message WorkflowStepResult {
+  string step_type = 1;
+  bool ok = 2;
+  string error = 3;
+  bytes data = 4;             // UTF-8 JSON for step result data
+}
+
+message WorkflowResult {
+  bool ok = 1;
+  string error = 2;
+  repeated WorkflowStepResult steps = 3;
+  bytes data = 4;             // UTF-8 JSON for final result data
+}

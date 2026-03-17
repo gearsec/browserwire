@@ -112,7 +112,7 @@ Respond with ONLY valid JSON (no markdown fences, no explanation):
       "containerSelector": "CSS selector for the data region",
       "itemSelector": "CSS selector for each repeating item (relative to container, omit if isList=false)",
       "fields": [
-        { "name": "field_name", "type": "string|number|boolean|date", "selector": "CSS selector relative to item/container" }
+        { "name": "field_name", "type": "string|number|boolean|date", "selector": "CSS selector relative to item/container", "attribute": "optional: attribute name to extract instead of textContent" }
       ],
       "apiRequest": { "method": "string", "pathPattern": "string", "matchOn": { "operationName?": "string", "queryParams?": ["string"] } },
       "apiFields": { "field_name": "json.path.in.response", "...": "..." },
@@ -171,6 +171,22 @@ For dynamic views, NEVER hardcode specific values (names, dates, IDs, usernames)
 Use structural selectors: class names, data-* attributes, tag+attribute combos, ARIA roles.
 A selector like \`.event-title\` is correct. A selector like \`[data-id="123"]\` is wrong.
 
+## Attribute Extraction
+
+Some important data (entity IDs, URLs, slugs) is stored in element attributes, not visible text.
+
+For each view, look for:
+- Permalink/detail URLs in <a href="..."> that contain entity IDs or slugs
+- Custom element attributes (data-id, data-post-id, id, etc.)
+- Hidden metadata needed to chain API calls (IDs, tokens, slugs)
+
+When a field value lives in an attribute rather than text content, add "attribute" to the field:
+  { "name": "post_permalink", "type": "string", "selector": "a[data-click-id='body']", "attribute": "href" }
+  { "name": "item_id", "type": "string", "selector": "[data-testid='item']", "attribute": "data-id" }
+
+ALWAYS include ID/permalink fields for list views — they are essential for chaining into detail endpoints.
+Do NOT use "attribute" for fields where textContent is the right extraction (titles, labels, counts).
+
 ## Page State Signal Rules
 
 For each pageState, provide 2–4 \`stateSignals\` to identify this specific UI state, especially for SPAs where URLs don't change:
@@ -211,6 +227,19 @@ const describeShape = (obj, maxDepth, depth = 0) => {
   return `{ ${parts.join(", ")}${Object.keys(obj).length > 12 ? ", ..." : ""} }`;
 };
 
+const buildEmbeddedDataContext = (embeddedData) => {
+  if (!embeddedData?.entries?.length) return "";
+  const lines = ["Embedded data found in page <script> tags (SSR/hydration state):"];
+  for (const entry of embeddedData.entries) {
+    let line = `- ${entry.source} (${entry.sizeBytes} bytes, matched ${entry.matchedSamples} visible text strings)`;
+    if (entry.data != null) {
+      line += `\n  Shape: ${describeShape(entry.data, 3)}`;
+    }
+    lines.push(line);
+  }
+  return lines.join("\n");
+};
+
 const buildNetworkContext = (networkLog) => {
   if (!networkLog?.length) return "";
 
@@ -220,7 +249,7 @@ const buildNetworkContext = (networkLog) => {
       const path = new URL(entry.url).pathname
         .replace(/\/[0-9a-f]{8,}(?:-[0-9a-f]{4,}){0,4}/gi, '/:id')
         .replace(/\/\d+/g, '/:id');
-      const opName = entry.requestBody?.operationName;
+      const opName = entry.requestBody?.operationName || entry.requestBody?.operation;
       const key = opName ? `${entry.method} ${path} [${opName}]` : `${entry.method} ${path}`;
       if (!grouped.has(key)) grouped.set(key, entry);
     } catch {}
@@ -391,12 +420,27 @@ const validatePerception = (rawResponse, validScanIds) => {
     }
   }
 
+  // CSS selector validation helper
+  const isValidCssSelector = (sel) => {
+    if (!sel || typeof sel !== 'string') return false;
+    // Reject jQuery pseudo-classes not valid in CSS
+    if (/:contains\(/i.test(sel)) return false;
+    // Reject selectors with hardcoded URL paths/slugs (likely snapshot-specific)
+    if (/\[href\*=['"][^'"]{20,}['"]\]/.test(sel)) return false;
+    return true;
+  };
+
   // Validate views
   const views = [];
   if (Array.isArray(parsed.views)) {
     for (const v of parsed.views) {
       if (!v || typeof v.name !== "string" || typeof v.containerSelector !== "string") continue;
       if (isSkeletonSelector(v.containerSelector)) continue;
+      if (!isValidCssSelector(v.containerSelector)) {
+        console.warn(`[browserwire-cli] view "${v.name}": invalid containerSelector "${v.containerSelector}", skipping container`);
+        // Strip the invalid container — let body fallback work
+        v.containerSelector = "body";
+      }
       if (!Array.isArray(v.fields) || v.fields.length === 0) continue;
 
       const validFields = v.fields.filter(
@@ -404,10 +448,12 @@ const validatePerception = (rawResponse, validScanIds) => {
           && f.selector.trim() !== ""
           && !isSkeletonSelector(f.selector)
           && !isTooGeneric(f.selector)
+          && isValidCssSelector(f.selector)
       ).map((f) => ({
         name: f.name,
         type: ["string", "number", "boolean", "date"].includes(f.type) ? f.type : "string",
-        selector: f.selector
+        selector: f.selector,
+        ...(typeof f.attribute === "string" && f.attribute.trim() ? { attribute: f.attribute.trim() } : {})
       }));
 
       if (validFields.length === 0) continue;
@@ -544,7 +590,7 @@ export const perceiveSnapshot = async (payload) => {
     return null;
   }
 
-  const { skeleton = [], screenshot, pageText, url, title, networkLog } = payload;
+  const { skeleton = [], screenshot, pageText, url, title, networkLog, embeddedData } = payload;
 
   if (skeleton.length === 0) {
     console.warn("[browserwire-cli] empty skeleton, skipping perception");
@@ -555,12 +601,14 @@ export const perceiveSnapshot = async (payload) => {
   const validScanIds = new Set(skeleton.map((e) => e.scanId));
 
   const networkContext = buildNetworkContext(networkLog);
+  const embeddedContext = buildEmbeddedDataContext(embeddedData);
 
   const skeletonKB = Math.round(htmlSkeleton.length / 1024 * 10) / 10;
   console.log(
     `[browserwire-cli] perceiving: ${skeleton.length} skeleton elements (${skeletonKB}KB html), ` +
     `screenshot=${screenshot ? "yes" : "no"}` +
-    (networkLog?.length ? `, networkLog=${networkLog.length}` : "")
+    (networkLog?.length ? `, networkLog=${networkLog.length}` : "") +
+    (embeddedData?.entries?.length ? `, embeddedData=${embeddedData.entries.length}` : "")
   );
 
   const context = [
@@ -572,7 +620,8 @@ export const perceiveSnapshot = async (payload) => {
   const userContent = [
     context,
     `\nHTML Skeleton:\n${htmlSkeleton}`,
-    networkContext ? `\n${networkContext}` : ""
+    networkContext ? `\n${networkContext}` : "",
+    embeddedContext ? `\n${embeddedContext}` : ""
   ].filter(Boolean).join("\n");
 
   let rawResponse;

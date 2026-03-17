@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdirSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { parseArgs } from "node:util";
 
 // Load .env file (if present) without overriding existing env vars
@@ -103,6 +104,9 @@ if (flags["extension-path"]) {
   console.log(extPath);
   process.exit(0);
 }
+
+// --- Ensure data directory exists ---
+mkdirSync(join(homedir(), ".browserwire"), { recursive: true });
 
 // --- Server mode: load config and start ---
 const { loadConfig } = await import("./config.js");

@@ -47,27 +47,37 @@
       if (shouldCapture) {
         try {
           const ct = response.headers.get('content-type') || '';
+          let responseBody = null;
+          let bodyTruncated = false;
+          let bodySizeBytes = null;
+
           if (JSON_CT_RE.test(ct)) {
             const clone = response.clone();
             const text = await clone.text();
+            bodySizeBytes = text.length;
             if (text.length <= MAX_BODY_BYTES) {
-              let queryParams = null;
-              try {
-                const u = new URL(reqUrl);
-                if (u.search) queryParams = Object.fromEntries(u.searchParams);
-              } catch {}
-
-              post("entry", {
-                id: ++_idCounter,
-                transport: "fetch",
-                url: reqUrl, method: reqMethod, status: response.status,
-                timestamp: startTime, durationMs: Date.now() - startTime,
-                requestBody,
-                queryParams,
-                responseBody: JSON.parse(text), bodySizeBytes: text.length
-              });
+              responseBody = JSON.parse(text);
+            } else {
+              bodyTruncated = true;
+              try { responseBody = JSON.parse(text.slice(0, MAX_BODY_BYTES)); } catch {}
             }
           }
+
+          let queryParams = null;
+          try {
+            const u = new URL(reqUrl);
+            if (u.search) queryParams = Object.fromEntries(u.searchParams);
+          } catch {}
+
+          post("entry", {
+            id: ++_idCounter,
+            transport: "fetch",
+            url: reqUrl, method: reqMethod, status: response.status,
+            contentType: ct,
+            timestamp: startTime, durationMs: Date.now() - startTime,
+            requestBody, queryParams,
+            responseBody, bodySizeBytes, bodyTruncated
+          });
         } catch {}
         post("req_end", { url: reqUrl });
       }
@@ -123,23 +133,36 @@
       if (shouldCapture) {
         try {
           const ct = this.getResponseHeader('content-type') || '';
-          if (JSON_CT_RE.test(ct) && this.responseText && this.responseText.length <= MAX_BODY_BYTES) {
-            let queryParams = null;
-            try {
-              const u = new URL(reqUrl, window.location.origin);
-              if (u.search) queryParams = Object.fromEntries(u.searchParams);
-            } catch {}
+          let responseBody = null;
+          let bodyTruncated = false;
+          let bodySizeBytes = null;
 
-            post("entry", {
-              id: ++_idCounter,
-              transport: "xhr",
-              url: reqUrl, method: reqMethod, status: this.status,
-              timestamp: startTime, durationMs: Date.now() - startTime,
-              requestBody,
-              queryParams,
-              responseBody: JSON.parse(this.responseText), bodySizeBytes: this.responseText.length
-            });
+          if (JSON_CT_RE.test(ct) && this.responseText) {
+            const respText = this.responseText;
+            bodySizeBytes = respText.length;
+            if (respText.length <= MAX_BODY_BYTES) {
+              responseBody = JSON.parse(respText);
+            } else {
+              bodyTruncated = true;
+              try { responseBody = JSON.parse(respText.slice(0, MAX_BODY_BYTES)); } catch {}
+            }
           }
+
+          let queryParams = null;
+          try {
+            const u = new URL(reqUrl, window.location.origin);
+            if (u.search) queryParams = Object.fromEntries(u.searchParams);
+          } catch {}
+
+          post("entry", {
+            id: ++_idCounter,
+            transport: "xhr",
+            url: reqUrl, method: reqMethod, status: this.status,
+            contentType: ct,
+            timestamp: startTime, durationMs: Date.now() - startTime,
+            requestBody, queryParams,
+            responseBody, bodySizeBytes, bodyTruncated
+          });
         } catch {}
         post("req_end", { url: reqUrl });
       }
@@ -147,4 +170,78 @@
 
     return _origSend.call(this, body);
   };
+  // ─── SSR Embedded Data Extraction ───────────────────────────────────
+
+  const extractEmbeddedData = () => {
+    // 1. Collect visible text strings from the DOM
+    const samples = [];
+    const candidates = document.querySelectorAll(
+      'h1, h2, h3, h4, h5, h6, [role="heading"], p, span, a, td, th, li, label, figcaption, blockquote, dt, dd, caption'
+    );
+    for (const el of candidates) {
+      const text = (el.textContent || '').trim();
+      if (!text) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        samples.push(text);
+      }
+    }
+
+    if (samples.length === 0) return;
+
+    // 2. Scan all <script> tags for JSON containing visible text
+    const found = [];
+    const scripts = document.querySelectorAll('script');
+
+    for (const el of scripts) {
+      try {
+        const raw = el.textContent || '';
+        if (!raw) continue;
+
+        // Check if any sampled text appears in this script
+        const matchedSamples = samples.filter(s => raw.includes(s));
+        if (matchedSamples.length === 0) continue;
+
+        // Extract JSON
+        let data = null;
+        let jsonStr = null;
+
+        if (el.type === 'application/json' || el.type === 'application/ld+json') {
+          jsonStr = raw;
+        } else {
+          // JS assignment pattern: window.X = {...} or var X = [...]
+          const m = raw.match(/=\s*(\{[\s\S]*\}|\[[\s\S]*\])\s*;?\s*$/);
+          if (m) jsonStr = m[1];
+        }
+
+        if (!jsonStr) continue;
+
+        try { data = JSON.parse(jsonStr); } catch { continue; }
+
+        const source = el.id
+          ? `script#${el.id}`
+          : el.type === 'application/json' || el.type === 'application/ld+json'
+            ? `script[type=${el.type}]`
+            : 'script (inline)';
+
+        found.push({
+          source,
+          sizeBytes: jsonStr.length,
+          matchedSamples: matchedSamples.length,
+          data
+        });
+      } catch {}
+    }
+
+    if (found.length > 0) {
+      post("embedded_data", { entries: found });
+    }
+  };
+
+  // Run once after DOM is ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', extractEmbeddedData, { once: true });
+  } else {
+    setTimeout(extractEmbeddedData, 0);
+  }
 })();

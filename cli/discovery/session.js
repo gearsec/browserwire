@@ -193,7 +193,12 @@ const buildViewDefs = (perceptionViews, entityNameToId, capturedAt) => {
     const fields = v.fields.map((f) => ({
       name: f.name,
       type: f.type || "string",
-      locator: { kind: "css", value: f.selector, confidence: 0.8 }
+      locator: {
+        kind: "css",
+        value: f.selector,
+        confidence: 0.8,
+        ...(f.attribute ? { attribute: f.attribute } : {})
+      }
     }));
 
     return {
@@ -647,6 +652,7 @@ export class DiscoverySession {
     const skeleton = Array.isArray(payload.skeleton) ? payload.skeleton : [];
     const pageState = payload.pageState || null;
     const networkLog = Array.isArray(payload.networkLog) ? payload.networkLog : [];
+    const embeddedData = payload.embeddedData || null;
 
     console.log(
       `[browserwire-cli] session ${this.sessionId} snapshot #${snapshotNum}: ` +
@@ -665,7 +671,8 @@ export class DiscoverySession {
         pageText,
         url,
         title,
-        networkLog
+        networkLog,
+        embeddedData
       });
     } catch (error) {
       console.warn(`[browserwire-cli]   perception failed: ${error.message}`);

@@ -9,7 +9,13 @@
     "url": "https://github.com/gearsec/browserwire.git"
   },
   "homepage": "https://github.com/gearsec/browserwire",
-  "keywords": ["browser", "automation", "ai-agent", "api", "discovery"],
+  "keywords": [
+    "browser",
+    "automation",
+    "ai-agent",
+    "api",
+    "discovery"
+  ],
   "bin": {
     "browserwire": "cli/index.js"
   },
@@ -32,17 +38,24 @@
     "test:watch": "vitest",
     "cli:dev": "node cli/index.js",
     "cli:debug": "node cli/index.js --debug",
+    "proto:generate": "buf generate",
+    "proto:bundle": "esbuild extension/shared/gen/index.js --bundle --format=esm --outfile=extension/shared/proto-bundle.js",
+    "proto": "npm run proto:generate && npm run proto:bundle",
     "ext:package": "node scripts/package-extension.js",
     "ext:publish": "node scripts/publish-cws.js"
   },
   "devDependencies": {
+    "@bufbuild/buf": "^1.66.1",
+    "@bufbuild/protoc-gen-es": "^2.11.0",
     "@types/node": "^22.10.2",
     "archiver": "^7.0.1",
     "chrome-webstore-upload": "^3.0.4",
+    "esbuild": "^0.27.4",
     "typescript": "^5.8.2",
     "vitest": "^3.2.4"
   },
   "dependencies": {
+    "@bufbuild/protobuf": "^2.11.0",
     "@rrweb/record": "^2.0.0-alpha.20",
     "ws": "^8.19.0"
   }

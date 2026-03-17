@@ -18,6 +18,7 @@ const DEBUG = false;
 let _pendingNetwork = 0;
 const _networkLog = [];
 const NETWORK_LOG_CAP = 100;
+let _embeddedData = null;
 
 const drainNetworkLog = () => _networkLog.splice(0);
 
@@ -69,6 +70,8 @@ window.addEventListener("message", (event) => {
   } else if (msg.type === "entry") {
     _networkLog.push(msg.detail);
     if (_networkLog.length > NETWORK_LOG_CAP) _networkLog.shift();
+  } else if (msg.type === "embedded_data") {
+    _embeddedData = msg.detail;
   }
 });
 
@@ -187,7 +190,8 @@ const executeScan = () => {
         devicePixelRatio: skeletonResult.devicePixelRatio,
         capturedAt: skeletonResult.capturedAt,
         pageState: skeletonResult.pageState,
-        networkLog: drainNetworkLog()
+        networkLog: drainNetworkLog(),
+        embeddedData: _embeddedData || null
       }
     }, () => {
       void chrome.runtime.lastError;
@@ -382,11 +386,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.command === "get_network_log") {
     const apiRequest = message.apiRequest;
-    let entries = _networkLog.splice(0);
+    let entries = [..._networkLog];  // non-destructive copy
     if (apiRequest) {
       entries = entries.filter(e => matchesApiRequest(e, apiRequest));
     }
     sendResponse({ ok: true, entries });
+    return false;
+  }
+
+  if (message.command === "clear_network_log") {
+    _networkLog.splice(0);
+    sendResponse({ ok: true });
     return false;
   }
 

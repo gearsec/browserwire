@@ -10,9 +10,10 @@
 
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { homedir } from "node:os";
 
 export class ManifestStore {
-  constructor(baseDir = resolve(process.cwd(), "manifests")) {
+  constructor(baseDir = resolve(homedir(), ".browserwire", "manifests")) {
     this.baseDir = baseDir;
   }
 
@@ -135,6 +136,6 @@ export class ManifestStore {
 
     await writeFile(metaPath, JSON.stringify(meta, null, 2), "utf8");
 
-    console.log(`[browserwire-cli] manifest saved for ${origin} → manifests/${slug}/`);
+    console.log(`[browserwire-cli] manifest saved for ${origin} → ~/.browserwire/manifests/${slug}/`);
   }
 }

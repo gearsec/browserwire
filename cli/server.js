@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { homedir } from "node:os";
 import { WebSocketServer } from "ws";
 import {
   createEnvelope,
@@ -8,6 +9,7 @@ import {
   parseEnvelope,
   PROTOCOL_VERSION
 } from "../extension/shared/protocol.js";
+import { encode, decode } from "../extension/shared/codec.js";
 import { classifyInteractables } from "./discovery/classify.js";
 import { groupEntities } from "./discovery/entities.js";
 import { synthesizeAllLocators } from "./discovery/locators.js";
@@ -31,6 +33,46 @@ const manifestStore = new ManifestStore();
 const siteManifests = new Map();   // origin → manifest (in-memory cache)
 let extensionSocket = null;
 const bridge = createBridge();
+
+/**
+ * Create a send helper for a socket that tracks whether the client
+ * speaks binary (protobuf) or JSON.  The first message from the client
+ * determines the mode.
+ */
+const createSocketSender = () => {
+  let useBinary = false;
+
+  return {
+    /** Mark this socket as binary-capable (called when we receive a binary frame) */
+    setBinary() { useBinary = true; },
+    isBinary() { return useBinary; },
+
+    /** Send a message, encoding as protobuf (binary) or JSON depending on client mode */
+    send(socket, type, payload = {}, requestId) {
+      if (socket.readyState !== 1) return;
+      if (useBinary) {
+        socket.send(encode(type, payload, requestId));
+      } else {
+        socket.send(JSON.stringify(createEnvelope(type, payload, requestId)));
+      }
+    }
+  };
+};
+
+/**
+ * Decode an incoming message — supports both binary (protobuf) and JSON.
+ * Returns { message, isBinary } or { message: null }.
+ */
+const decodeMessage = (data, isBinary) => {
+  if (isBinary) {
+    const bytes = data instanceof Buffer ? new Uint8Array(data) : data;
+    const message = decode(bytes);
+    return { message, isBinary: true };
+  }
+  // JSON fallback
+  const message = parseEnvelope(data.toString());
+  return { message, isBinary: false };
+};
 
 export const startServer = async ({
   host = "127.0.0.1",
@@ -84,69 +126,50 @@ export const startServer = async ({
   wss.on("connection", (socket, req) => {
     const clientId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const source = req.socket.remoteAddress || "unknown";
+    const sender = createSocketSender();
 
     console.log(`[browserwire-cli] client connected ${clientId} from ${source}`);
 
     const statusTimer = setInterval(() => {
-      if (socket.readyState === 1) {
-        socket.send(
-          JSON.stringify(
-            createEnvelope(MessageType.STATUS, {
-              state: "connected",
-              serverTime: new Date().toISOString()
-            })
-          )
-        );
-      }
+      sender.send(socket, MessageType.STATUS, {
+        state: "connected",
+        serverTime: new Date().toISOString()
+      });
     }, CLIENT_STATUS_INTERVAL_MS);
 
-    socket.on("message", async (data) => {
-      const message = parseEnvelope(data.toString());
+    socket.on("message", async (data, isBinary) => {
+      const { message, isBinary: clientIsBinary } = decodeMessage(data, isBinary);
+
+      if (clientIsBinary) {
+        sender.setBinary();
+      }
 
       if (!message) {
-        socket.send(
-          JSON.stringify(
-            createEnvelope(MessageType.ERROR, {
-              code: "invalid_message",
-              message: "Expected JSON message with a string 'type' field."
-            })
-          )
-        );
+        sender.send(socket, MessageType.ERROR, {
+          code: "invalid_message",
+          message: "Could not decode message (expected protobuf binary or JSON)."
+        });
         return;
       }
 
       if (message.type === MessageType.HELLO) {
         // Track as extension socket
         extensionSocket = socket;
+        // Stash the sender on the socket for the bridge to use
+        socket._bwSender = sender;
 
-        socket.send(
-          JSON.stringify(
-            createEnvelope(
-              MessageType.HELLO_ACK,
-              {
-                accepted: true,
-                server: "browserwire-cli",
-                protocolVersion: PROTOCOL_VERSION
-              },
-              message.requestId
-            )
-          )
-        );
+        sender.send(socket, MessageType.HELLO_ACK, {
+          accepted: true,
+          server: "browserwire-cli",
+          protocolVersion: PROTOCOL_VERSION
+        }, message.requestId);
         return;
       }
 
       if (message.type === MessageType.PING) {
-        socket.send(
-          JSON.stringify(
-            createEnvelope(
-              MessageType.PONG,
-              {
-                serverTime: new Date().toISOString()
-              },
-              message.requestId
-            )
-          )
-        );
+        sender.send(socket, MessageType.PONG, {
+          serverTime: new Date().toISOString()
+        }, message.requestId);
         return;
       }
 
@@ -184,15 +207,8 @@ export const startServer = async ({
           `[browserwire-cli] session started: ${sessionId} site=${site}`
         );
 
-        socket.send(
-          JSON.stringify(
-            createEnvelope(
-              MessageType.DISCOVERY_SESSION_STATUS,
-              session.getStats(),
-              message.requestId
-            )
-          )
-        );
+        sender.send(socket, MessageType.DISCOVERY_SESSION_STATUS,
+          session.getStats(), message.requestId);
         return;
       }
 
@@ -205,15 +221,9 @@ export const startServer = async ({
 
         if (!session) {
           console.warn(`[browserwire-cli] session stop for unknown session: ${sessionId}`);
-          socket.send(
-            JSON.stringify(
-              createEnvelope(
-                MessageType.ERROR,
-                { code: "unknown_session", message: `Session ${sessionId} not found` },
-                message.requestId
-              )
-            )
-          );
+          sender.send(socket, MessageType.ERROR,
+            { code: "unknown_session", message: `Session ${sessionId} not found` },
+            message.requestId);
           return;
         }
 
@@ -227,10 +237,8 @@ export const startServer = async ({
         const doFinalize = async () => {
           // Notify extension that processing is now active
           if (batchId) {
-            socket.send(JSON.stringify(createEnvelope(
-              MessageType.BATCH_PROCESSING_STATUS,
-              { batchId, sessionId, status: "processing" }
-            )));
+            sender.send(socket, MessageType.BATCH_PROCESSING_STATUS,
+              { batchId, sessionId, status: "processing" });
           }
 
           // Re-seed with the latest manifest so merges are cumulative
@@ -254,16 +262,14 @@ export const startServer = async ({
           if (!manifest) {
             console.log(`[browserwire-cli] session ${sessionId} produced no manifest`);
             if (batchId) {
-              socket.send(JSON.stringify(createEnvelope(
-                MessageType.BATCH_PROCESSING_STATUS,
-                { batchId, sessionId, status: "complete", manifest: null }
-              )));
+              sender.send(socket, MessageType.BATCH_PROCESSING_STATUS,
+                { batchId, sessionId, status: "complete", manifest: null });
             }
             return;
           }
 
           // Write output files
-          const sessionDir = resolve(process.cwd(), `logs/session-${sessionId}`);
+          const sessionDir = resolve(homedir(), ".browserwire", `logs/session-${sessionId}`);
           await mkdir(sessionDir, { recursive: true });
           await Promise.all([
             writeFile(
@@ -320,25 +326,14 @@ export const startServer = async ({
 
           // Send batch complete + manifest ready
           if (batchId) {
-            socket.send(JSON.stringify(createEnvelope(
-              MessageType.BATCH_PROCESSING_STATUS,
-              { batchId, sessionId, status: "complete", manifest: enrichedManifest }
-            )));
+            sender.send(socket, MessageType.BATCH_PROCESSING_STATUS,
+              { batchId, sessionId, status: "complete", manifest: enrichedManifest });
           }
-          socket.send(JSON.stringify(createEnvelope(
-            MessageType.MANIFEST_READY,
-            { sessionId, manifest: enrichedManifest }
-          )));
+          sender.send(socket, MessageType.MANIFEST_READY,
+            { sessionId, manifest: enrichedManifest });
 
-          socket.send(
-            JSON.stringify(
-              createEnvelope(
-                MessageType.DISCOVERY_SESSION_STATUS,
-                { ...session.getStats(), finalized: true },
-                message.requestId
-              )
-            )
-          );
+          sender.send(socket, MessageType.DISCOVERY_SESSION_STATUS,
+            { ...session.getStats(), finalized: true }, message.requestId);
         };
 
         // For sessions with a known origin, serialize finalization through a per-origin queue.
@@ -346,20 +341,16 @@ export const startServer = async ({
         if (origin) {
           // Immediately notify extension that this batch is queued
           if (batchId) {
-            socket.send(JSON.stringify(createEnvelope(
-              MessageType.BATCH_PROCESSING_STATUS,
-              { batchId, sessionId, status: "pending" }
-            )));
+            sender.send(socket, MessageType.BATCH_PROCESSING_STATUS,
+              { batchId, sessionId, status: "pending" });
           }
 
           const prev = originQueues.get(origin) || Promise.resolve();
           const work = prev.then(() => doFinalize().catch((error) => {
             console.error(`[browserwire-cli] session finalization failed:`, error);
             if (batchId) {
-              socket.send(JSON.stringify(createEnvelope(
-                MessageType.BATCH_PROCESSING_STATUS,
-                { batchId, sessionId, status: "error", error: error.message }
-              )));
+              sender.send(socket, MessageType.BATCH_PROCESSING_STATUS,
+                { batchId, sessionId, status: "error", error: error.message });
             }
           }).finally(() => {
             activeSessions.delete(sessionId);
@@ -368,18 +359,14 @@ export const startServer = async ({
         } else {
           // No origin — run immediately (no queuing)
           if (batchId) {
-            socket.send(JSON.stringify(createEnvelope(
-              MessageType.BATCH_PROCESSING_STATUS,
-              { batchId, sessionId, status: "processing" }
-            )));
+            sender.send(socket, MessageType.BATCH_PROCESSING_STATUS,
+              { batchId, sessionId, status: "processing" });
           }
           doFinalize().catch((error) => {
             console.error(`[browserwire-cli] session finalization failed:`, error);
             if (batchId) {
-              socket.send(JSON.stringify(createEnvelope(
-                MessageType.BATCH_PROCESSING_STATUS,
-                { batchId, sessionId, status: "error", error: error.message }
-              )));
+              sender.send(socket, MessageType.BATCH_PROCESSING_STATUS,
+                { batchId, sessionId, status: "error", error: error.message });
             }
           }).finally(() => {
             activeSessions.delete(sessionId);
@@ -408,18 +395,11 @@ export const startServer = async ({
         session.addSnapshot(payload)
           .then((stats) => {
             // Broadcast updated stats back to extension
-            socket.send(
-              JSON.stringify(
-                createEnvelope(
-                  MessageType.DISCOVERY_SESSION_STATUS,
-                  stats
-                )
-              )
-            );
+            sender.send(socket, MessageType.DISCOVERY_SESSION_STATUS, stats);
 
             // Write screenshot as JPEG (always) + full snapshot JSON (debug only)
             const snapName = payload.snapshotId || `snap_${stats.snapshotCount}`;
-            const snapDir = resolve(process.cwd(), `logs/session-${sessionId}`);
+            const snapDir = resolve(homedir(), ".browserwire", `logs/session-${sessionId}`);
 
             if (payload.screenshot) {
               mkdir(snapDir, { recursive: true })
@@ -476,7 +456,7 @@ export const startServer = async ({
           `[browserwire-cli] manifest compiled: ${manifestStats.entityCount} entities, ${manifestStats.actionCount} actions`
         );
 
-        const manifestLogPath = resolve(process.cwd(), "logs/discovery-manifest.json");
+        const manifestLogPath = resolve(homedir(), ".browserwire", "logs/discovery-manifest.json");
         mkdir(dirname(manifestLogPath), { recursive: true })
           .then(() => enrichManifest(manifest, pageText, payload.capturedAt))
           .then((result) => {
@@ -491,40 +471,24 @@ export const startServer = async ({
             return writeFile(manifestLogPath, JSON.stringify(manifest, null, 2), "utf8").catch(() => {});
           });
 
-        socket.send(
-          JSON.stringify(
-            createEnvelope(
-              MessageType.DISCOVERY_ACK,
-              {
-                elementCount: elements.length,
-                a11yCount: a11y.length,
-                interactableCount: interactables.length,
-                entityCount: manifestStats.entityCount,
-                actionCount: manifestStats.actionCount,
-                url,
-                ackedAt: new Date().toISOString()
-              },
-              message.requestId
-            )
-          )
-        );
+        sender.send(socket, MessageType.DISCOVERY_ACK, {
+          elementCount: elements.length,
+          a11yCount: a11y.length,
+          interactableCount: interactables.length,
+          entityCount: manifestStats.entityCount,
+          actionCount: manifestStats.actionCount,
+          url,
+          ackedAt: new Date().toISOString()
+        }, message.requestId);
         return;
       }
 
       // ─── Unsupported ──────────────────────────────────────────
 
-      socket.send(
-        JSON.stringify(
-          createEnvelope(
-            MessageType.ERROR,
-            {
-              code: "unsupported_type",
-              message: `Unsupported message type '${message.type}'.`
-            },
-            message.requestId
-          )
-        )
-      );
+      sender.send(socket, MessageType.ERROR, {
+        code: "unsupported_type",
+        message: `Unsupported message type '${message.type}'.`
+      }, message.requestId);
     });
 
     socket.on("close", () => {
