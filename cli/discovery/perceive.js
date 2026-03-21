@@ -11,6 +11,7 @@
  */
 
 import { getLLMConfig, callLLM, callLLMWithVision } from "./llm-client.js";
+import { buildHtmlSkeleton } from "./skeleton-html.js";
 
 // ---------------------------------------------------------------------------
 // System prompt
@@ -33,7 +34,7 @@ Identify views — structured data visible on the page:
 
 For each view, provide CSS selectors for data extraction:
 - containerSelector: CSS selector for the data region
-- itemSelector: for lists, CSS selector for each repeating item (relative to container)
+- itemContainerSelector: for lists, CSS selector for each repeating item container (relative to container)
 - fields: for each data field, a CSS selector relative to the item/container
 
 ## Network API Context
@@ -110,7 +111,7 @@ Respond with ONLY valid JSON (no markdown fences, no explanation):
       "isList": true,
       "isDynamic": false,
       "containerSelector": "CSS selector for the data region",
-      "itemSelector": "CSS selector for each repeating item (relative to container, omit if isList=false)",
+      "itemContainerSelector": "CSS selector for each repeating item container (relative to container, omit if isList=false)",
       "fields": [
         { "name": "field_name", "type": "string|number|boolean|date", "selector": "CSS selector relative to item/container", "attribute": "optional: attribute name to extract instead of textContent" }
       ],
@@ -227,19 +228,6 @@ const describeShape = (obj, maxDepth, depth = 0) => {
   return `{ ${parts.join(", ")}${Object.keys(obj).length > 12 ? ", ..." : ""} }`;
 };
 
-const buildEmbeddedDataContext = (embeddedData) => {
-  if (!embeddedData?.entries?.length) return "";
-  const lines = ["Embedded data found in page <script> tags (SSR/hydration state):"];
-  for (const entry of embeddedData.entries) {
-    let line = `- ${entry.source} (${entry.sizeBytes} bytes, matched ${entry.matchedSamples} visible text strings)`;
-    if (entry.data != null) {
-      line += `\n  Shape: ${describeShape(entry.data, 3)}`;
-    }
-    lines.push(line);
-  }
-  return lines.join("\n");
-};
-
 const buildNetworkContext = (networkLog) => {
   if (!networkLog?.length) return "";
 
@@ -283,73 +271,8 @@ const buildNetworkContext = (networkLog) => {
 };
 
 // ---------------------------------------------------------------------------
-// HTML skeleton builder
-// ---------------------------------------------------------------------------
-
-/**
- * Build a compact HTML skeleton string from skeleton entries.
- * Uses id="s{scanId}" as the element marker for LLM reference.
- */
-const buildHtmlSkeleton = (skeleton) => {
-  const lines = [];
-
-  for (const entry of skeleton) {
-    const attrs = [`id="s${entry.scanId}"`];
-
-    if (entry.role) attrs.push(`role="${entry.role}"`);
-    if (entry.attributes?.href) {
-      attrs.push(`href="${entry.attributes.href.slice(0, 80)}"`);
-    }
-    if (entry.attributes?.type) {
-      attrs.push(`type="${entry.attributes.type}"`);
-    }
-    if (entry.attributes?.placeholder) {
-      attrs.push(`placeholder="${entry.attributes.placeholder.slice(0, 60)}"`);
-    }
-    if (entry.attributes?.["aria-label"]) {
-      attrs.push(`aria-label="${entry.attributes["aria-label"].slice(0, 60)}"`);
-    }
-    if (entry.attributes?.name) {
-      attrs.push(`name="${entry.attributes.name.slice(0, 40)}"`);
-    }
-    if (entry.attributes?.["data-testid"]) {
-      attrs.push(`data-testid="${entry.attributes["data-testid"].slice(0, 40)}"`);
-    }
-    if (entry.attributes?.class) {
-      attrs.push(`class="${entry.attributes.class}"`);
-    }
-
-    // Include element state as state-* attributes for LLM context
-    if (entry.state) {
-      if (entry.state.value != null) attrs.push(`state-value="${String(entry.state.value).slice(0, 60)}"`);
-      if (entry.state.checked != null) attrs.push(`state-checked="${entry.state.checked}"`);
-      if (entry.state.selectedOption != null) attrs.push(`state-selectedOption="${entry.state.selectedOption.slice(0, 40)}"`);
-      if (entry.state.disabled) attrs.push(`state-disabled="true"`);
-      if (entry.state.expanded != null) attrs.push(`state-expanded="${entry.state.expanded}"`);
-      if (entry.state.selected != null) attrs.push(`state-selected="${entry.state.selected}"`);
-    }
-
-    const attrsStr = attrs.join(" ");
-    const text = entry.text ? entry.text.slice(0, 60) : "";
-
-    // Self-closing for void / replaced elements
-    if (entry.tagName === "input" || entry.tagName === "select") {
-      lines.push(`<${entry.tagName} ${attrsStr} />`);
-    } else if (text) {
-      lines.push(`<${entry.tagName} ${attrsStr}>${text}</${entry.tagName}>`);
-    } else {
-      lines.push(`<${entry.tagName} ${attrsStr}></${entry.tagName}>`);
-    }
-  }
-
-  return lines.join("\n");
-};
-
-// ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
-
-const isSkeletonSelector = (sel) => /(?:^|[\s,])#s\d+|div#s\d+|id="s\d+"/.test(sel);
 const isTooGeneric = (sel) => /^(div|span|p|a|li|ul|section|article)$/.test(sel.trim());
 
 /**
@@ -435,7 +358,6 @@ const validatePerception = (rawResponse, validScanIds) => {
   if (Array.isArray(parsed.views)) {
     for (const v of parsed.views) {
       if (!v || typeof v.name !== "string" || typeof v.containerSelector !== "string") continue;
-      if (isSkeletonSelector(v.containerSelector)) continue;
       if (!isValidCssSelector(v.containerSelector)) {
         console.warn(`[browserwire-cli] view "${v.name}": invalid containerSelector "${v.containerSelector}", skipping container`);
         // Strip the invalid container — let body fallback work
@@ -446,7 +368,6 @@ const validatePerception = (rawResponse, validScanIds) => {
       const validFields = v.fields.filter(
         (f) => f && typeof f.name === "string" && typeof f.selector === "string"
           && f.selector.trim() !== ""
-          && !isSkeletonSelector(f.selector)
           && !isTooGeneric(f.selector)
           && isValidCssSelector(f.selector)
       ).map((f) => ({
@@ -495,7 +416,7 @@ const validatePerception = (rawResponse, validScanIds) => {
         isList: v.isList === true,
         isDynamic: v.isDynamic === true,
         containerSelector: v.containerSelector,
-        itemSelector: typeof v.itemSelector === "string" ? v.itemSelector : null,
+        itemContainerSelector: typeof v.itemContainerSelector === "string" ? v.itemContainerSelector : null,
         fields: validFields,
         ...(apiRequest ? { apiRequest } : {}),
         ...(apiFields ? { apiFields } : {}),
@@ -590,7 +511,7 @@ export const perceiveSnapshot = async (payload) => {
     return null;
   }
 
-  const { skeleton = [], screenshot, pageText, url, title, networkLog, embeddedData } = payload;
+  const { skeleton = [], screenshot, pageText, url, title, networkLog } = payload;
 
   if (skeleton.length === 0) {
     console.warn("[browserwire-cli] empty skeleton, skipping perception");
@@ -601,14 +522,12 @@ export const perceiveSnapshot = async (payload) => {
   const validScanIds = new Set(skeleton.map((e) => e.scanId));
 
   const networkContext = buildNetworkContext(networkLog);
-  const embeddedContext = buildEmbeddedDataContext(embeddedData);
 
   const skeletonKB = Math.round(htmlSkeleton.length / 1024 * 10) / 10;
   console.log(
     `[browserwire-cli] perceiving: ${skeleton.length} skeleton elements (${skeletonKB}KB html), ` +
     `screenshot=${screenshot ? "yes" : "no"}` +
-    (networkLog?.length ? `, networkLog=${networkLog.length}` : "") +
-    (embeddedData?.entries?.length ? `, embeddedData=${embeddedData.entries.length}` : "")
+    (networkLog?.length ? `, networkLog=${networkLog.length}` : "")
   );
 
   const context = [
@@ -620,8 +539,7 @@ export const perceiveSnapshot = async (payload) => {
   const userContent = [
     context,
     `\nHTML Skeleton:\n${htmlSkeleton}`,
-    networkContext ? `\n${networkContext}` : "",
-    embeddedContext ? `\n${embeddedContext}` : ""
+    networkContext ? `\n${networkContext}` : ""
   ].filter(Boolean).join("\n");
 
   let rawResponse;

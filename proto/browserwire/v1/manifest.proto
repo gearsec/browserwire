@@ -200,7 +200,7 @@ message ViewDef {
   bool is_list = 6;
   bool is_dynamic = 7;
   LocatorSetDef container_locator = 8;
-  LocatorStrategyDef item_locator = 9;
+  LocatorStrategyDef item_container = 9;
   repeated ViewFieldDef fields = 10;
   ConfidenceDef confidence = 11;
   ProvenanceDef provenance = 12;

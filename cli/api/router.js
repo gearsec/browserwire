@@ -6,7 +6,7 @@
  */
 
 import { MessageType } from "../../extension/shared/protocol.js";
-import { generateOpenApiSpec } from "./openapi.js";
+import { generateOpenApiSpec, collectReadViews } from "./openapi.js";
 import { swaggerUiHtml } from "./swagger-ui.js";
 
 const CORS_HEADERS = {
@@ -190,6 +190,67 @@ export const createHttpHandler = ({ getManifestBySlug, listSites, bridge, getSoc
         } catch (err) {
           return json(res, 500, { ok: false, error: err.message });
         }
+      }
+
+      // GET /api/sites/:slug/reads/:name — execute via extension network observation or DOM
+      const readMatch = subPath.match(/^\/reads\/([^/]+)$/);
+      if (readMatch && req.method === "GET") {
+        const readName = readMatch[1];
+        const readViews = collectReadViews(manifest);
+        const match = readViews.find(({ view }) => sanitize(view.name) === readName);
+        if (!match) return json(res, 404, { ok: false, error: `Read API '${readName}' not found in manifest` });
+
+        const page = (manifest.pages || []).find((p) =>
+          (p.views || []).some((v) => v.name === match.view.name)
+        );
+        const pageUrl = page?.routePattern || "/";
+
+        const params = {};
+        for (const [key, val] of url.searchParams.entries()) {
+          params[key] = val;
+        }
+
+        const rc = match.view.readContract;
+
+        if (rc && rc.dataSources?.length > 0) {
+          // Network-based read
+          const primary = rc.dataSources.find((ds) => ds.role === "primary") || rc.dataSources[0];
+          const apiRequest = {
+            method: primary.method,
+            pathPattern: primary.urlPattern,
+            responsePath: primary.responsePath || null,
+            ...(primary.operationName || primary.queryParams?.length ? {
+              matchOn: {
+                ...(primary.operationName ? { operationName: primary.operationName } : {}),
+                ...(primary.queryParams?.length ? { queryParams: primary.queryParams.map((q) => q.name) } : {})
+              }
+            } : {})
+          };
+          const apiFields = {};
+          for (const fm of primary.fieldMappings || []) {
+            apiFields[fm.viewField] = fm.jsonPath;
+          }
+          try {
+            const result = await bridge.sendAndAwait(socket, MessageType.EXECUTE_READ, {
+              viewName: readName, origin, pageUrl, params, apiRequest, apiFields
+            }, 30000);
+            return json(res, 200, result);
+          } catch (err) {
+            return json(res, 500, { ok: false, error: err.message });
+          }
+        } else if (match.view.viewConfig) {
+          // DOM-based read
+          try {
+            const result = await bridge.sendAndAwait(socket, MessageType.EXECUTE_READ, {
+              viewName: readName, origin, pageUrl, params, viewConfig: match.view.viewConfig
+            }, 30000);
+            return json(res, 200, result);
+          } catch (err) {
+            return json(res, 500, { ok: false, error: err.message });
+          }
+        }
+
+        return json(res, 500, { ok: false, error: "View has neither readContract nor viewConfig" });
       }
 
       // Unknown sub-path under a valid site

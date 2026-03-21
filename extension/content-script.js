@@ -18,7 +18,6 @@ const DEBUG = false;
 let _pendingNetwork = 0;
 const _networkLog = [];
 const NETWORK_LOG_CAP = 100;
-let _embeddedData = null;
 
 const drainNetworkLog = () => _networkLog.splice(0);
 
@@ -70,8 +69,6 @@ window.addEventListener("message", (event) => {
   } else if (msg.type === "entry") {
     _networkLog.push(msg.detail);
     if (_networkLog.length > NETWORK_LOG_CAP) _networkLog.shift();
-  } else if (msg.type === "embedded_data") {
-    _embeddedData = msg.detail;
   }
 });
 
@@ -167,37 +164,38 @@ const executeScan = () => {
 
   if (DEBUG) console.debug("[browserwire] executeScan", trigger?.kind, "snapshot#", state.snapshotCount + 1);
 
-  if (typeof runSkeletonScan !== "function") {
-    if (DEBUG) console.debug("[browserwire] runSkeletonScan unavailable — skipping");
+  if (typeof serializeDom !== "function") {
+    if (DEBUG) console.debug("[browserwire] serializeDom unavailable — skipping");
     return;
   }
 
   try {
-    const skeletonResult = runSkeletonScan();
+    const domHtml = serializeDom();
+    const pageText = typeof collectPageText === "function" ? collectPageText() : "";
+    const pageState = typeof capturePageState === "function" ? capturePageState() : {};
     state.snapshotCount += 1;
 
     chrome.runtime.sendMessage({
       source: "content",
-      type: "discovery_incremental",
+      type: "snapshot",
       payload: {
         snapshotId: `snap_${state.sessionId}_${state.snapshotCount}`,
         sessionId: state.sessionId,
         trigger,
-        skeleton: skeletonResult.skeleton,
-        pageText: skeletonResult.pageText,
-        url: skeletonResult.url,
-        title: skeletonResult.title,
-        devicePixelRatio: skeletonResult.devicePixelRatio,
-        capturedAt: skeletonResult.capturedAt,
-        pageState: skeletonResult.pageState,
-        networkLog: drainNetworkLog(),
-        embeddedData: _embeddedData || null
+        domHtml,
+        pageText,
+        url: window.location.href,
+        title: document.title,
+        devicePixelRatio: window.devicePixelRatio || 1,
+        capturedAt: new Date().toISOString(),
+        pageState,
+        networkLog: drainNetworkLog()
       }
     }, () => {
       void chrome.runtime.lastError;
     });
   } catch (error) {
-    console.warn("[browserwire] skeleton scan failed:", error);
+    console.warn("[browserwire] DOM serialization failed:", error);
   }
 };
 

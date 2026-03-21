@@ -204,10 +204,6 @@ chrome.runtime.onMessage.addListener((message) => {
     return;
   }
 
-  if (message.event === "manifest_ready") {
-    log("Manifest ready");
-  }
-
   if (message.event === "batch_status") {
     renderProcessingStatus(null);
     // Re-fetch full state to get current processingBatches

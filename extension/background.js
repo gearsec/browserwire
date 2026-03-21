@@ -1,5 +1,4 @@
 import {
-  createEnvelope,
   MessageType,
   parseEnvelope,
   PROTOCOL_VERSION
@@ -20,11 +19,9 @@ let reconnectAttempt = 0;
 let shouldReconnect = false;
 let autoConnectGaveUp = false;
 let activeSession = null;
-let currentManifest = null;
 let logs = [];
 let pendingSnapshots = [];
 const processingBatches = new Map();
-const extensionOpenedTabs = new Set();
 
 // ─── Per-Tab In-Flight Network Request Tracking ─────────────────────
 // Maps tabId → Set of requestIds currently in flight
@@ -61,7 +58,6 @@ chrome.webRequest.onErrorOccurred.addListener(onRequestFinished, { urls: ["<all_
 // Clean up when a tab is closed
 chrome.tabs.onRemoved.addListener((tabId) => {
   pendingRequests.delete(tabId);
-  extensionOpenedTabs.delete(tabId);
 });
 
 const notifyAllContexts = (payload) => {
@@ -160,13 +156,6 @@ const onBackendMessage = (rawMessage) => {
     return;
   }
 
-  if (message.type === MessageType.DISCOVERY_ACK) {
-    const elementCount = message.payload?.elementCount ?? 0;
-    const a11yCount = message.payload?.a11yCount ?? 0;
-    addLog(`backend discovery ack: ${elementCount} elements, ${a11yCount} a11y entries`);
-    return;
-  }
-
   if (message.type === MessageType.DISCOVERY_SESSION_STATUS) {
     const stats = message.payload || {};
     addLog(`session status: snapshots=${stats.snapshotCount ?? 0} entities=${stats.entityCount ?? 0} actions=${stats.actionCount ?? 0}`);
@@ -183,21 +172,8 @@ const onBackendMessage = (rawMessage) => {
     return;
   }
 
-  if (message.type === MessageType.MANIFEST_READY) {
-    currentManifest = message.payload?.manifest || null;
-    const actionCount = currentManifest?.actions?.length ?? 0;
-    const viewCount = currentManifest?.views?.length ?? 0;
-    addLog(`manifest ready: ${actionCount} actions, ${viewCount} views`);
-    if (activeSession) {
-      activeSession = { ...activeSession, viewCount };
-    }
-    notifyAllContexts({ event: "manifest_ready", manifest: currentManifest });
-    broadcastState();
-    return;
-  }
-
   if (message.type === MessageType.BATCH_PROCESSING_STATUS) {
-    const { batchId, status, manifest, error } = message.payload || {};
+    const { batchId, status, error } = message.payload || {};
     if (!batchId) return;
 
     if (status === "pending") {
@@ -209,20 +185,13 @@ const onBackendMessage = (rawMessage) => {
       addLog(`batch ${batchId.slice(0, 8)}… processing`);
     } else if (status === "complete") {
       processingBatches.delete(batchId);
-      if (manifest) {
-        currentManifest = manifest;
-        const actionCount = manifest?.actions?.length ?? 0;
-        const viewCount = manifest?.views?.length ?? 0;
-        addLog(`batch ${batchId.slice(0, 8)}… complete: ${actionCount} actions, ${viewCount} views`);
-      } else {
-        addLog(`batch ${batchId.slice(0, 8)}… complete: no manifest`);
-      }
+      addLog(`batch ${batchId.slice(0, 8)}… complete`);
     } else if (status === "error") {
       processingBatches.set(batchId, { ...(processingBatches.get(batchId) || {}), status: "error", error: error || "unknown", updatedAt: Date.now() });
       addLog(`batch ${batchId.slice(0, 8)}… error: ${error || "unknown"}`);
     }
 
-    notifyAllContexts({ event: "batch_status", batchId, status, manifest: manifest || null, error: error || null });
+    notifyAllContexts({ event: "batch_status", batchId, status, error: error || null });
     broadcastState();
     return;
   }
@@ -239,6 +208,11 @@ const onBackendMessage = (rawMessage) => {
 
   if (message.type === MessageType.EXECUTE_WORKFLOW) {
     handleExecuteWorkflow(message);
+    return;
+  }
+
+  if (message.type === MessageType.EXECUTE_READ) {
+    handleExecuteRead(message);
     return;
   }
 
@@ -350,15 +324,6 @@ const queryActiveTab = () =>
     });
   });
 
-/** Prefer the explored tab tracked by activeSession; fall back to the active tab. */
-const getTargetTab = async () => {
-  if (activeSession && activeSession.tabId != null) {
-    const tab = await chrome.tabs.get(activeSession.tabId).catch(() => null);
-    if (tab) return tab;
-  }
-  return queryActiveTab();
-};
-
 
 const sendTabMessage = (tabId, message) =>
   new Promise((resolve, reject) => {
@@ -457,8 +422,6 @@ const startExploring = async () => {
     entityCount: 0,
     actionCount: 0
   };
-
-  extensionOpenedTabs.add(tab.id);
 
   sendToBackend(MessageType.DISCOVERY_SESSION_START, {
     sessionId,
@@ -591,7 +554,7 @@ const annotateScreenshot = async (screenshotDataUrl, skeleton, devicePixelRatio)
  * Snapshots are only sent to the backend on a CHECKPOINT or STOP event.
  * Runs async — the content script response is sent before this completes.
  */
-const handleDiscoveryIncremental = async (message, sender) => {
+const handleSnapshot = async (message, sender) => {
   const payload = message.payload || {};
 
   if (!activeSession || payload.sessionId !== activeSession.sessionId) {
@@ -762,72 +725,11 @@ const PAGE_EXECUTE_ACTION = (payload) => {
 };
 
 /**
- * Self-contained entity state reader. Injected directly into the page.
- */
-const PAGE_READ_ENTITY = (payload) => {
-  const { strategies } = payload;
-
-  const isVisible = (el) => {
-    if (!(el instanceof HTMLElement)) return false;
-    const s = window.getComputedStyle(el);
-    if (s.display === "none" || s.visibility === "hidden") return false;
-    const r = el.getBoundingClientRect();
-    return r.width > 0 && r.height > 0;
-  };
-
-  const tryCSS = (v) => { const m = document.querySelectorAll(v); if (m.length === 1) return m[0]; for (const el of m) { if (isVisible(el)) return el; } return null; };
-  const tryXPath = (v) => {
-    const x = v.startsWith("/body") ? `/html${v}` : v;
-    const r = document.evaluate(x, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-    if (r.snapshotLength === 1) return r.snapshotItem(0);
-    for (let i = 0; i < r.snapshotLength; i++) { const el = r.snapshotItem(i); if (isVisible(el)) return el; }
-    return null;
-  };
-  const tryAttr = (v) => {
-    const ci = v.indexOf(":"); if (ci === -1) return null;
-    try { const m = document.querySelectorAll(`[${v.slice(0,ci)}="${CSS.escape(v.slice(ci+1))}"]`); if (m.length === 1) return m[0]; for (const el of m) { if (isVisible(el)) return el; } } catch {}
-    return null;
-  };
-
-  const sorted = [...(strategies || [])].sort((a, b) => b.confidence - a.confidence);
-  let element = null, usedStrategy = null;
-  for (const s of sorted) {
-    let el = null;
-    try {
-      if (s.kind === "css" || s.kind === "dom_path") el = tryCSS(s.value);
-      else if (s.kind === "xpath") el = tryXPath(s.value);
-      else if (s.kind === "attribute") el = tryAttr(s.value);
-    } catch {}
-    if (el) { element = el; usedStrategy = { kind: s.kind, value: s.value }; break; }
-  }
-
-  if (!element) return { ok: false, error: "ERR_TARGET_NOT_FOUND", message: "No locator matched" };
-
-  const rect = element.getBoundingClientRect();
-  const IMPLICIT = { button:"button",a:"link",nav:"navigation",footer:"contentinfo",header:"banner",main:"main" };
-
-  return {
-    ok: true,
-    usedStrategy,
-    state: {
-      visible: isVisible(element),
-      tag: element.tagName.toLowerCase(),
-      text: (element.textContent || "").trim().slice(0, 500),
-      value: "value" in element ? element.value : undefined,
-      disabled: element.disabled || element.getAttribute("aria-disabled") === "true",
-      rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
-      role: element.getAttribute("role") || IMPLICIT[element.tagName.toLowerCase()] || null,
-      name: element.getAttribute("aria-label") || element.getAttribute("title") || element.textContent?.trim().slice(0,100) || ""
-    }
-  };
-};
-
-/**
  * Self-contained view data extractor. Injected directly into the page.
  * Extracts structured data using CSS selectors — no LLM at runtime.
  */
 const PAGE_READ_VIEW = (payload) => {
-  const { containerLocator, itemLocator, fields, isList } = payload;
+  const { containerLocator, itemContainer, fields, isList } = payload;
 
   // ── Locator helpers (same as PAGE_EXECUTE_ACTION) ──
 
@@ -1048,35 +950,37 @@ const PAGE_READ_VIEW = (payload) => {
     return row;
   };
 
-  if (isList && itemLocator) {
+  if (isList) {
     // List view: find all items, extract fields per item
     let items;
-    try {
-      const selector = itemLocator.value || itemLocator;
-      items = container.querySelectorAll(typeof selector === "string" ? selector : selector.value);
-    } catch {
-      return { ok: false, error: "ERR_TARGET_NOT_FOUND", message: "Item selector invalid" };
-    }
 
-    // Try container's shadow root
-    if ((!items || items.length === 0) && container.shadowRoot) {
+    // Try itemContainer if provided
+    if (itemContainer) {
       try {
-        const sel = itemLocator.value || itemLocator;
-        items = container.shadowRoot.querySelectorAll(typeof sel === "string" ? sel : sel.value);
-      } catch {}
-    }
+        const selector = itemContainer.value || itemContainer;
+        items = container.querySelectorAll(typeof selector === "string" ? selector : selector.value);
+      } catch { /* invalid selector — fall through to fallbacks */ }
 
-    // If no items found with the item selector, try document-wide before generic fallbacks
-    if (!items || items.length === 0) {
-      try {
-        const selector = itemLocator.value || itemLocator;
-        const sel = typeof selector === "string" ? selector : selector.value;
-        const docItems = document.querySelectorAll(sel);
-        if (docItems.length > 0) {
-          items = docItems;
-          console.warn(`[browserwire] read_view items found document-wide: ${sel} (${docItems.length} items)`);
-        }
-      } catch { /* skip */ }
+      // Try container's shadow root
+      if ((!items || items.length === 0) && container.shadowRoot) {
+        try {
+          const sel = itemContainer.value || itemContainer;
+          items = container.shadowRoot.querySelectorAll(typeof sel === "string" ? sel : sel.value);
+        } catch {}
+      }
+
+      // If no items found with the item selector, try document-wide before generic fallbacks
+      if (!items || items.length === 0) {
+        try {
+          const selector = itemContainer.value || itemContainer;
+          const sel = typeof selector === "string" ? selector : selector.value;
+          const docItems = document.querySelectorAll(sel);
+          if (docItems.length > 0) {
+            items = docItems;
+            console.warn(`[browserwire] read_view items found document-wide: ${sel} (${docItems.length} items)`);
+          }
+        } catch { /* skip */ }
+      }
     }
 
     // If still no items, try common list patterns within container
@@ -1433,7 +1337,7 @@ const runWorkflowSteps = async (tabId, baseOrigin, steps, outcomes, inputs) => {
         // DOM fallback (existing logic)
         const viewConfig = {
           containerLocator: step.viewConfig?.containerLocator || [],
-          itemLocator: step.viewConfig?.itemLocator || null,
+          itemContainer: step.viewConfig?.itemContainer || null,
           fields: step.viewConfig?.fields || [],
           isList: step.viewConfig?.isList || false
         };
@@ -1529,6 +1433,40 @@ const handleExecuteWorkflow = async (message) => {
   }
 };
 
+const handleExecuteRead = async (message) => {
+  const { viewName, origin, pageUrl, params, apiRequest, apiFields, viewConfig } = message.payload || {};
+  const requestId = message.requestId;
+
+  const win = await chrome.windows.create({ url: "about:blank", focused: false, state: "minimized" });
+  const tab = win.tabs[0];
+
+  try {
+    let navUrl = (pageUrl || "/").replace(/:([a-zA-Z_][a-zA-Z0-9_]*)/g, (match, param) => {
+      const value = params?.[param];
+      return value != null ? encodeURIComponent(value) : match;
+    });
+    if (!navUrl || navUrl === "/") navUrl = origin;
+    if (!navUrl) throw new Error("No page URL or origin provided");
+
+    await navigateTabAndWait(tab.id, navUrl, origin || "");
+    await new Promise((r) => setTimeout(r, 1500));
+
+    let data;
+    if (viewConfig) {
+      const result = await pollReadView(tab.id, viewConfig);
+      data = result?.ok ? result.result : null;
+    } else {
+      data = await readNetworkData(tab.id, apiRequest, apiFields);
+    }
+
+    sendToBackend(MessageType.READ_RESULT, { ok: true, data: data || [] }, requestId);
+  } catch (error) {
+    sendToBackend(MessageType.READ_RESULT, { ok: false, error: error.message || "Read execution failed" }, requestId);
+  } finally {
+    try { await chrome.windows.remove(win.id); } catch {}
+  }
+};
+
 // ─── Sidepanel Command Handler ──────────────────────────────────────
 
 const handleSidepanelCommand = async (message) => {
@@ -1575,11 +1513,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
-  // Content script sends incremental discovery snapshots.
-  // Respond immediately; screenshot capture + backend forwarding runs async.
-  if (message.source === "content" && message.type === "discovery_incremental") {
+  // Content script sends buffered snapshots.
+  // Respond immediately; screenshot capture runs async.
+  if (message.source === "content" && message.type === "snapshot") {
     sendResponse({ ok: true });
-    handleDiscoveryIncremental(message, sender).catch((error) => {
+    handleSnapshot(message, sender).catch((error) => {
       addLog(`incremental handler error: ${error.message}`);
     });
     return false;
@@ -1601,13 +1539,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   return false;
-});
-
-// Notify sidepanel when the active tab URL changes so it can re-filter by route
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.url && currentManifest) {
-    notifyAllContexts({ event: "tab_url_changed", url: changeInfo.url });
-  }
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {

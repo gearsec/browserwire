@@ -143,7 +143,7 @@ export interface ViewDef {
   isList: boolean;
   isDynamic?: boolean;
   containerLocator: LocatorSetDef;
-  itemLocator?: LocatorStrategyDef;
+  itemContainer?: LocatorStrategyDef;
   fields: ViewFieldDef[];
   confidence?: ConfidenceDef;
   provenance: ProvenanceDef;

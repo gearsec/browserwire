@@ -6,6 +6,13 @@
  * via window.postMessage.
  */
 (function() {
+  // Force all shadow roots to open mode so ISOLATED-world content scripts
+  // (discovery.js) can traverse them via el.shadowRoot.
+  const _origAttachShadow = Element.prototype.attachShadow;
+  Element.prototype.attachShadow = function(init) {
+    return _origAttachShadow.call(this, { ...init, mode: "open" });
+  };
+
   const SKIP_URL_RE = /google-analytics|segment\.io|sentry\.io|hotjar|intercom|doubleclick|fonts\.(googleapis|gstatic)|\.woff2?|\.ttf|\.css(\?|$)|\.png|\.jpg|\.svg|\.gif/i;
   const JSON_CT_RE = /application\/(?:.*\+)?json/i;
   const MAX_BODY_BYTES = 50 * 1024;
@@ -170,78 +177,4 @@
 
     return _origSend.call(this, body);
   };
-  // ─── SSR Embedded Data Extraction ───────────────────────────────────
-
-  const extractEmbeddedData = () => {
-    // 1. Collect visible text strings from the DOM
-    const samples = [];
-    const candidates = document.querySelectorAll(
-      'h1, h2, h3, h4, h5, h6, [role="heading"], p, span, a, td, th, li, label, figcaption, blockquote, dt, dd, caption'
-    );
-    for (const el of candidates) {
-      const text = (el.textContent || '').trim();
-      if (!text) continue;
-      const rect = el.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) {
-        samples.push(text);
-      }
-    }
-
-    if (samples.length === 0) return;
-
-    // 2. Scan all <script> tags for JSON containing visible text
-    const found = [];
-    const scripts = document.querySelectorAll('script');
-
-    for (const el of scripts) {
-      try {
-        const raw = el.textContent || '';
-        if (!raw) continue;
-
-        // Check if any sampled text appears in this script
-        const matchedSamples = samples.filter(s => raw.includes(s));
-        if (matchedSamples.length === 0) continue;
-
-        // Extract JSON
-        let data = null;
-        let jsonStr = null;
-
-        if (el.type === 'application/json' || el.type === 'application/ld+json') {
-          jsonStr = raw;
-        } else {
-          // JS assignment pattern: window.X = {...} or var X = [...]
-          const m = raw.match(/=\s*(\{[\s\S]*\}|\[[\s\S]*\])\s*;?\s*$/);
-          if (m) jsonStr = m[1];
-        }
-
-        if (!jsonStr) continue;
-
-        try { data = JSON.parse(jsonStr); } catch { continue; }
-
-        const source = el.id
-          ? `script#${el.id}`
-          : el.type === 'application/json' || el.type === 'application/ld+json'
-            ? `script[type=${el.type}]`
-            : 'script (inline)';
-
-        found.push({
-          source,
-          sizeBytes: jsonStr.length,
-          matchedSamples: matchedSamples.length,
-          data
-        });
-      } catch {}
-    }
-
-    if (found.length > 0) {
-      post("embedded_data", { entries: found });
-    }
-  };
-
-  // Run once after DOM is ready
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', extractEmbeddedData, { once: true });
-  } else {
-    setTimeout(extractEmbeddedData, 0);
-  }
 })();

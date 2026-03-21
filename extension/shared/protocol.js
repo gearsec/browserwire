@@ -8,16 +8,14 @@ export const MessageType = Object.freeze({
   STATUS: "status",
   ERROR: "error",
   DISCOVERY_SCAN: "discovery_scan",
-  DISCOVERY_SNAPSHOT: "discovery_snapshot",
-  DISCOVERY_ACK: "discovery_ack",
   DISCOVERY_SESSION_START: "discovery_session_start",
   DISCOVERY_SESSION_STOP: "discovery_session_stop",
-  DISCOVERY_INCREMENTAL: "discovery_incremental",
   DISCOVERY_SESSION_STATUS: "discovery_session_status",
-  MANIFEST_READY: "manifest_ready",
   BATCH_PROCESSING_STATUS: "batch_processing_status",
   EXECUTE_WORKFLOW: "execute_workflow",
-  WORKFLOW_RESULT: "workflow_result"
+  WORKFLOW_RESULT: "workflow_result",
+  EXECUTE_READ: "execute_read",
+  READ_RESULT: "read_result"
 });
 
 export const createEnvelope = (type, payload = {}, requestId) => ({

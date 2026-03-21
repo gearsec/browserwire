@@ -13,6 +13,7 @@ import {
   create,
   toBinary,
   fromBinary,
+  toJson as protoToJson,
   EnvelopeSchema,
   HelloSchema,
   HelloAckSchema,
@@ -20,16 +21,14 @@ import {
   PongSchema,
   StatusSchema,
   ErrorSchema,
-  DiscoverySnapshotSchema,
-  DiscoveryAckSchema,
   DiscoverySessionStartSchema,
   DiscoverySessionStopSchema,
-  DiscoveryIncrementalSchema,
   DiscoverySessionStatusSchema,
-  ManifestReadySchema,
   BatchProcessingStatusSchema,
   ExecuteWorkflowSchema,
   WorkflowResultSchema,
+  ExecuteReadSchema,
+  ReadResultSchema,
   BatchStatus,
 } from "./proto-bundle.js";
 
@@ -42,16 +41,14 @@ const TYPE_TO_FIELD = {
   pong: "pong",
   status: "status",
   error: "error",
-  discovery_snapshot: "discoverySnapshot",
-  discovery_ack: "discoveryAck",
   discovery_session_start: "discoverySessionStart",
   discovery_session_stop: "discoverySessionStop",
-  discovery_incremental: "discoveryIncremental",
   discovery_session_status: "discoverySessionStatus",
-  manifest_ready: "manifestReady",
   batch_processing_status: "batchProcessingStatus",
   execute_workflow: "executeWorkflow",
   workflow_result: "workflowResult",
+  execute_read: "executeRead",
+  read_result: "readResult",
 };
 
 const FIELD_TO_TYPE = Object.fromEntries(
@@ -65,16 +62,14 @@ const TYPE_TO_SCHEMA = {
   pong: PongSchema,
   status: StatusSchema,
   error: ErrorSchema,
-  discovery_snapshot: DiscoverySnapshotSchema,
-  discovery_ack: DiscoveryAckSchema,
   discovery_session_start: DiscoverySessionStartSchema,
   discovery_session_stop: DiscoverySessionStopSchema,
-  discovery_incremental: DiscoveryIncrementalSchema,
   discovery_session_status: DiscoverySessionStatusSchema,
-  manifest_ready: ManifestReadySchema,
   batch_processing_status: BatchProcessingStatusSchema,
   execute_workflow: ExecuteWorkflowSchema,
   workflow_result: WorkflowResultSchema,
+  execute_read: ExecuteReadSchema,
+  read_result: ReadResultSchema,
 };
 
 // ─── BatchStatus enum mapping ───────────────────────────────────────
@@ -165,8 +160,30 @@ const payloadToProto = (type, payload) => {
     return result;
   }
 
-  if (type === "discovery_incremental" || type === "discovery_session_stop") {
+  if (type === "discovery_session_stop") {
     return convertSnapshotFields(payload, type);
+  }
+
+  if (type === "execute_read") {
+    const result = { ...payload };
+    if (result.apiRequest && typeof result.apiRequest === "object" && !(result.apiRequest instanceof Uint8Array)) {
+      result.apiRequest = jsonToBytes(result.apiRequest);
+    }
+    if (result.apiFields && typeof result.apiFields === "object" && !(result.apiFields instanceof Uint8Array)) {
+      result.apiFields = jsonToBytes(result.apiFields);
+    }
+    if (result.viewConfig && typeof result.viewConfig === "object" && !(result.viewConfig instanceof Uint8Array)) {
+      result.viewConfig = jsonToBytes(result.viewConfig);
+    }
+    return result;
+  }
+
+  if (type === "read_result") {
+    const result = { ...payload };
+    if (result.data && typeof result.data === "object" && !(result.data instanceof Uint8Array)) {
+      result.data = jsonToBytes(result.data);
+    }
+    return result;
   }
 
   // For most message types, protobuf-es accepts camelCase keys directly
@@ -180,11 +197,6 @@ const convertSnapshotFields = (payload, type) => {
   // Convert screenshot from base64 string to bytes
   if (result.screenshot && typeof result.screenshot === "string") {
     result.screenshot = toBytes(result.screenshot);
-  }
-
-  // Convert embeddedData from JSON object to bytes
-  if (result.embeddedData && typeof result.embeddedData === "object" && !(result.embeddedData instanceof Uint8Array)) {
-    result.embeddedData = jsonToBytes(result.embeddedData);
   }
 
   // Convert network log entry bodies to bytes
@@ -215,7 +227,8 @@ const protoToPayload = (type, protoMsg) => {
   if (!protoMsg) return {};
 
   // Convert to plain JS via JSON round-trip (handles BigInt, enums, etc.)
-  const plain = protoMsg.toJson ? protoMsg.toJson() : { ...protoMsg };
+  const schema = TYPE_TO_SCHEMA[type];
+  const plain = schema ? protoToJson(schema, protoMsg) : { ...protoMsg };
 
   if (type === "batch_processing_status") {
     const result = { ...plain };
@@ -235,8 +248,46 @@ const protoToPayload = (type, protoMsg) => {
     return result;
   }
 
-  if (type === "discovery_incremental" || type === "discovery_session_stop") {
+  if (type === "discovery_session_stop") {
     return revertSnapshotFields(plain, type);
+  }
+
+  if (type === "execute_read") {
+    const result = { ...plain };
+    if (result.apiRequest) {
+      if (typeof result.apiRequest === "string") {
+        try { result.apiRequest = JSON.parse(atob(result.apiRequest)); } catch { /* leave as-is */ }
+      } else if (result.apiRequest instanceof Uint8Array) {
+        result.apiRequest = bytesToJson(result.apiRequest);
+      }
+    }
+    if (result.apiFields) {
+      if (typeof result.apiFields === "string") {
+        try { result.apiFields = JSON.parse(atob(result.apiFields)); } catch { /* leave as-is */ }
+      } else if (result.apiFields instanceof Uint8Array) {
+        result.apiFields = bytesToJson(result.apiFields);
+      }
+    }
+    if (result.viewConfig) {
+      if (typeof result.viewConfig === "string") {
+        try { result.viewConfig = JSON.parse(atob(result.viewConfig)); } catch { /* leave as-is */ }
+      } else if (result.viewConfig instanceof Uint8Array) {
+        result.viewConfig = bytesToJson(result.viewConfig);
+      }
+    }
+    return result;
+  }
+
+  if (type === "read_result") {
+    const result = { ...plain };
+    if (result.data) {
+      if (typeof result.data === "string") {
+        try { result.data = JSON.parse(atob(result.data)); } catch { /* leave as-is */ }
+      } else if (result.data instanceof Uint8Array) {
+        result.data = bytesToJson(result.data);
+      }
+    }
+    return result;
   }
 
   return plain;
@@ -252,19 +303,6 @@ const revertSnapshotFields = (plain, type) => {
       // Already base64 from toJson()
     } else if (result.screenshot instanceof Uint8Array) {
       result.screenshot = bytesToBase64(result.screenshot);
-    }
-  }
-
-  // Convert embeddedData bytes back to JSON
-  if (result.embeddedData) {
-    if (typeof result.embeddedData === "string") {
-      // base64 from toJson — decode it
-      try {
-        const bytes = toBytes(result.embeddedData);
-        result.embeddedData = bytesToJson(bytes);
-      } catch { /* leave as-is */ }
-    } else if (result.embeddedData instanceof Uint8Array) {
-      result.embeddedData = bytesToJson(result.embeddedData);
     }
   }
 
@@ -305,7 +343,7 @@ const revertSnapshotFields = (plain, type) => {
 /**
  * Encode a message to a protobuf binary Uint8Array.
  *
- * @param {string} type - MessageType string (e.g. "hello", "discovery_incremental")
+ * @param {string} type - MessageType string (e.g. "hello", "discovery_session_stop")
  * @param {object} payload - The payload object
  * @param {string} [requestId] - Optional request ID for request/response correlation
  * @returns {Uint8Array} Binary protobuf frame

@@ -64,14 +64,6 @@ const scanDOM = () => {
   let nextScanId = 0;
   const nodeToScanId = new Map();
 
-  const isVisible = (el) => {
-    if (!(el instanceof HTMLElement)) return false;
-    const style = window.getComputedStyle(el);
-    if (style.display === "none" || style.visibility === "hidden") return false;
-    const rect = el.getBoundingClientRect();
-    if (rect.width === 0 && rect.height === 0) return false;
-    return true;
-  };
 
   const getDirectText = (el) => {
     let text = "";
@@ -97,7 +89,7 @@ const scanDOM = () => {
     const tag = el.tagName.toLowerCase();
     if (SKIP_TAGS.has(tag)) return;
 
-    if (!isVisible(el)) return;
+
 
     const scanId = nextScanId++;
     nodeToScanId.set(el, scanId);
@@ -121,18 +113,37 @@ const scanDOM = () => {
 
     elements.push(element);
 
-    // Walk children (including open shadow roots)
-    const childRoot = el.shadowRoot && el.shadowRoot.mode === "open"
+    // Walk children (including open shadow roots with slot expansion)
+    const shadowRoot = el.shadowRoot && el.shadowRoot.mode === "open"
       ? el.shadowRoot
-      : el;
+      : null;
 
-    for (const child of childRoot.children) {
+    const walkChild = (child) => {
       if (child instanceof HTMLElement) {
         walk(child, scanId);
         const childScanId = nodeToScanId.get(child);
         if (childScanId !== undefined) {
           element.childScanIds.push(childScanId);
         }
+      }
+    };
+
+    if (shadowRoot) {
+      for (const child of shadowRoot.children) {
+        if (child.tagName === "SLOT") {
+          const assigned = child.assignedNodes({ flatten: true });
+          if (assigned.length > 0) {
+            for (const n of assigned) walkChild(n);
+          } else {
+            for (const fb of child.children) walkChild(fb);
+          }
+        } else {
+          walkChild(child);
+        }
+      }
+    } else {
+      for (const child of el.children) {
+        walkChild(child);
       }
     }
   };
@@ -232,34 +243,46 @@ const extractA11y = (elements) => {
  * Collect visible page text (first ~2000 chars) for LLM context.
  */
 const collectPageText = () => {
-  const walker = document.createTreeWalker(
-    document.body,
-    NodeFilter.SHOW_TEXT,
-    {
-      acceptNode(node) {
-        const parent = node.parentElement;
-        if (!parent) return NodeFilter.FILTER_REJECT;
-        const tag = parent.tagName.toLowerCase();
-        if (tag === "script" || tag === "style" || tag === "noscript") {
-          return NodeFilter.FILTER_REJECT;
+  const SKIP_TEXT = new Set(["script", "style", "noscript"]);
+  const parts = [];
+
+  const walkNode = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = (node.textContent || "").trim();
+      if (text.length > 0) parts.push(text);
+      return;
+    }
+
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+    const tag = node.tagName.toLowerCase();
+    if (SKIP_TEXT.has(tag)) return;
+
+    // Pierce shadow DOM with slot expansion (avoid double-counting)
+    const sr = node.shadowRoot;
+    if (sr) {
+      for (const child of sr.childNodes) {
+        if (child.nodeType === Node.ELEMENT_NODE && child.tagName === "SLOT") {
+          const assigned = child.assignedNodes({ flatten: true });
+          if (assigned.length > 0) {
+            for (const n of assigned) walkNode(n);
+          } else {
+            for (const fb of child.childNodes) walkNode(fb);
+          }
+        } else {
+          walkNode(child);
         }
-        const text = (node.textContent || "").trim();
-        if (text.length === 0) return NodeFilter.FILTER_REJECT;
-        return NodeFilter.FILTER_ACCEPT;
+      }
+    } else {
+      for (const child of node.childNodes) {
+        walkNode(child);
       }
     }
-  );
+  };
 
-  let result = "";
-  let node;
-  while ((node = walker.nextNode()) && result.length < 2200) {
-    const text = (node.textContent || "").trim();
-    if (text.length > 0) {
-      result += text + " ";
-    }
-  }
+  if (document.body) walkNode(document.body);
 
-  return result.trim().slice(0, 2000);
+  return parts.join(" ").slice(0, 2000);
 };
 
 /**
@@ -278,6 +301,25 @@ const runDiscoveryScan = () => {
     a11y,
     pageText
   };
+};
+
+// ─── DOM Serialization (rrweb-snapshot) ─────────────────────────────
+
+/**
+ * Serialize the live DOM using rrweb-snapshot.
+ * Handles shadow DOM correctly out of the box.
+ * Returns raw JSON string of the rrweb snapshot tree.
+ */
+const serializeDom = () => {
+  if (typeof rrwebSnapshot === "undefined" || !rrwebSnapshot.snapshot) return "";
+  const tree = rrwebSnapshot.snapshot(document, {
+    slimDOM: "all",
+    inlineStylesheet: false,
+    inlineImages: false,
+    maskAllInputs: false,
+  });
+  if (!tree) return "";
+  return JSON.stringify(tree);
 };
 
 // ─── Element State Capture ───────────────────────────────────────────
@@ -350,14 +392,6 @@ const runSkeletonScan = () => {
   let nextScanId = 0;
   const nodeToScanId = new Map();
 
-  const isVisible = (el) => {
-    if (!(el instanceof HTMLElement)) return false;
-    const style = window.getComputedStyle(el);
-    if (style.display === "none" || style.visibility === "hidden") return false;
-    const rect = el.getBoundingClientRect();
-    if (rect.width === 0 && rect.height === 0) return false;
-    return true;
-  };
 
   const computeRole = (el) => {
     const tag = el.tagName.toLowerCase();
@@ -398,11 +432,11 @@ const runSkeletonScan = () => {
    * that should be added to the parent's childScanIds (bubbles up through
    * non-included nodes so logical parent-child relationships are preserved).
    */
-  const walk = (el, nearestAncestorScanId) => {
+  const walk = (el, nearestAncestorScanId, depth) => {
     if (!(el instanceof HTMLElement)) return [];
     const tag = el.tagName.toLowerCase();
     if (SKIP_TAGS.has(tag)) return [];
-    if (!isVisible(el)) return [];
+
 
     const include = shouldInclude(el);
     let myScanId = null;
@@ -412,17 +446,37 @@ const runSkeletonScan = () => {
       nodeToScanId.set(el, myScanId);
     }
 
-    const childRoot = el.shadowRoot && el.shadowRoot.mode === "open" ? el.shadowRoot : el;
+    const skShadowRoot = el.shadowRoot && el.shadowRoot.mode === "open" ? el.shadowRoot : null;
     const nearestDescendants = [];
+    const nextAncestor = myScanId !== null ? myScanId : nearestAncestorScanId;
 
-    for (const child of childRoot.children) {
-      if (!(child instanceof HTMLElement)) continue;
-      const childDescendants = walk(child, myScanId !== null ? myScanId : nearestAncestorScanId);
+    const visitChild = (child) => {
+      if (!(child instanceof HTMLElement)) return;
+      const childDescendants = walk(child, nextAncestor, depth + 1);
       const childScanId = nodeToScanId.get(child);
       if (childScanId !== undefined) {
         nearestDescendants.push(childScanId);
       } else {
         nearestDescendants.push(...childDescendants);
+      }
+    };
+
+    if (skShadowRoot) {
+      for (const child of skShadowRoot.children) {
+        if (child.tagName === "SLOT") {
+          const assigned = child.assignedNodes({ flatten: true });
+          if (assigned.length > 0) {
+            for (const n of assigned) visitChild(n);
+          } else {
+            for (const fb of child.children) visitChild(fb);
+          }
+        } else {
+          visitChild(child);
+        }
+      }
+    } else {
+      for (const child of el.children) {
+        visitChild(child);
       }
     }
 
@@ -430,7 +484,7 @@ const runSkeletonScan = () => {
       const rect = el.getBoundingClientRect();
       skeleton.push({
         scanId: myScanId,
-        tagName: tag,
+        tag: tag,
         role: computeRole(el),
         name: computeName(el),
         text: (el.textContent || "").trim().slice(0, 200),
@@ -444,7 +498,10 @@ const runSkeletonScan = () => {
         parentScanId: nearestAncestorScanId,
         childScanIds: nearestDescendants,
         interactable: SKELETON_INTERACTABLE_TAGS.has(tag) || el.hasAttribute("role"),
-        state: captureElementState(el)
+        state: captureElementState(el),
+        visible: true,
+        depth: depth,
+        focusable: el.tabIndex >= 0
       });
       return [myScanId];
     }
@@ -453,7 +510,7 @@ const runSkeletonScan = () => {
   };
 
   if (document.body) {
-    walk(document.body, null);
+    walk(document.body, null, 0);
   }
 
   return {

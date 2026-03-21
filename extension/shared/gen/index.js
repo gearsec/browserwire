@@ -2,4 +2,4 @@
 export * from "./browserwire/v1/messages_pb.js";
 export * from "./browserwire/v1/manifest_pb.js";
 export * from "./browserwire/v1/skeleton_pb.js";
-export { create, toBinary, fromBinary } from "@bufbuild/protobuf";
+export { create, toBinary, fromBinary, toJson } from "@bufbuild/protobuf";

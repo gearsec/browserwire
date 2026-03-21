@@ -32,6 +32,9 @@ function protoCamelCase(snakeCase) {
   }
   return b.join("");
 }
+function protoSnakeCase(lowerCamelCase) {
+  return lowerCamelCase.replace(/[A-Z]/g, (letter) => "_" + letter.toLowerCase());
+}
 var reservedObjectProperties = /* @__PURE__ */ new Set([
   // names reserved by JavaScript
   "constructor",
@@ -1509,6 +1512,40 @@ function base64Decode(base64Str) {
   if (groupPos == 1)
     throw Error("invalid base64 string");
   return bytes.subarray(0, bytePos);
+}
+function base64Encode(bytes, encoding = "std") {
+  const table = getEncodeTable(encoding);
+  const pad = encoding == "std";
+  let base64 = "", groupPos = 0, b, p = 0;
+  for (let i = 0; i < bytes.length; i++) {
+    b = bytes[i];
+    switch (groupPos) {
+      case 0:
+        base64 += table[b >> 2];
+        p = (b & 3) << 4;
+        groupPos = 1;
+        break;
+      case 1:
+        base64 += table[p | b >> 4];
+        p = (b & 15) << 2;
+        groupPos = 2;
+        break;
+      case 2:
+        base64 += table[p | b >> 6];
+        base64 += table[b & 63];
+        groupPos = 0;
+        break;
+    }
+  }
+  if (groupPos) {
+    base64 += table[p];
+    if (pad) {
+      base64 += "=";
+      if (groupPos == 1)
+        base64 += "=";
+    }
+  }
+  return base64;
 }
 var encodeTableStd;
 var encodeTableUrl;
@@ -3497,7 +3534,7 @@ var NetworkLogEntrySchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_skel
 var PageStateSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_skeleton, 6);
 
 // extension/shared/gen/browserwire/v1/messages_pb.js
-var file_browserwire_v1_messages = /* @__PURE__ */ fileDesc("Ch1icm93c2Vyd2lyZS92MS9tZXNzYWdlcy5wcm90bxIOYnJvd3NlcndpcmUudjEitgcKCEVudmVsb3BlEhIKCnJlcXVlc3RfaWQYASABKAkSJgoFaGVsbG8YAiABKAsyFS5icm93c2Vyd2lyZS52MS5IZWxsb0gAEi0KCWhlbGxvX2FjaxgDIAEoCzIYLmJyb3dzZXJ3aXJlLnYxLkhlbGxvQWNrSAASJAoEcGluZxgEIAEoCzIULmJyb3dzZXJ3aXJlLnYxLlBpbmdIABIkCgRwb25nGAUgASgLMhQuYnJvd3NlcndpcmUudjEuUG9uZ0gAEigKBnN0YXR1cxgGIAEoCzIWLmJyb3dzZXJ3aXJlLnYxLlN0YXR1c0gAEiYKBWVycm9yGAcgASgLMhUuYnJvd3NlcndpcmUudjEuRXJyb3JIABI/ChJkaXNjb3Zlcnlfc25hcHNob3QYCCABKAsyIS5icm93c2Vyd2lyZS52MS5EaXNjb3ZlcnlTbmFwc2hvdEgAEjUKDWRpc2NvdmVyeV9hY2sYCSABKAsyHC5icm93c2Vyd2lyZS52MS5EaXNjb3ZlcnlBY2tIABJIChdkaXNjb3Zlcnlfc2Vzc2lvbl9zdGFydBgKIAEoCzIlLmJyb3dzZXJ3aXJlLnYxLkRpc2NvdmVyeVNlc3Npb25TdGFydEgAEkYKFmRpc2NvdmVyeV9zZXNzaW9uX3N0b3AYCyABKAsyJC5icm93c2Vyd2lyZS52MS5EaXNjb3ZlcnlTZXNzaW9uU3RvcEgAEkUKFWRpc2NvdmVyeV9pbmNyZW1lbnRhbBgMIAEoCzIkLmJyb3dzZXJ3aXJlLnYxLkRpc2NvdmVyeUluY3JlbWVudGFsSAASSgoYZGlzY292ZXJ5X3Nlc3Npb25fc3RhdHVzGA0gASgLMiYuYnJvd3NlcndpcmUudjEuRGlzY292ZXJ5U2Vzc2lvblN0YXR1c0gAEjcKDm1hbmlmZXN0X3JlYWR5GA4gASgLMh0uYnJvd3NlcndpcmUudjEuTWFuaWZlc3RSZWFkeUgAEkgKF2JhdGNoX3Byb2Nlc3Npbmdfc3RhdHVzGA8gASgLMiUuYnJvd3NlcndpcmUudjEuQmF0Y2hQcm9jZXNzaW5nU3RhdHVzSAASOwoQZXhlY3V0ZV93b3JrZmxvdxgQIAEoCzIfLmJyb3dzZXJ3aXJlLnYxLkV4ZWN1dGVXb3JrZmxvd0gAEjkKD3dvcmtmbG93X3Jlc3VsdBgRIAEoCzIeLmJyb3dzZXJ3aXJlLnYxLldvcmtmbG93UmVzdWx0SABCCQoHcGF5bG9hZCIoCgVIZWxsbxIOCgZjbGllbnQYASABKAkSDwoHdmVyc2lvbhgCIAEoCSJGCghIZWxsb0FjaxIQCghhY2NlcHRlZBgBIAEoCBIOCgZzZXJ2ZXIYAiABKAkSGAoQcHJvdG9jb2xfdmVyc2lvbhgDIAEoCSIWCgRQaW5nEg4KBnNvdXJjZRgBIAEoCSIbCgRQb25nEhMKC3NlcnZlcl90aW1lGAEgASgJIiwKBlN0YXR1cxINCgVzdGF0ZRgBIAEoCRITCgtzZXJ2ZXJfdGltZRgCIAEoCSImCgVFcnJvchIMCgRjb2RlGAEgASgJEg8KB21lc3NhZ2UYAiABKAkitQEKEURpc2NvdmVyeVNuYXBzaG90EgsKA3VybBgBIAEoCRINCgV0aXRsZRgCIAEoCRITCgtjYXB0dXJlZF9hdBgDIAEoCRIRCglwYWdlX3RleHQYBCABKAkSLwoIZWxlbWVudHMYBSADKAsyHS5icm93c2Vyd2lyZS52MS5Ta2VsZXRvbkVudHJ5EisKBGExMXkYBiADKAsyHS5icm93c2Vyd2lyZS52MS5Ta2VsZXRvbkVudHJ5IqABCgxEaXNjb3ZlcnlBY2sSFQoNZWxlbWVudF9jb3VudBgBIAEoBRISCgphMTF5X2NvdW50GAIgASgFEhoKEmludGVyYWN0YWJsZV9jb3VudBgDIAEoBRIUCgxlbnRpdHlfY291bnQYBCABKAUSFAoMYWN0aW9uX2NvdW50GAUgASgFEgsKA3VybBgGIAEoCRIQCghhY2tlZF9hdBgHIAEoCSJrChVEaXNjb3ZlcnlTZXNzaW9uU3RhcnQSEgoKc2Vzc2lvbl9pZBgBIAEoCRIOCgZ0YWJfaWQYAiABKAUSCwoDdXJsGAMgASgJEg0KBXRpdGxlGAQgASgJEhIKCnN0YXJ0ZWRfYXQYBSABKAkipwMKD1NuYXBzaG90UGF5bG9hZBITCgtzbmFwc2hvdF9pZBgBIAEoCRISCgpzZXNzaW9uX2lkGAIgASgJEigKB3RyaWdnZXIYAyABKAsyFy5icm93c2Vyd2lyZS52MS5UcmlnZ2VyEi8KCHNrZWxldG9uGAQgAygLMh0uYnJvd3NlcndpcmUudjEuU2tlbGV0b25FbnRyeRIRCglwYWdlX3RleHQYBSABKAkSCwoDdXJsGAYgASgJEg0KBXRpdGxlGAcgASgJEhoKEmRldmljZV9waXhlbF9yYXRpbxgIIAEoARITCgtjYXB0dXJlZF9hdBgJIAEoCRItCgpwYWdlX3N0YXRlGAogASgLMhkuYnJvd3NlcndpcmUudjEuUGFnZVN0YXRlEjQKC25ldHdvcmtfbG9nGAsgAygLMh8uYnJvd3NlcndpcmUudjEuTmV0d29ya0xvZ0VudHJ5EhUKDWVtYmVkZGVkX2RhdGEYDCABKAwSEgoKc2NyZWVuc2hvdBgNIAEoDBIOCgZ0YWJfaWQYDiABKAUSEAoIZnJhbWVfaWQYDyABKAUimgEKFERpc2NvdmVyeVNlc3Npb25TdG9wEhIKCnNlc3Npb25faWQYASABKAkSEAoIYmF0Y2hfaWQYAiABKAkSDAoEbm90ZRgDIAEoCRISCgpzdG9wcGVkX2F0GAQgASgJEjoKEXBlbmRpbmdfc25hcHNob3RzGAUgAygLMh8uYnJvd3NlcndpcmUudjEuU25hcHNob3RQYXlsb2FkIqwDChREaXNjb3ZlcnlJbmNyZW1lbnRhbBITCgtzbmFwc2hvdF9pZBgBIAEoCRISCgpzZXNzaW9uX2lkGAIgASgJEigKB3RyaWdnZXIYAyABKAsyFy5icm93c2Vyd2lyZS52MS5UcmlnZ2VyEi8KCHNrZWxldG9uGAQgAygLMh0uYnJvd3NlcndpcmUudjEuU2tlbGV0b25FbnRyeRIRCglwYWdlX3RleHQYBSABKAkSCwoDdXJsGAYgASgJEg0KBXRpdGxlGAcgASgJEhoKEmRldmljZV9waXhlbF9yYXRpbxgIIAEoARITCgtjYXB0dXJlZF9hdBgJIAEoCRItCgpwYWdlX3N0YXRlGAogASgLMhkuYnJvd3NlcndpcmUudjEuUGFnZVN0YXRlEjQKC25ldHdvcmtfbG9nGAsgAygLMh8uYnJvd3NlcndpcmUudjEuTmV0d29ya0xvZ0VudHJ5EhUKDWVtYmVkZGVkX2RhdGEYDCABKAwSEgoKc2NyZWVuc2hvdBgNIAEoDBIOCgZ0YWJfaWQYDiABKAUSEAoIZnJhbWVfaWQYDyABKAUilwEKFkRpc2NvdmVyeVNlc3Npb25TdGF0dXMSEgoKc2Vzc2lvbl9pZBgBIAEoCRIWCg5zbmFwc2hvdF9jb3VudBgCIAEoBRIUCgxlbnRpdHlfY291bnQYAyABKAUSFAoMYWN0aW9uX2NvdW50GAQgASgFEhIKCnZpZXdfY291bnQYBSABKAUSEQoJZmluYWxpemVkGAYgASgIIloKDU1hbmlmZXN0UmVhZHkSEgoKc2Vzc2lvbl9pZBgBIAEoCRI1CghtYW5pZmVzdBgCIAEoCzIjLmJyb3dzZXJ3aXJlLnYxLkJyb3dzZXJXaXJlTWFuaWZlc3QisAEKFUJhdGNoUHJvY2Vzc2luZ1N0YXR1cxIQCghiYXRjaF9pZBgBIAEoCRISCgpzZXNzaW9uX2lkGAIgASgJEisKBnN0YXR1cxgDIAEoDjIbLmJyb3dzZXJ3aXJlLnYxLkJhdGNoU3RhdHVzEjUKCG1hbmlmZXN0GAQgASgLMiMuYnJvd3NlcndpcmUudjEuQnJvd3NlcldpcmVNYW5pZmVzdBINCgVlcnJvchgFIAEoCSKkAQoPRXhlY3V0ZVdvcmtmbG93EhUKDXdvcmtmbG93X25hbWUYASABKAkSOwoGaW5wdXRzGAIgAygLMisuYnJvd3NlcndpcmUudjEuRXhlY3V0ZVdvcmtmbG93LklucHV0c0VudHJ5Eg4KBm9yaWdpbhgDIAEoCRotCgtJbnB1dHNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBIlAKEldvcmtmbG93U3RlcFJlc3VsdBIRCglzdGVwX3R5cGUYASABKAkSCgoCb2sYAiABKAgSDQoFZXJyb3IYAyABKAkSDAoEZGF0YRgEIAEoDCJsCg5Xb3JrZmxvd1Jlc3VsdBIKCgJvaxgBIAEoCBINCgVlcnJvchgCIAEoCRIxCgVzdGVwcxgDIAMoCzIiLmJyb3dzZXJ3aXJlLnYxLldvcmtmbG93U3RlcFJlc3VsdBIMCgRkYXRhGAQgASgMKpUBCgtCYXRjaFN0YXR1cxIcChhCQVRDSF9TVEFUVVNfVU5TUEVDSUZJRUQQABIYChRCQVRDSF9TVEFUVVNfUEVORElORxABEhsKF0JBVENIX1NUQVRVU19QUk9DRVNTSU5HEAISGQoVQkFUQ0hfU1RBVFVTX0NPTVBMRVRFEAMSFgoSQkFUQ0hfU1RBVFVTX0VSUk9SEARiBnByb3RvMw", [file_browserwire_v1_manifest, file_browserwire_v1_skeleton]);
+var file_browserwire_v1_messages = /* @__PURE__ */ fileDesc("Ch1icm93c2Vyd2lyZS92MS9tZXNzYWdlcy5wcm90bxIOYnJvd3NlcndpcmUudjEipgYKCEVudmVsb3BlEhIKCnJlcXVlc3RfaWQYASABKAkSJgoFaGVsbG8YAiABKAsyFS5icm93c2Vyd2lyZS52MS5IZWxsb0gAEi0KCWhlbGxvX2FjaxgDIAEoCzIYLmJyb3dzZXJ3aXJlLnYxLkhlbGxvQWNrSAASJAoEcGluZxgEIAEoCzIULmJyb3dzZXJ3aXJlLnYxLlBpbmdIABIkCgRwb25nGAUgASgLMhQuYnJvd3NlcndpcmUudjEuUG9uZ0gAEigKBnN0YXR1cxgGIAEoCzIWLmJyb3dzZXJ3aXJlLnYxLlN0YXR1c0gAEiYKBWVycm9yGAcgASgLMhUuYnJvd3NlcndpcmUudjEuRXJyb3JIABJIChdkaXNjb3Zlcnlfc2Vzc2lvbl9zdGFydBgKIAEoCzIlLmJyb3dzZXJ3aXJlLnYxLkRpc2NvdmVyeVNlc3Npb25TdGFydEgAEkYKFmRpc2NvdmVyeV9zZXNzaW9uX3N0b3AYCyABKAsyJC5icm93c2Vyd2lyZS52MS5EaXNjb3ZlcnlTZXNzaW9uU3RvcEgAEkoKGGRpc2NvdmVyeV9zZXNzaW9uX3N0YXR1cxgNIAEoCzImLmJyb3dzZXJ3aXJlLnYxLkRpc2NvdmVyeVNlc3Npb25TdGF0dXNIABJIChdiYXRjaF9wcm9jZXNzaW5nX3N0YXR1cxgPIAEoCzIlLmJyb3dzZXJ3aXJlLnYxLkJhdGNoUHJvY2Vzc2luZ1N0YXR1c0gAEjsKEGV4ZWN1dGVfd29ya2Zsb3cYECABKAsyHy5icm93c2Vyd2lyZS52MS5FeGVjdXRlV29ya2Zsb3dIABI5Cg93b3JrZmxvd19yZXN1bHQYESABKAsyHi5icm93c2Vyd2lyZS52MS5Xb3JrZmxvd1Jlc3VsdEgAEjMKDGV4ZWN1dGVfcmVhZBgSIAEoCzIbLmJyb3dzZXJ3aXJlLnYxLkV4ZWN1dGVSZWFkSAASMQoLcmVhZF9yZXN1bHQYEyABKAsyGi5icm93c2Vyd2lyZS52MS5SZWFkUmVzdWx0SABCCQoHcGF5bG9hZCIoCgVIZWxsbxIOCgZjbGllbnQYASABKAkSDwoHdmVyc2lvbhgCIAEoCSJGCghIZWxsb0FjaxIQCghhY2NlcHRlZBgBIAEoCBIOCgZzZXJ2ZXIYAiABKAkSGAoQcHJvdG9jb2xfdmVyc2lvbhgDIAEoCSIWCgRQaW5nEg4KBnNvdXJjZRgBIAEoCSIbCgRQb25nEhMKC3NlcnZlcl90aW1lGAEgASgJIiwKBlN0YXR1cxINCgVzdGF0ZRgBIAEoCRITCgtzZXJ2ZXJfdGltZRgCIAEoCSImCgVFcnJvchIMCgRjb2RlGAEgASgJEg8KB21lc3NhZ2UYAiABKAkiawoVRGlzY292ZXJ5U2Vzc2lvblN0YXJ0EhIKCnNlc3Npb25faWQYASABKAkSDgoGdGFiX2lkGAIgASgFEgsKA3VybBgDIAEoCRINCgV0aXRsZRgEIAEoCRISCgpzdGFydGVkX2F0GAUgASgJIqIDCg9TbmFwc2hvdFBheWxvYWQSEwoLc25hcHNob3RfaWQYASABKAkSEgoKc2Vzc2lvbl9pZBgCIAEoCRIoCgd0cmlnZ2VyGAMgASgLMhcuYnJvd3NlcndpcmUudjEuVHJpZ2dlchIvCghza2VsZXRvbhgEIAMoCzIdLmJyb3dzZXJ3aXJlLnYxLlNrZWxldG9uRW50cnkSEQoJcGFnZV90ZXh0GAUgASgJEgsKA3VybBgGIAEoCRINCgV0aXRsZRgHIAEoCRIaChJkZXZpY2VfcGl4ZWxfcmF0aW8YCCABKAESEwoLY2FwdHVyZWRfYXQYCSABKAkSLQoKcGFnZV9zdGF0ZRgKIAEoCzIZLmJyb3dzZXJ3aXJlLnYxLlBhZ2VTdGF0ZRI0CgtuZXR3b3JrX2xvZxgLIAMoCzIfLmJyb3dzZXJ3aXJlLnYxLk5ldHdvcmtMb2dFbnRyeRISCgpzY3JlZW5zaG90GA0gASgMEg4KBnRhYl9pZBgOIAEoBRIQCghmcmFtZV9pZBgPIAEoBRIQCghkb21faHRtbBgQIAEoCSKaAQoURGlzY292ZXJ5U2Vzc2lvblN0b3ASEgoKc2Vzc2lvbl9pZBgBIAEoCRIQCghiYXRjaF9pZBgCIAEoCRIMCgRub3RlGAMgASgJEhIKCnN0b3BwZWRfYXQYBCABKAkSOgoRcGVuZGluZ19zbmFwc2hvdHMYBSADKAsyHy5icm93c2Vyd2lyZS52MS5TbmFwc2hvdFBheWxvYWQilwEKFkRpc2NvdmVyeVNlc3Npb25TdGF0dXMSEgoKc2Vzc2lvbl9pZBgBIAEoCRIWCg5zbmFwc2hvdF9jb3VudBgCIAEoBRIUCgxlbnRpdHlfY291bnQYAyABKAUSFAoMYWN0aW9uX2NvdW50GAQgASgFEhIKCnZpZXdfY291bnQYBSABKAUSEQoJZmluYWxpemVkGAYgASgIInkKFUJhdGNoUHJvY2Vzc2luZ1N0YXR1cxIQCghiYXRjaF9pZBgBIAEoCRISCgpzZXNzaW9uX2lkGAIgASgJEisKBnN0YXR1cxgDIAEoDjIbLmJyb3dzZXJ3aXJlLnYxLkJhdGNoU3RhdHVzEg0KBWVycm9yGAUgASgJIqQBCg9FeGVjdXRlV29ya2Zsb3cSFQoNd29ya2Zsb3dfbmFtZRgBIAEoCRI7CgZpbnB1dHMYAiADKAsyKy5icm93c2Vyd2lyZS52MS5FeGVjdXRlV29ya2Zsb3cuSW5wdXRzRW50cnkSDgoGb3JpZ2luGAMgASgJGi0KC0lucHV0c0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEiUAoSV29ya2Zsb3dTdGVwUmVzdWx0EhEKCXN0ZXBfdHlwZRgBIAEoCRIKCgJvaxgCIAEoCBINCgVlcnJvchgDIAEoCRIMCgRkYXRhGAQgASgMImwKDldvcmtmbG93UmVzdWx0EgoKAm9rGAEgASgIEg0KBWVycm9yGAIgASgJEjEKBXN0ZXBzGAMgAygLMiIuYnJvd3NlcndpcmUudjEuV29ya2Zsb3dTdGVwUmVzdWx0EgwKBGRhdGEYBCABKAwi6AEKC0V4ZWN1dGVSZWFkEhEKCXZpZXdfbmFtZRgBIAEoCRIOCgZvcmlnaW4YAiABKAkSEAoIcGFnZV91cmwYAyABKAkSNwoGcGFyYW1zGAQgAygLMicuYnJvd3NlcndpcmUudjEuRXhlY3V0ZVJlYWQuUGFyYW1zRW50cnkSEwoLYXBpX3JlcXVlc3QYBSABKAwSEgoKYXBpX2ZpZWxkcxgGIAEoDBITCgt2aWV3X2NvbmZpZxgHIAEoDBotCgtQYXJhbXNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBIjUKClJlYWRSZXN1bHQSCgoCb2sYASABKAgSDQoFZXJyb3IYAiABKAkSDAoEZGF0YRgDIAEoDCqVAQoLQmF0Y2hTdGF0dXMSHAoYQkFUQ0hfU1RBVFVTX1VOU1BFQ0lGSUVEEAASGAoUQkFUQ0hfU1RBVFVTX1BFTkRJTkcQARIbChdCQVRDSF9TVEFUVVNfUFJPQ0VTU0lORxACEhkKFUJBVENIX1NUQVRVU19DT01QTEVURRADEhYKEkJBVENIX1NUQVRVU19FUlJPUhAEYgZwcm90bzM", [file_browserwire_v1_manifest, file_browserwire_v1_skeleton]);
 var EnvelopeSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 0);
 var HelloSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 1);
 var HelloAckSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 2);
@@ -3505,20 +3542,424 @@ var PingSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 3);
 var PongSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 4);
 var StatusSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 5);
 var ErrorSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 6);
-var DiscoverySnapshotSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 7);
-var DiscoveryAckSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 8);
-var DiscoverySessionStartSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 9);
-var SnapshotPayloadSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 10);
-var DiscoverySessionStopSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 11);
-var DiscoveryIncrementalSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 12);
-var DiscoverySessionStatusSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 13);
-var ManifestReadySchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 14);
-var BatchProcessingStatusSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 15);
-var ExecuteWorkflowSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 16);
-var WorkflowStepResultSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 17);
-var WorkflowResultSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 18);
+var DiscoverySessionStartSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 7);
+var SnapshotPayloadSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 8);
+var DiscoverySessionStopSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 9);
+var DiscoverySessionStatusSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 10);
+var BatchProcessingStatusSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 11);
+var ExecuteWorkflowSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 12);
+var WorkflowStepResultSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 13);
+var WorkflowResultSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 14);
+var ExecuteReadSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 15);
+var ReadResultSchema = /* @__PURE__ */ messageDesc(file_browserwire_v1_messages, 16);
 var BatchStatusSchema = /* @__PURE__ */ enumDesc(file_browserwire_v1_messages, 0);
 var BatchStatus = /* @__PURE__ */ tsEnum(BatchStatusSchema);
+
+// node_modules/@bufbuild/protobuf/dist/esm/wkt/any.js
+function anyIs(any, descOrTypeName) {
+  if (any.typeUrl === "") {
+    return false;
+  }
+  const want = typeof descOrTypeName == "string" ? descOrTypeName : descOrTypeName.typeName;
+  const got = typeUrlToName(any.typeUrl);
+  return want === got;
+}
+function anyUnpack(any, registryOrMessageDesc) {
+  if (any.typeUrl === "") {
+    return void 0;
+  }
+  const desc = registryOrMessageDesc.kind == "message" ? registryOrMessageDesc : registryOrMessageDesc.getMessage(typeUrlToName(any.typeUrl));
+  if (!desc || !anyIs(any, desc)) {
+    return void 0;
+  }
+  return fromBinary(desc, any.value);
+}
+function typeUrlToName(url) {
+  const slash = url.lastIndexOf("/");
+  const name = slash >= 0 ? url.substring(slash + 1) : url;
+  if (!name.length) {
+    throw new Error(`invalid type url: ${url}`);
+  }
+  return name;
+}
+
+// node_modules/@bufbuild/protobuf/dist/esm/extensions.js
+function getExtension(message, extension) {
+  assertExtendee(extension, message);
+  const ufs = filterUnknownFields(message.$unknown, extension);
+  const [container, field, get] = createExtensionContainer(extension);
+  for (const uf of ufs) {
+    readField(container, new BinaryReader(uf.data), field, uf.wireType, {
+      readUnknownFields: true
+    });
+  }
+  return get();
+}
+function filterUnknownFields(unknownFields, extension) {
+  if (unknownFields === void 0)
+    return [];
+  if (extension.fieldKind === "enum" || extension.fieldKind === "scalar") {
+    for (let i = unknownFields.length - 1; i >= 0; --i) {
+      if (unknownFields[i].no == extension.number) {
+        return [unknownFields[i]];
+      }
+    }
+    return [];
+  }
+  return unknownFields.filter((uf) => uf.no === extension.number);
+}
+function createExtensionContainer(extension, value) {
+  const localName = extension.typeName;
+  const field = Object.assign(Object.assign({}, extension), { kind: "field", parent: extension.extendee, localName });
+  const desc = Object.assign(Object.assign({}, extension.extendee), { fields: [field], members: [field], oneofs: [] });
+  const container = create(desc, value !== void 0 ? { [localName]: value } : void 0);
+  return [
+    reflect(desc, container),
+    field,
+    () => {
+      const value2 = container[localName];
+      if (value2 === void 0) {
+        const desc2 = extension.message;
+        if (isWrapperDesc(desc2)) {
+          return scalarZeroValue(desc2.fields[0].scalar, desc2.fields[0].longAsString);
+        }
+        return create(desc2);
+      }
+      return value2;
+    }
+  ];
+}
+function assertExtendee(extension, message) {
+  if (extension.extendee.typeName != message.$typeName) {
+    throw new Error(`extension ${extension.typeName} can only be applied to message ${extension.extendee.typeName}`);
+  }
+}
+
+// node_modules/@bufbuild/protobuf/dist/esm/to-json.js
+var LEGACY_REQUIRED3 = 3;
+var IMPLICIT4 = 2;
+var jsonWriteDefaults = {
+  alwaysEmitImplicit: false,
+  enumAsInteger: false,
+  useProtoFieldName: false
+};
+function makeWriteOptions2(options) {
+  return options ? Object.assign(Object.assign({}, jsonWriteDefaults), options) : jsonWriteDefaults;
+}
+function toJson(schema, message, options) {
+  return reflectToJson(reflect(schema, message), makeWriteOptions2(options));
+}
+function reflectToJson(msg, opts) {
+  var _a;
+  const wktJson = tryWktToJson(msg, opts);
+  if (wktJson !== void 0)
+    return wktJson;
+  const json = {};
+  for (const f of msg.sortedFields) {
+    if (!msg.isSet(f)) {
+      if (f.presence == LEGACY_REQUIRED3) {
+        throw new Error(`cannot encode ${f} to JSON: required field not set`);
+      }
+      if (!opts.alwaysEmitImplicit || f.presence !== IMPLICIT4) {
+        continue;
+      }
+    }
+    const jsonValue = fieldToJson(f, msg.get(f), opts);
+    if (jsonValue !== void 0) {
+      json[jsonName(f, opts)] = jsonValue;
+    }
+  }
+  if (opts.registry) {
+    const tagSeen = /* @__PURE__ */ new Set();
+    for (const { no } of (_a = msg.getUnknown()) !== null && _a !== void 0 ? _a : []) {
+      if (!tagSeen.has(no)) {
+        tagSeen.add(no);
+        const extension = opts.registry.getExtensionFor(msg.desc, no);
+        if (!extension) {
+          continue;
+        }
+        const value = getExtension(msg.message, extension);
+        const [container, field] = createExtensionContainer(extension, value);
+        const jsonValue = fieldToJson(field, container.get(field), opts);
+        if (jsonValue !== void 0) {
+          json[extension.jsonName] = jsonValue;
+        }
+      }
+    }
+  }
+  return json;
+}
+function fieldToJson(f, val, opts) {
+  switch (f.fieldKind) {
+    case "scalar":
+      return scalarToJson(f, val);
+    case "message":
+      return reflectToJson(val, opts);
+    case "enum":
+      return enumToJsonInternal(f.enum, val, opts.enumAsInteger);
+    case "list":
+      return listToJson(val, opts);
+    case "map":
+      return mapToJson(val, opts);
+  }
+}
+function mapToJson(map, opts) {
+  const f = map.field();
+  const jsonObj = {};
+  switch (f.mapKind) {
+    case "scalar":
+      for (const [entryKey, entryValue] of map) {
+        jsonObj[entryKey] = scalarToJson(f, entryValue);
+      }
+      break;
+    case "message":
+      for (const [entryKey, entryValue] of map) {
+        jsonObj[entryKey] = reflectToJson(entryValue, opts);
+      }
+      break;
+    case "enum":
+      for (const [entryKey, entryValue] of map) {
+        jsonObj[entryKey] = enumToJsonInternal(f.enum, entryValue, opts.enumAsInteger);
+      }
+      break;
+  }
+  return opts.alwaysEmitImplicit || map.size > 0 ? jsonObj : void 0;
+}
+function listToJson(list, opts) {
+  const f = list.field();
+  const jsonArr = [];
+  switch (f.listKind) {
+    case "scalar":
+      for (const item of list) {
+        jsonArr.push(scalarToJson(f, item));
+      }
+      break;
+    case "enum":
+      for (const item of list) {
+        jsonArr.push(enumToJsonInternal(f.enum, item, opts.enumAsInteger));
+      }
+      break;
+    case "message":
+      for (const item of list) {
+        jsonArr.push(reflectToJson(item, opts));
+      }
+      break;
+  }
+  return opts.alwaysEmitImplicit || jsonArr.length > 0 ? jsonArr : void 0;
+}
+function enumToJsonInternal(desc, value, enumAsInteger) {
+  var _a;
+  if (typeof value != "number") {
+    throw new Error(`cannot encode ${desc} to JSON: expected number, got ${formatVal(value)}`);
+  }
+  if (desc.typeName == "google.protobuf.NullValue") {
+    return null;
+  }
+  if (enumAsInteger) {
+    return value;
+  }
+  const val = desc.value[value];
+  return (_a = val === null || val === void 0 ? void 0 : val.name) !== null && _a !== void 0 ? _a : value;
+}
+function scalarToJson(field, value) {
+  var _a, _b, _c, _d, _e, _f;
+  switch (field.scalar) {
+    // int32, fixed32, uint32: JSON value will be a decimal number. Either numbers or strings are accepted.
+    case ScalarType.INT32:
+    case ScalarType.SFIXED32:
+    case ScalarType.SINT32:
+    case ScalarType.FIXED32:
+    case ScalarType.UINT32:
+      if (typeof value != "number") {
+        throw new Error(`cannot encode ${field} to JSON: ${(_a = checkField(field, value)) === null || _a === void 0 ? void 0 : _a.message}`);
+      }
+      return value;
+    // float, double: JSON value will be a number or one of the special string values "NaN", "Infinity", and "-Infinity".
+    // Either numbers or strings are accepted. Exponent notation is also accepted.
+    case ScalarType.FLOAT:
+    case ScalarType.DOUBLE:
+      if (typeof value != "number") {
+        throw new Error(`cannot encode ${field} to JSON: ${(_b = checkField(field, value)) === null || _b === void 0 ? void 0 : _b.message}`);
+      }
+      if (Number.isNaN(value))
+        return "NaN";
+      if (value === Number.POSITIVE_INFINITY)
+        return "Infinity";
+      if (value === Number.NEGATIVE_INFINITY)
+        return "-Infinity";
+      return value;
+    // string:
+    case ScalarType.STRING:
+      if (typeof value != "string") {
+        throw new Error(`cannot encode ${field} to JSON: ${(_c = checkField(field, value)) === null || _c === void 0 ? void 0 : _c.message}`);
+      }
+      return value;
+    // bool:
+    case ScalarType.BOOL:
+      if (typeof value != "boolean") {
+        throw new Error(`cannot encode ${field} to JSON: ${(_d = checkField(field, value)) === null || _d === void 0 ? void 0 : _d.message}`);
+      }
+      return value;
+    // JSON value will be a decimal string. Either numbers or strings are accepted.
+    case ScalarType.UINT64:
+    case ScalarType.FIXED64:
+    case ScalarType.INT64:
+    case ScalarType.SFIXED64:
+    case ScalarType.SINT64:
+      if (typeof value != "bigint" && typeof value != "string") {
+        throw new Error(`cannot encode ${field} to JSON: ${(_e = checkField(field, value)) === null || _e === void 0 ? void 0 : _e.message}`);
+      }
+      return value.toString();
+    // bytes: JSON value will be the data encoded as a string using standard base64 encoding with paddings.
+    // Either standard or URL-safe base64 encoding with/without paddings are accepted.
+    case ScalarType.BYTES:
+      if (value instanceof Uint8Array) {
+        return base64Encode(value);
+      }
+      throw new Error(`cannot encode ${field} to JSON: ${(_f = checkField(field, value)) === null || _f === void 0 ? void 0 : _f.message}`);
+  }
+}
+function jsonName(f, opts) {
+  return opts.useProtoFieldName ? f.name : f.jsonName;
+}
+function tryWktToJson(msg, opts) {
+  if (!msg.desc.typeName.startsWith("google.protobuf.")) {
+    return void 0;
+  }
+  switch (msg.desc.typeName) {
+    case "google.protobuf.Any":
+      return anyToJson(msg.message, opts);
+    case "google.protobuf.Timestamp":
+      return timestampToJson(msg.message);
+    case "google.protobuf.Duration":
+      return durationToJson(msg.message);
+    case "google.protobuf.FieldMask":
+      return fieldMaskToJson(msg.message);
+    case "google.protobuf.Struct":
+      return structToJson(msg.message);
+    case "google.protobuf.Value":
+      return valueToJson(msg.message);
+    case "google.protobuf.ListValue":
+      return listValueToJson(msg.message);
+    default:
+      if (isWrapperDesc(msg.desc)) {
+        const valueField = msg.desc.fields[0];
+        return scalarToJson(valueField, msg.get(valueField));
+      }
+      return void 0;
+  }
+}
+function anyToJson(val, opts) {
+  if (val.typeUrl === "") {
+    return {};
+  }
+  const { registry } = opts;
+  let message;
+  let desc;
+  if (registry) {
+    message = anyUnpack(val, registry);
+    if (message) {
+      desc = registry.getMessage(message.$typeName);
+    }
+  }
+  if (!desc || !message) {
+    throw new Error(`cannot encode message ${val.$typeName} to JSON: "${val.typeUrl}" is not in the type registry`);
+  }
+  let json = reflectToJson(reflect(desc, message), opts);
+  if (desc.typeName.startsWith("google.protobuf.") || json === null || Array.isArray(json) || typeof json !== "object") {
+    json = { value: json };
+  }
+  json["@type"] = val.typeUrl;
+  return json;
+}
+function durationToJson(val) {
+  const seconds = Number(val.seconds);
+  const nanos = val.nanos;
+  if (seconds > 315576e6 || seconds < -315576e6) {
+    throw new Error(`cannot encode message ${val.$typeName} to JSON: value out of range`);
+  }
+  if (seconds > 0 && nanos < 0 || seconds < 0 && nanos > 0) {
+    throw new Error(`cannot encode message ${val.$typeName} to JSON: nanos sign must match seconds sign`);
+  }
+  let text = val.seconds.toString();
+  if (nanos !== 0) {
+    let nanosStr = Math.abs(nanos).toString();
+    nanosStr = "0".repeat(9 - nanosStr.length) + nanosStr;
+    if (nanosStr.substring(3) === "000000") {
+      nanosStr = nanosStr.substring(0, 3);
+    } else if (nanosStr.substring(6) === "000") {
+      nanosStr = nanosStr.substring(0, 6);
+    }
+    text += "." + nanosStr;
+    if (nanos < 0 && seconds == 0) {
+      text = "-" + text;
+    }
+  }
+  return text + "s";
+}
+function fieldMaskToJson(val) {
+  return val.paths.map((p) => {
+    if (protoSnakeCase(protoCamelCase(p)) !== p) {
+      throw new Error(`cannot encode message ${val.$typeName} to JSON: lowerCamelCase of path name "${p}" is irreversible`);
+    }
+    return protoCamelCase(p);
+  }).join(",");
+}
+function structToJson(val) {
+  const json = {};
+  for (const [k, v] of Object.entries(val.fields)) {
+    json[k] = valueToJson(v);
+  }
+  return json;
+}
+function valueToJson(val) {
+  switch (val.kind.case) {
+    case "nullValue":
+      return null;
+    case "numberValue":
+      if (!Number.isFinite(val.kind.value)) {
+        throw new Error(`${val.$typeName} cannot be NaN or Infinity`);
+      }
+      return val.kind.value;
+    case "boolValue":
+      return val.kind.value;
+    case "stringValue":
+      return val.kind.value;
+    case "structValue":
+      return structToJson(val.kind.value);
+    case "listValue":
+      return listValueToJson(val.kind.value);
+    default:
+      throw new Error(`${val.$typeName} must have a value`);
+  }
+}
+function listValueToJson(val) {
+  return val.values.map(valueToJson);
+}
+function timestampToJson(val) {
+  const ms = Number(val.seconds) * 1e3;
+  if (ms < Date.parse("0001-01-01T00:00:00Z") || ms > Date.parse("9999-12-31T23:59:59Z")) {
+    throw new Error(`cannot encode message ${val.$typeName} to JSON: must be from 0001-01-01T00:00:00Z to 9999-12-31T23:59:59Z inclusive`);
+  }
+  if (val.nanos < 0) {
+    throw new Error(`cannot encode message ${val.$typeName} to JSON: nanos must not be negative`);
+  }
+  if (val.nanos > 999999999) {
+    throw new Error(`cannot encode message ${val.$typeName} to JSON: nanos must not be greater than 99999999`);
+  }
+  let z = "Z";
+  if (val.nanos > 0) {
+    const nanosStr = (val.nanos + 1e9).toString().substring(1);
+    if (nanosStr.substring(3) === "000000") {
+      z = "." + nanosStr.substring(0, 3) + "Z";
+    } else if (nanosStr.substring(6) === "000") {
+      z = "." + nanosStr.substring(0, 6) + "Z";
+    } else {
+      z = "." + nanosStr + "Z";
+    }
+  }
+  return new Date(ms).toISOString().replace(".000Z", z);
+}
 export {
   ActionDefSchema,
   ActionInputDefSchema,
@@ -3532,18 +3973,16 @@ export {
   ConfidenceDefSchema,
   ConfidenceLevel,
   ConfidenceLevelSchema,
-  DiscoveryAckSchema,
-  DiscoveryIncrementalSchema,
   DiscoverySessionStartSchema,
   DiscoverySessionStatusSchema,
   DiscoverySessionStopSchema,
-  DiscoverySnapshotSchema,
   EntityDefSchema,
   EnvelopeSchema,
   ErrorClassification,
   ErrorClassificationSchema,
   ErrorDefSchema,
   ErrorSchema,
+  ExecuteReadSchema,
   ExecuteWorkflowSchema,
   GuardConditionDefSchema,
   HelloAckSchema,
@@ -3553,7 +3992,6 @@ export {
   LocatorSetDefSchema,
   LocatorStrategyDefSchema,
   ManifestMetadataSchema,
-  ManifestReadySchema,
   NetworkLogEntrySchema,
   OutcomeSignalKind,
   OutcomeSignalKindSchema,
@@ -3565,6 +4003,7 @@ export {
   ProvenanceDefSchema,
   ProvenanceSource,
   ProvenanceSourceSchema,
+  ReadResultSchema,
   RectSchema,
   SignalDefSchema,
   SignalKind,
@@ -3596,5 +4035,6 @@ export {
   file_browserwire_v1_messages,
   file_browserwire_v1_skeleton,
   fromBinary,
-  toBinary
+  toBinary,
+  toJson
 };
