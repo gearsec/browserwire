@@ -10,6 +10,21 @@ const DEFAULT_WS_URL = "ws://127.0.0.1:8787";
 const HEARTBEAT_INTERVAL_MS = 20000;
 const MAX_LOG_ENTRIES = 200;
 const AUTO_CONNECT_MAX_ATTEMPTS = 5;
+const PAGE_READY_TIMEOUT_MS = 20000;
+const NAVIGATION_OBSERVE_WINDOW_MS = 1200;
+const DOM_IDLE_MS = 600;
+const DOM_IDLE_PROBE_TIMEOUT_MS = 4000;
+const NETWORK_QUIET_MS = 600;
+const SETTLE_POLL_INTERVAL_MS = 150;
+
+const BLOCKING_REQUEST_TYPES = new Set([
+  "main_frame",
+  "sub_frame",
+  "xmlhttprequest",
+  "fetch"
+]);
+
+const NON_BLOCKING_REQUEST_URL_RE = /google-analytics|segment\.io|sentry\.io|hotjar|intercom|doubleclick|fonts\.(googleapis|gstatic)|\.woff2?|\.ttf|\.css(\?|$)|\.png|\.jpg|\.jpeg|\.svg|\.gif/i;
 
 let wsUrl = DEFAULT_WS_URL;
 let socket = null;
@@ -24,31 +39,47 @@ let pendingSnapshots = [];
 const processingBatches = new Map();
 
 // ─── Per-Tab In-Flight Network Request Tracking ─────────────────────
-// Maps tabId → Set of requestIds currently in flight
+// Maps tabId → Map(requestId -> request metadata)
 const pendingRequests = new Map();
 
-const getPendingCount = (tabId) => {
-  const set = pendingRequests.get(tabId);
-  return set ? set.size : 0;
+const getPendingSnapshot = (tabId) => {
+  const requests = pendingRequests.get(tabId);
+  if (!requests) return { total: 0, blocking: 0 };
+
+  let blocking = 0;
+  for (const req of requests.values()) {
+    if (req?.blocking) blocking += 1;
+  }
+
+  return { total: requests.size, blocking };
 };
 
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
     if (details.tabId < 0) return; // ignore non-tab requests (e.g. service worker)
     if (!pendingRequests.has(details.tabId)) {
-      pendingRequests.set(details.tabId, new Set());
+      pendingRequests.set(details.tabId, new Map());
     }
-    pendingRequests.get(details.tabId).add(details.requestId);
+
+    const requests = pendingRequests.get(details.tabId);
+    const type = details.type || "other";
+    const url = details.url || "";
+    requests.set(details.requestId, {
+      type,
+      url,
+      startedAt: Date.now(),
+      blocking: BLOCKING_REQUEST_TYPES.has(type) && !NON_BLOCKING_REQUEST_URL_RE.test(url)
+    });
   },
   { urls: ["<all_urls>"] }
 );
 
 const onRequestFinished = (details) => {
   if (details.tabId < 0) return;
-  const set = pendingRequests.get(details.tabId);
-  if (set) {
-    set.delete(details.requestId);
-    if (set.size === 0) pendingRequests.delete(details.tabId);
+  const requests = pendingRequests.get(details.tabId);
+  if (requests) {
+    requests.delete(details.requestId);
+    if (requests.size === 0) pendingRequests.delete(details.tabId);
   }
 };
 
@@ -157,16 +188,10 @@ const onBackendMessage = (rawMessage) => {
   }
 
   if (message.type === MessageType.DISCOVERY_SESSION_STATUS) {
-    const stats = message.payload || {};
-    addLog(`session status: snapshots=${stats.snapshotCount ?? 0} entities=${stats.entityCount ?? 0} actions=${stats.actionCount ?? 0}`);
+    const { sessionId, status } = message.payload || {};
+    addLog(`session status: sessionId=${sessionId ?? "unknown"} status=${status ?? "unknown"}`);
 
     if (activeSession) {
-      activeSession = {
-        ...activeSession,
-        snapshotCount: stats.snapshotCount ?? activeSession.snapshotCount,
-        entityCount: stats.entityCount ?? 0,
-        actionCount: stats.actionCount ?? 0
-      };
       broadcastState();
     }
     return;
@@ -208,11 +233,6 @@ const onBackendMessage = (rawMessage) => {
 
   if (message.type === MessageType.EXECUTE_WORKFLOW) {
     handleExecuteWorkflow(message);
-    return;
-  }
-
-  if (message.type === MessageType.EXECUTE_READ) {
-    handleExecuteRead(message);
     return;
   }
 
@@ -1070,27 +1090,21 @@ const PAGE_READ_VIEW = (payload) => {
 /**
  * Navigate a tab to a URL and wait for the page to finish loading.
  * Resolves relative URLs against baseOrigin.
- * After load complete, waits 500ms for SPA hydration.
  */
-const navigateTabAndWait = (tabId, url, baseOrigin, timeoutMs = 10000) =>
-  new Promise((resolve, reject) => {
-    const fullUrl = url.startsWith("http") ? url : `${baseOrigin}${url}`;
-    const timer = setTimeout(() => {
-      chrome.tabs.onUpdated.removeListener(listener);
-      reject(new Error(`Navigation to ${fullUrl} timed out`));
-    }, timeoutMs);
+const navigateTabAndWait = async (tabId, url, baseOrigin, timeoutMs = PAGE_READY_TIMEOUT_MS) => {
+  const fullUrl = url.startsWith("http") ? url : `${baseOrigin}${url}`;
+  await chrome.tabs.update(tabId, { url: fullUrl });
 
-    const listener = (updatedTabId, changeInfo) => {
-      if (updatedTabId !== tabId || changeInfo.status !== "complete") return;
-      chrome.tabs.onUpdated.removeListener(listener);
-      clearTimeout(timer);
-      // 500ms grace for SPA hydration
-      setTimeout(resolve, 500);
-    };
-
-    chrome.tabs.onUpdated.addListener(listener);
-    chrome.tabs.update(tabId, { url: fullUrl });
+  const settle = await waitForPageSettle(tabId, {
+    timeoutMs,
+    expectNavigation: true,
+    context: `navigate:${fullUrl}`
   });
+
+  if (!settle.settled) {
+    throw new Error(`Navigation to ${fullUrl} did not settle (${settle.reason || "timeout"})`);
+  }
+};
 
 /**
  * Self-contained outcome evaluator. Injected into the page after workflow steps complete.
@@ -1133,13 +1147,21 @@ const PAGE_EVALUATE_OUTCOME = (payload) => {
 const pollReadView = async (tabId, viewConfig, { timeoutMs = 20000, readyQuietMs = 500 } = {}) => {
   const start = Date.now();
   let lastActivityTime = start;
+  let stableNonEmptyReads = 0;
+  let lastNonEmptySignature = null;
 
   while (Date.now() - start < timeoutMs) {
     // Wait for DOM to be briefly quiet before reading
-    const domResult = await executeInTab(tabId, PAGE_WAIT_FOR_DOM_IDLE, [{ idleMs: 300, timeoutMs: 3000 }]);
+    const domResult = await executeInTab(tabId, PAGE_WAIT_FOR_DOM_IDLE, [{
+      idleMs: 300,
+      timeoutMs: 3000,
+      requireReadyStateComplete: true
+    }]);
     const result = await executeInTab(tabId, PAGE_READ_VIEW, [viewConfig]);
 
     if (!result || result.ok === false) {
+      stableNonEmptyReads = 0;
+      lastNonEmptySignature = null;
       lastActivityTime = Date.now();
       await new Promise(r => setTimeout(r, 500));
       continue;
@@ -1148,14 +1170,37 @@ const pollReadView = async (tabId, viewConfig, { timeoutMs = 20000, readyQuietMs
     const isEmpty = viewConfig.isList
       ? (Array.isArray(result.result) && result.result.length === 0)
       : (result.result && Object.values(result.result).every(v => v === null));
-
-    if (!isEmpty) return result;
-
-    // Empty result — check for activity signals
-    const pending = getPendingCount(tabId);
+    const pending = getPendingSnapshot(tabId);
     const domActive = !domResult?.domIdle;
 
-    if (pending > 0 || domActive) {
+    if (!isEmpty) {
+      if (pending.blocking === 0 && !domActive) {
+        const signature = JSON.stringify(result.result).slice(0, 2000);
+        if (signature === lastNonEmptySignature) {
+          stableNonEmptyReads += 1;
+        } else {
+          stableNonEmptyReads = 1;
+          lastNonEmptySignature = signature;
+        }
+
+        if (stableNonEmptyReads >= 2) {
+          return result;
+        }
+      } else {
+        stableNonEmptyReads = 0;
+        lastNonEmptySignature = null;
+        lastActivityTime = Date.now();
+      }
+
+      await new Promise(r => setTimeout(r, 200));
+      continue;
+    }
+
+    stableNonEmptyReads = 0;
+    lastNonEmptySignature = null;
+
+    // Empty result — check for activity signals
+    if (pending.blocking > 0 || domActive) {
       lastActivityTime = Date.now();
       await new Promise(r => setTimeout(r, 500));
       continue;
@@ -1178,29 +1223,67 @@ const pollReadView = async (tabId, viewConfig, { timeoutMs = 20000, readyQuietMs
 // Page-injected: watches DOM mutations only.
 // Network idle is tracked separately in the background via chrome.webRequest.
 const PAGE_WAIT_FOR_DOM_IDLE = (opts) => {
-  const { idleMs = 500, timeoutMs = 10000 } = opts || {};
-  return new Promise((resolve) => {
-    let lastActivity = Date.now();
-    const start = lastActivity;
+  const {
+    idleMs = 500,
+    timeoutMs = 10000,
+    requireReadyStateComplete = true
+  } = opts || {};
 
-    const observer = new MutationObserver(() => { lastActivity = Date.now(); });
-    observer.observe(document.body || document.documentElement, {
+  return new Promise((resolve) => {
+    const target = document.body || document.documentElement;
+    if (!target) {
+      resolve({ domIdle: false, elapsed: 0, reason: "no_dom_root", readyState: document.readyState });
+      return;
+    }
+
+    const start = Date.now();
+    let lastActivity = start;
+
+    const observer = new MutationObserver(() => {
+      lastActivity = Date.now();
+    });
+
+    observer.observe(target, {
       childList: true, subtree: true, attributes: true, characterData: true
     });
+
+    const finish = (domIdle, reason) => {
+      observer.disconnect();
+      resolve({
+        domIdle,
+        elapsed: Date.now() - start,
+        reason,
+        readyState: document.readyState
+      });
+    };
+
+    const flushPaint = (cb) => {
+      if (typeof requestAnimationFrame !== "function") {
+        setTimeout(cb, 0);
+        return;
+      }
+      requestAnimationFrame(() => requestAnimationFrame(cb));
+    };
 
     const check = () => {
       const now = Date.now();
       const elapsed = now - start;
+
       if (elapsed >= timeoutMs) {
-        observer.disconnect();
-        resolve({ domIdle: false, elapsed, reason: "timeout" });
+        finish(false, "timeout");
         return;
       }
+
+      if (requireReadyStateComplete && document.readyState !== "complete") {
+        setTimeout(check, 100);
+        return;
+      }
+
       if (now - lastActivity >= idleMs) {
-        observer.disconnect();
-        resolve({ domIdle: true, elapsed, reason: "idle" });
+        flushPaint(() => finish(true, "idle"));
         return;
       }
+
       setTimeout(check, 100);
     };
 
@@ -1209,26 +1292,237 @@ const PAGE_WAIT_FOR_DOM_IDLE = (opts) => {
   });
 };
 
-const waitForNavigation = async (tabId, timeoutMs = 10000) => {
-  await new Promise(r => setTimeout(r, 100));
-  const tab = await chrome.tabs.get(tabId);
-  if (tab.status === "loading") {
-    await new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        chrome.tabs.onUpdated.removeListener(listener);
-        resolve();
-      }, timeoutMs);
-      const listener = (id, info) => {
-        if (id !== tabId || info.status !== "complete") return;
-        chrome.tabs.onUpdated.removeListener(listener);
-        clearTimeout(timeout);
-        resolve();
-      };
-      chrome.tabs.onUpdated.addListener(listener);
-    });
+const waitForNavigation = async (
+  tabId,
+  {
+    timeoutMs = PAGE_READY_TIMEOUT_MS,
+    observeWindowMs = NAVIGATION_OBSERVE_WINDOW_MS,
+    expectNavigation = false
+  } = {}
+) => {
+  const currentTab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!currentTab) {
+    return { ok: false, navigated: false, complete: false, reason: "tab_not_found" };
   }
-  // Grace period for SPA framework to begin post-navigation work
-  await new Promise(r => setTimeout(r, 150));
+
+  const initialUrl = currentTab.url || "";
+  let sawLoading = currentTab.status === "loading";
+  let sawComplete = currentTab.status === "complete";
+
+  return await new Promise((resolve) => {
+    let done = false;
+    let observeTimer = null;
+    let navigationTimer = null;
+
+    const cleanup = () => {
+      if (observeTimer) {
+        clearTimeout(observeTimer);
+        observeTimer = null;
+      }
+      if (navigationTimer) {
+        clearTimeout(navigationTimer);
+        navigationTimer = null;
+      }
+      chrome.tabs.onUpdated.removeListener(listener);
+    };
+
+    const finish = (result) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve(result);
+    };
+
+    const startNavigationTimer = () => {
+      if (navigationTimer) return;
+      navigationTimer = setTimeout(() => {
+        finish({
+          ok: false,
+          navigated: true,
+          complete: sawComplete,
+          reason: "navigation_timeout"
+        });
+      }, timeoutMs);
+    };
+
+    const listener = (id, info) => {
+      if (id !== tabId) return;
+
+      if (info.status === "loading") {
+        sawLoading = true;
+        startNavigationTimer();
+      }
+
+      if (info.status === "complete") {
+        sawComplete = true;
+        if (sawLoading) {
+          finish({ ok: true, navigated: true, complete: true, reason: "complete" });
+        }
+      }
+    };
+
+    chrome.tabs.onUpdated.addListener(listener);
+
+    const pollStatus = async () => {
+      if (done) return;
+      const tab = await chrome.tabs.get(tabId).catch(() => null);
+      if (!tab) {
+        finish({ ok: false, navigated: sawLoading, complete: false, reason: "tab_not_found" });
+        return;
+      }
+
+      if (tab.status === "loading") {
+        sawLoading = true;
+        startNavigationTimer();
+      }
+
+      if (tab.status === "complete") {
+        sawComplete = true;
+        if (sawLoading) {
+          finish({ ok: true, navigated: true, complete: true, reason: "complete" });
+          return;
+        }
+      }
+
+      setTimeout(pollStatus, 100);
+    };
+    setTimeout(pollStatus, 100);
+
+    if (sawLoading) {
+      startNavigationTimer();
+      return;
+    }
+
+    observeTimer = setTimeout(async () => {
+      if (sawLoading) {
+        startNavigationTimer();
+        return;
+      }
+
+      const latestTab = await chrome.tabs.get(tabId).catch(() => null);
+      const latestUrl = latestTab?.url || "";
+      const latestComplete = latestTab?.status === "complete" || sawComplete;
+      const urlChanged = latestUrl !== "" && latestUrl !== initialUrl;
+
+      if (latestTab?.status === "loading") {
+        sawLoading = true;
+        startNavigationTimer();
+        return;
+      }
+
+      if (expectNavigation && urlChanged && latestComplete) {
+        finish({ ok: true, navigated: true, complete: true, reason: "url_changed" });
+        return;
+      }
+
+      if (expectNavigation) {
+        finish({ ok: false, navigated: false, complete: sawComplete, reason: "navigation_not_detected" });
+      } else {
+        finish({ ok: true, navigated: false, complete: sawComplete, reason: "no_navigation_detected" });
+      }
+    }, observeWindowMs);
+  });
+};
+
+/**
+ * Wait for the page to fully settle after an interaction.
+ * Combines waitForNavigation (full page loads) with DOM idle + network quiescence
+ * checks (SPA transitions that don't trigger tab status changes).
+ */
+const waitForPageSettle = async (
+  tabId,
+  {
+    timeoutMs = PAGE_READY_TIMEOUT_MS,
+    expectNavigation = false,
+    context = "default"
+  } = {}
+) => {
+  const start = Date.now();
+
+  // 1) Catch both immediate and slightly delayed navigations.
+  const navigation = await waitForNavigation(tabId, {
+    timeoutMs,
+    observeWindowMs: NAVIGATION_OBSERVE_WINDOW_MS,
+    expectNavigation
+  });
+
+  if (!navigation.ok) {
+    return {
+      settled: false,
+      reason: navigation.reason || "navigation_failed",
+      elapsedMs: Date.now() - start,
+      navigation,
+      pending: getPendingSnapshot(tabId)
+    };
+  }
+
+  // 2) Require both DOM quietness and blocking-network quietness.
+  let quietStart = null;
+  let lastDomResult = null;
+  let lastPending = getPendingSnapshot(tabId);
+
+  while (Date.now() - start < timeoutMs) {
+    const remaining = timeoutMs - (Date.now() - start);
+    const domProbeTimeout = Math.max(500, Math.min(DOM_IDLE_PROBE_TIMEOUT_MS, remaining));
+
+    let domResult;
+    try {
+      domResult = await executeInTab(tabId, PAGE_WAIT_FOR_DOM_IDLE, [{
+        idleMs: DOM_IDLE_MS,
+        timeoutMs: domProbeTimeout,
+        requireReadyStateComplete: true
+      }]);
+    } catch (error) {
+      return {
+        settled: false,
+        reason: "dom_probe_failed",
+        elapsedMs: Date.now() - start,
+        navigation,
+        pending: getPendingSnapshot(tabId),
+        error: error instanceof Error ? error.message : "dom_probe_failed"
+      };
+    }
+
+    lastDomResult = domResult;
+    lastPending = getPendingSnapshot(tabId);
+
+    const domIdle = Boolean(domResult?.domIdle);
+    const networkIdle = lastPending.blocking === 0;
+
+    if (domIdle && networkIdle) {
+      const now = Date.now();
+      if (quietStart === null) {
+        quietStart = now;
+      }
+      if (now - quietStart >= NETWORK_QUIET_MS) {
+        return {
+          settled: true,
+          reason: "settled",
+          elapsedMs: now - start,
+          navigation,
+          dom: domResult,
+          pending: lastPending
+        };
+      }
+    } else {
+      quietStart = null;
+    }
+
+    await new Promise(r => setTimeout(r, SETTLE_POLL_INTERVAL_MS));
+  }
+
+  addLog(
+    `[settle-timeout] tab=${tabId} ctx=${context} nav=${navigation.reason || "unknown"} dom=${lastDomResult?.reason || "unknown"} pendingBlocking=${lastPending.blocking} pendingTotal=${lastPending.total}`
+  );
+
+  return {
+    settled: false,
+    reason: "timeout",
+    elapsedMs: Date.now() - start,
+    navigation,
+    dom: lastDomResult,
+    pending: lastPending
+  };
 };
 
 /**
@@ -1266,19 +1560,47 @@ const extractApiFields = (data, apiFields) => {
 };
 
 /**
+ * Clears the in-page network capture buffer.
+ */
+const clearNetworkLog = async (tabId) => {
+  try {
+    await chrome.tabs.sendMessage(tabId, {
+      source: "background",
+      command: "clear_network_log"
+    });
+  } catch {
+    // no-op (content script unavailable or tab navigated)
+  }
+};
+
+/**
  * Read API data from the content script's network log, matching by request signature.
  * If apiFields is provided, extracts only the mapped fields from the response.
  */
-const readNetworkData = async (tabId, apiRequest, apiFields) => {
+const readNetworkData = async (tabId, apiRequest, apiFields, { sinceTs = null } = {}) => {
   try {
     const result = await chrome.tabs.sendMessage(tabId, {
       source: "background",
       command: "get_network_log",
-      apiRequest
+      apiRequest,
+      sinceTs
     });
+
     if (result?.ok && result.entries?.length > 0) {
-      const bodies = result.entries.map(e => e.responseBody).filter(Boolean);
+      const entriesWithBodies = result.entries.filter((e) => e?.responseBody != null);
+      if (entriesWithBodies.length === 0) return null;
+
+      entriesWithBodies.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+      const newestTs = entriesWithBodies[0].timestamp || 0;
+      const freshnessWindowMs = 1500;
+      const freshEntries = entriesWithBodies.filter((e) => {
+        const ts = e.timestamp || 0;
+        return newestTs - ts <= freshnessWindowMs;
+      });
+
+      const bodies = freshEntries.map(e => e.responseBody).filter(Boolean);
       if (bodies.length === 0) return null;
+
       let data;
       if (bodies.length === 1) data = bodies[0];
       else if (Array.isArray(bodies[0])) data = bodies.flat();
@@ -1298,16 +1620,38 @@ const readNetworkData = async (tabId, apiRequest, apiFields) => {
 const runWorkflowSteps = async (tabId, baseOrigin, steps, outcomes, inputs) => {
   let lastReadData = null;
   let hasReadView = false;
+  let networkScopeStartTs = 0;
+
+  const readinessError = (stepType, phase, settle) => ({
+    ok: false,
+    error: "ERR_PAGE_NOT_READY",
+    message: `Page did not settle ${phase} ${stepType} step`,
+    details: settle
+  });
 
   for (const step of (steps || [])) {
     try {
+      const shouldWaitBefore = ["read_view", "fill", "select", "click", "submit"].includes(step.type);
+      if (shouldWaitBefore) {
+        const preStepSettle = await waitForPageSettle(tabId, {
+          timeoutMs: PAGE_READY_TIMEOUT_MS,
+          context: `before:${step.type}`
+        });
+        if (!preStepSettle.settled) {
+          return readinessError(step.type, "before", preStepSettle);
+        }
+      }
+
       if (step.type === "navigate") {
         // Replace :param placeholders with input values
         const url = step.url.replace(/:([a-zA-Z_][a-zA-Z0-9_]*)/g, (match, param) => {
           const value = inputs?.[param];
           return value != null ? encodeURIComponent(value) : match;
         });
-        await navigateTabAndWait(tabId, url, baseOrigin);
+
+        networkScopeStartTs = Date.now();
+        await clearNetworkLog(tabId);
+        await navigateTabAndWait(tabId, url, baseOrigin, PAGE_READY_TIMEOUT_MS);
         continue;
       }
 
@@ -1316,9 +1660,13 @@ const runWorkflowSteps = async (tabId, baseOrigin, steps, outcomes, inputs) => {
 
         // Try network-first if apiRequest signature is available
         if (step.viewConfig?.apiRequest) {
-          // Wait for network to settle before reading
-          await new Promise(r => setTimeout(r, 1000));
-          const apiData = await readNetworkData(tabId, step.viewConfig.apiRequest, step.viewConfig.apiFields);
+          const apiData = await readNetworkData(
+            tabId,
+            step.viewConfig.apiRequest,
+            step.viewConfig.apiFields,
+            { sinceTs: networkScopeStartTs }
+          );
+
           if (apiData != null) {
             // Quality gate: check that the data has substance
             const hasSubstance = Array.isArray(apiData)
@@ -1364,6 +1712,9 @@ const runWorkflowSteps = async (tabId, baseOrigin, steps, outcomes, inputs) => {
           ? { text: inputValue, value: inputValue }
           : {};
 
+        networkScopeStartTs = Date.now();
+        await clearNetworkLog(tabId);
+
         const result = await executeInTab(tabId, PAGE_EXECUTE_ACTION, [{
           strategies: step.strategies || [],
           interactionKind,
@@ -1377,14 +1728,22 @@ const runWorkflowSteps = async (tabId, baseOrigin, steps, outcomes, inputs) => {
             message: result?.message || `${step.type} step failed`
           };
         }
-        await waitForNavigation(tabId);
+
+        const postStepSettle = await waitForPageSettle(tabId, {
+          timeoutMs: PAGE_READY_TIMEOUT_MS,
+          context: `after:${step.type}`
+        });
+        if (!postStepSettle.settled) {
+          return readinessError(step.type, "after", postStepSettle);
+        }
+
         continue;
       }
     } catch (error) {
       return {
         ok: false,
         error: "ERR_WORKFLOW_STEP_FAILED",
-        message: error.message || `Step ${step.type} threw an error`
+        message: error instanceof Error ? error.message : `Step ${step.type} threw an error`
       };
     }
   }
@@ -1394,8 +1753,20 @@ const runWorkflowSteps = async (tabId, baseOrigin, steps, outcomes, inputs) => {
     return { ok: true, data: lastReadData };
   }
 
-  // Write workflow: wait for navigation then evaluate outcomes
-  await waitForNavigation(tabId);
+  // Write workflow: wait for page to settle then evaluate outcomes
+  const finalSettle = await waitForPageSettle(tabId, {
+    timeoutMs: PAGE_READY_TIMEOUT_MS,
+    context: "final_outcome"
+  });
+  if (!finalSettle.settled) {
+    return {
+      ok: false,
+      error: "ERR_PAGE_NOT_READY",
+      message: "Page did not settle before outcome evaluation",
+      details: finalSettle
+    };
+  }
+
   try {
     const evalResult = await executeInTab(tabId, PAGE_EVALUATE_OUTCOME, [{ outcomes }]);
     return { ok: true, outcome: evalResult?.outcome || "unknown" };
@@ -1411,12 +1782,14 @@ const handleExecuteWorkflow = async (message) => {
   const { steps, outcomes, inputs, origin } = message.payload || {};
   const requestId = message.requestId;
 
-  // Create a dedicated background tab for this workflow
-  const tab = await chrome.tabs.create({ url: "about:blank", active: false });
+  // Create a dedicated minimized window for this workflow
+  const win = await chrome.windows.create({ url: "about:blank", focused: false, state: "minimized" });
+  const tab = win.tabs[0];
 
   try {
     // Navigate to the site origin so content scripts can run on the right domain
-    if (origin) {
+    const firstStepIsNav = steps?.length > 0 && steps[0].type === "navigate";
+    if (origin && !firstStepIsNav) {
       await navigateTabAndWait(tab.id, origin, "");
     }
 
@@ -1428,44 +1801,11 @@ const handleExecuteWorkflow = async (message) => {
       ok: false, error: "ERR_WORKFLOW_FAILED", message: error.message || "Workflow execution failed"
     }, requestId);
   } finally {
-    // Always clean up the tab
-    try { await chrome.tabs.remove(tab.id); } catch { /* already closed */ }
+    // Always clean up the window
+    try { await chrome.windows.remove(win.id); } catch { /* already closed */ }
   }
 };
 
-const handleExecuteRead = async (message) => {
-  const { viewName, origin, pageUrl, params, apiRequest, apiFields, viewConfig } = message.payload || {};
-  const requestId = message.requestId;
-
-  const win = await chrome.windows.create({ url: "about:blank", focused: false, state: "minimized" });
-  const tab = win.tabs[0];
-
-  try {
-    let navUrl = (pageUrl || "/").replace(/:([a-zA-Z_][a-zA-Z0-9_]*)/g, (match, param) => {
-      const value = params?.[param];
-      return value != null ? encodeURIComponent(value) : match;
-    });
-    if (!navUrl || navUrl === "/") navUrl = origin;
-    if (!navUrl) throw new Error("No page URL or origin provided");
-
-    await navigateTabAndWait(tab.id, navUrl, origin || "");
-    await new Promise((r) => setTimeout(r, 1500));
-
-    let data;
-    if (viewConfig) {
-      const result = await pollReadView(tab.id, viewConfig);
-      data = result?.ok ? result.result : null;
-    } else {
-      data = await readNetworkData(tab.id, apiRequest, apiFields);
-    }
-
-    sendToBackend(MessageType.READ_RESULT, { ok: true, data: data || [] }, requestId);
-  } catch (error) {
-    sendToBackend(MessageType.READ_RESULT, { ok: false, error: error.message || "Read execution failed" }, requestId);
-  } finally {
-    try { await chrome.windows.remove(win.id); } catch {}
-  }
-};
 
 // ─── Sidepanel Command Handler ──────────────────────────────────────
 

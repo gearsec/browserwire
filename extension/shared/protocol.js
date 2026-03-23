@@ -13,9 +13,7 @@ export const MessageType = Object.freeze({
   DISCOVERY_SESSION_STATUS: "discovery_session_status",
   BATCH_PROCESSING_STATUS: "batch_processing_status",
   EXECUTE_WORKFLOW: "execute_workflow",
-  WORKFLOW_RESULT: "workflow_result",
-  EXECUTE_READ: "execute_read",
-  READ_RESULT: "read_result"
+  WORKFLOW_RESULT: "workflow_result"
 });
 
 export const createEnvelope = (type, payload = {}, requestId) => ({

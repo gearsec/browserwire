@@ -188,7 +188,7 @@ export const startServer = async ({
 
       // ─── Bridge result messages (from extension executing REST API commands) ──
 
-      if (message.type === MessageType.WORKFLOW_RESULT || message.type === MessageType.READ_RESULT) {
+      if (message.type === MessageType.WORKFLOW_RESULT) {
         if (bridge.handleWsResult(message)) return;
         // Not matched — fall through to log
       }
@@ -213,7 +213,7 @@ export const startServer = async ({
         );
 
         sender.send(socket, MessageType.DISCOVERY_SESSION_STATUS,
-          session.getStats(), message.requestId);
+          { sessionId, status: "started" }, message.requestId);
         return;
       }
 
@@ -251,7 +251,7 @@ export const startServer = async ({
           if (remainingSnapshots.length > 0) {
             console.log(`[browserwire-cli] processing ${remainingSnapshots.length} remaining buffered snapshots before finalize`);
             for (const snap of remainingSnapshots) {
-              await session.addSnapshot(snap);
+              session.addSnapshot(snap);  // no await — runs in parallel; finalize() awaits all via Promise.allSettled
 
               // Write debug snapshot JSON
               const snapName = snap.snapshotId || `snap_${session.snapshots.length}`;
@@ -309,7 +309,7 @@ export const startServer = async ({
                     page: s.apiSchema.page.name,
                     viewCount: s.apiSchema.views.length,
                     endpointCount: s.apiSchema.endpoints.length,
-                    workflowCount: s.apiSchema.workflows.length
+                    workflowCount: (s.apiSchema.workflows || []).length
                   } : null
                 }))
               }, bigIntReplacer, 2),
@@ -344,7 +344,7 @@ export const startServer = async ({
           }
 
           sender.send(socket, MessageType.DISCOVERY_SESSION_STATUS,
-            { ...session.getStats(), finalized: true }, message.requestId);
+            { sessionId, status: "finalized" }, message.requestId);
         };
 
         // For sessions with a known origin, serialize finalization through a per-origin queue.

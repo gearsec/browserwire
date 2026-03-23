@@ -49,6 +49,7 @@ Options:
       --llm-api-key <key>      API key for the LLM provider
       --llm-model <name>       Model name (default varies by provider)
       --llm-base-url <url>     Custom API endpoint (default varies by provider)
+      --telemetry              Enable LLM observability (LangSmith)
 
 Environment variables:
   BROWSERWIRE_HOST             Server listen address
@@ -57,6 +58,9 @@ Environment variables:
   BROWSERWIRE_LLM_API_KEY     API key for the LLM provider
   BROWSERWIRE_LLM_MODEL       Model name
   BROWSERWIRE_LLM_BASE_URL    Custom API endpoint
+  BROWSERWIRE_TELEMETRY       Enable LLM observability (true/false)
+  LANGSMITH_API_KEY           LangSmith API key (from smith.langchain.com)
+  LANGSMITH_PROJECT           LangSmith project name (optional)
 
 Config file:
   ~/.browserwire/config.json   Optional JSON config (see docs for schema)
@@ -77,7 +81,8 @@ try {
       "llm-provider":   { type: "string" },
       "llm-api-key":    { type: "string" },
       "llm-model":      { type: "string" },
-      "llm-base-url":   { type: "string" }
+      "llm-base-url":   { type: "string" },
+      telemetry:        { type: "boolean" }
     }
   });
 } catch (err) {
@@ -119,16 +124,20 @@ if (flags["llm-provider"] !== undefined) cliOverrides.llmProvider = flags["llm-p
 if (flags["llm-api-key"] !== undefined) cliOverrides.llmApiKey = flags["llm-api-key"];
 if (flags["llm-model"] !== undefined) cliOverrides.llmModel = flags["llm-model"];
 if (flags["llm-base-url"] !== undefined) cliOverrides.llmBaseUrl = flags["llm-base-url"];
+if (flags.telemetry) cliOverrides.telemetryEnabled = true;
 
 const config = loadConfig(cliOverrides);
+
+if (config.telemetryEnabled) {
+  const { initTelemetry } = await import("./telemetry.js");
+  if (await initTelemetry()) console.log("[browserwire-cli] telemetry enabled (LangSmith)");
+}
 
 const { startServer } = await import("./server.js");
 const server = await startServer({ host: config.host, port: config.port, debug: config.debug });
 
-const shutdown = () => {
-  server.close(() => {
-    process.exit(0);
-  });
+const shutdown = async () => {
+  server.close(() => process.exit(0));
 };
 
 process.on("SIGINT", shutdown);

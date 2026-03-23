@@ -137,6 +137,8 @@ message ExecuteWorkflow {
   string workflow_name = 1;
   map<string, string> inputs = 2;
   string origin = 3;
+  bytes steps = 4;       // UTF-8 JSON for workflow step definitions
+  bytes outcomes = 5;    // UTF-8 JSON for outcome definitions
 }
 
 message WorkflowStepResult {
@@ -151,6 +153,8 @@ message WorkflowResult {
   string error = 2;
   repeated WorkflowStepResult steps = 3;
   bytes data = 4;             // UTF-8 JSON for final result data
+  string outcome = 5;         // For write workflows: "success"/"failure"/"unknown"
+  string message = 6;         // Error detail message
 }
 
 // ─── Read Execution ────────────────────────────────────────────────

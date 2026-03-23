@@ -384,7 +384,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.command === "get_network_log") {
     const apiRequest = message.apiRequest;
+    const sinceTs = typeof message.sinceTs === "number" ? message.sinceTs : null;
     let entries = [..._networkLog];  // non-destructive copy
+    if (sinceTs != null) {
+      entries = entries.filter(e => (e.timestamp || 0) >= sinceTs);
+    }
     if (apiRequest) {
       entries = entries.filter(e => matchesApiRequest(e, apiRequest));
     }

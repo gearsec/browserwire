@@ -186,6 +186,25 @@ const payloadToProto = (type, payload) => {
     return result;
   }
 
+  if (type === "execute_workflow") {
+    const result = { ...payload };
+    if (result.steps && typeof result.steps === "object" && !(result.steps instanceof Uint8Array)) {
+      result.steps = jsonToBytes(result.steps);
+    }
+    if (result.outcomes && typeof result.outcomes === "object" && !(result.outcomes instanceof Uint8Array)) {
+      result.outcomes = jsonToBytes(result.outcomes);
+    }
+    return result;
+  }
+
+  if (type === "workflow_result") {
+    const result = { ...payload };
+    if (result.data && typeof result.data === "object" && !(result.data instanceof Uint8Array)) {
+      result.data = jsonToBytes(result.data);
+    }
+    return result;
+  }
+
   // For most message types, protobuf-es accepts camelCase keys directly
   return payload;
 };
@@ -279,6 +298,32 @@ const protoToPayload = (type, protoMsg) => {
   }
 
   if (type === "read_result") {
+    const result = { ...plain };
+    if (result.data) {
+      if (typeof result.data === "string") {
+        try { result.data = JSON.parse(atob(result.data)); } catch { /* leave as-is */ }
+      } else if (result.data instanceof Uint8Array) {
+        result.data = bytesToJson(result.data);
+      }
+    }
+    return result;
+  }
+
+  if (type === "execute_workflow") {
+    const result = { ...plain };
+    for (const field of ["steps", "outcomes"]) {
+      if (result[field]) {
+        if (typeof result[field] === "string") {
+          try { result[field] = JSON.parse(atob(result[field])); } catch { /* leave as-is */ }
+        } else if (result[field] instanceof Uint8Array) {
+          result[field] = bytesToJson(result[field]);
+        }
+      }
+    }
+    return result;
+  }
+
+  if (type === "workflow_result") {
     const result = { ...plain };
     if (result.data) {
       if (typeof result.data === "string") {

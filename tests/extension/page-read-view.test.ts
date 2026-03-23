@@ -5,7 +5,7 @@
  * Source: extension/background.js lines 829–1162 (copied here because the
  * function is a const, not exported, and only uses DOM globals).
  *
- * Environment: happy-dom (configured in vitest.config.ts)
+ * Environment: jsdom (configured in vitest.config.ts)
  */
 import { describe, it, expect, afterEach } from "vitest";
 
@@ -365,7 +365,7 @@ describe("PAGE_READ_VIEW", () => {
     });
 
     it("falls through CONTAINER_FALLBACKS when no locator matches", () => {
-      // happy-dom has no layout engine, so isVisible() returns false for all
+      // jsdom has no layout engine, so isVisible() returns false for all
       // elements (getBoundingClientRect returns zeros). The fallback chain
       // requires isVisible, so it always reaches document.body in tests.
       // We verify the fallback mechanism works by confirming the field is
@@ -378,7 +378,7 @@ describe("PAGE_READ_VIEW", () => {
       });
       expect(result.ok).toBe(true);
       expect(result.result.info).toBe("Inside main");
-      // In happy-dom, isVisible is always false so fallback chain reaches body
+      // In jsdom, isVisible is always false so fallback chain reaches body
       expect(result.containerFallback).toBe("document.body");
     });
 

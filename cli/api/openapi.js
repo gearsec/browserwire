@@ -43,7 +43,9 @@ export const collectReadViews = (manifest) => {
   const views = [];
   for (const page of manifest.pages || []) {
     for (const view of page.views || []) {
-      if ((view.readContract && view.readContract.dataSources?.length > 0) || view.viewConfig) {
+      if ((view.readContract && view.readContract.dataSources?.length > 0)
+          || view.container_selector
+          || view.fields?.some(f => f.selector)) {
         views.push({ view, pageName: page.name || page.routePattern, routePattern: page.routePattern });
       }
     }
@@ -52,7 +54,12 @@ export const collectReadViews = (manifest) => {
 };
 
 export const generateOpenApiSpec = (manifest, { host = "127.0.0.1", port = 8787, pathPrefix = "" } = {}) => {
-  const workflows = manifest.workflowActions || [];
+  const workflows = [];
+  for (const page of manifest.pages || []) {
+    for (const wf of page.workflows || []) {
+      workflows.push(wf);
+    }
+  }
 
   const paths = {};
 
@@ -209,9 +216,10 @@ export const generateOpenApiSpec = (manifest, { host = "127.0.0.1", port = 8787,
           }
         }
       };
-    } else if (view.viewConfig) {
-      // ── DOM-based read (viewConfig from Stage 3 skeleton grounding) ──
-      const vc = view.viewConfig;
+    } else if (view.container_selector || view.fields?.some(f => f.selector)) {
+      // ── DOM-based read (raw selectors from agent) ──
+      const fields = (view.fields || []).filter(f => f.selector);
+      const isList = view.isList || false;
 
       // Only route :params from the page routePattern
       const parameters = [];
@@ -227,13 +235,13 @@ export const generateOpenApiSpec = (manifest, { host = "127.0.0.1", port = 8787,
         });
       }
 
-      // Build response schema from viewConfig fields
+      // Build response schema from raw fields
       const properties = {};
-      for (const f of vc.fields || []) {
+      for (const f of fields) {
         properties[f.name] = { type: "string" };
       }
       const itemSchema = { type: "object", properties };
-      const responseSchema = vc.isList ? { type: "array", items: itemSchema } : itemSchema;
+      const responseSchema = isList ? { type: "array", items: itemSchema } : itemSchema;
 
       const description = view.description || "Read API discovered from DOM structure";
 
