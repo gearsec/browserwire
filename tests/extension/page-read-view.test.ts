@@ -11,7 +11,7 @@ import { describe, it, expect, afterEach } from "vitest";
 
 // ── PAGE_READ_VIEW (verbatim copy from extension/background.js) ──────────
 
-const PAGE_READ_VIEW = (payload: any) => {
+const PAGE_READ_VIEW = (payload: any): any => {
   const { containerLocator, itemContainer, fields, isList } = payload;
 
   const isVisible = (el: any) => {
