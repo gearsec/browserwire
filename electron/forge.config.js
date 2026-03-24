@@ -10,15 +10,6 @@ export default {
     icon: "./electron/icons/icon",
     asar: true,
     ignore: [/electron\/ui\/src/, /electron\/ui\/build\.js/, /electron\/ui\/tsconfig/],
-    osxSign: {},
-    osxNotarize: process.env.APPLE_ID
-      ? {
-          appleId: process.env.APPLE_ID,
-          appleIdPassword: process.env.APPLE_PASSWORD,
-          teamId: process.env.APPLE_TEAM_ID,
-        }
-      : undefined,
-    extraResource: ["extension/vendor", "extension/discovery.js", "extension/executor.js"],
   },
   makers: [
     {
