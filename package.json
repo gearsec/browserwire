@@ -16,12 +16,13 @@
     "api",
     "discovery"
   ],
-  "bin": {
-    "browserwire": "cli/index.js"
+  "main": "electron/main.js",
+  "config": {
+    "forge": "./electron/forge.config.js"
   },
   "files": [
-    "cli/",
-    "extension/",
+    "core/",
+    "electron/",
     "LICENSE",
     "README.md"
   ],
@@ -36,24 +37,38 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "cli:dev": "node cli/index.js",
-    "cli:debug": "node cli/index.js --debug",
-    "proto:generate": "buf generate",
-    "proto:bundle": "esbuild extension/shared/gen/index.js --bundle --format=esm --outfile=extension/shared/proto-bundle.js",
-    "vendor:rrweb-snapshot": "esbuild node_modules/rrweb-snapshot/dist/rrweb-snapshot.js --bundle --format=iife --global-name=rrwebSnapshot --outfile=extension/vendor/rrweb-snapshot.js --minify",
-    "proto": "npm run proto:generate && npm run proto:bundle",
-    "ext:package": "node scripts/package-extension.js",
-    "ext:publish": "node scripts/publish-cws.js",
+    "vendor:rrweb-snapshot": "esbuild node_modules/rrweb-snapshot/dist/rrweb-snapshot.js --bundle --format=iife --global-name=rrwebSnapshot --outfile=electron/vendor/rrweb-snapshot.js --minify",
+    "ui:build": "cd electron/ui && node build.js",
+    "ui:watch": "cd electron/ui && node build.js --watch",
+    "electron:dev": "npm run ui:build && electron-forge start",
+    "electron:package": "npm run ui:build && electron-forge package",
+    "electron:make": "npm run ui:build && electron-forge make",
+    "electron:publish": "npm run ui:build && electron-forge publish",
     "postinstall": "npx playwright install chromium --with-deps"
   },
   "devDependencies": {
     "@bufbuild/buf": "^1.66.1",
     "@bufbuild/protoc-gen-es": "^2.11.0",
+    "@electron-forge/cli": "^7.11.1",
+    "@electron-forge/maker-dmg": "^7.11.1",
+    "@electron-forge/maker-zip": "^7.11.1",
+    "@radix-ui/react-collapsible": "^1.1.12",
+    "@radix-ui/react-scroll-area": "^1.2.10",
+    "@radix-ui/react-select": "^2.2.6",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@radix-ui/react-tabs": "^1.1.13",
+    "@radix-ui/react-tooltip": "^1.2.8",
+    "@tailwindcss/cli": "^4.2.2",
     "@types/node": "^22.10.2",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
     "archiver": "^7.0.1",
     "chrome-webstore-upload": "^3.0.4",
+    "electron": "^41.0.3",
+    "electron-updater": "^6.8.3",
     "esbuild": "^0.27.4",
     "jsdom": "^25.0.1",
+    "tailwindcss": "^4.2.2",
     "typescript": "^5.8.2",
     "vitest": "^3.2.4"
   },
@@ -64,10 +79,18 @@
     "@bufbuild/protobuf": "^2.11.0",
     "@rrweb/record": "^2.0.0-alpha.20",
     "ai": "^6.0.116",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
     "htmlparser2": "^11.0.0",
     "langsmith": "^0.5.11",
-    "playwright": "^1.58.2",
+    "lucide-react": "^1.0.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "tailwind-merge": "^3.5.0",
     "ws": "^8.19.0",
     "zod": "^4.3.6"
+  },
+  "optionalDependencies": {
+    "playwright": "^1.58.2"
   }
 }

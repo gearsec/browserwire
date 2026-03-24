@@ -1,0 +1,21 @@
+version: 2
+
+builds: []
+
+checksum:
+  name_template: "checksums.txt"
+
+release:
+  github:
+    owner: gearsec
+    name: browserwire
+  extra_files:
+    - glob: ./release-assets/*.dmg
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"

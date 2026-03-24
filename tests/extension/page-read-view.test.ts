@@ -1,15 +1,15 @@
 /**
  * Unit tests for PAGE_READ_VIEW — the DOM extraction function injected into
- * pages by the extension background worker.
+ * pages during workflow execution.
  *
- * Source: extension/background.js lines 829–1162 (copied here because the
+ * Source: electron/vendor/page-executor.js (inlined here because the
  * function is a const, not exported, and only uses DOM globals).
  *
  * Environment: jsdom (configured in vitest.config.ts)
  */
 import { describe, it, expect, afterEach } from "vitest";
 
-// ── PAGE_READ_VIEW (verbatim copy from extension/background.js) ──────────
+// ── PAGE_READ_VIEW (verbatim copy from electron/vendor/page-executor.js) ──
 
 const PAGE_READ_VIEW = (payload: any): any => {
   const { containerLocator, itemContainer, fields, isList } = payload;
