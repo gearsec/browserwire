@@ -7,56 +7,43 @@ on:
 
 permissions:
   contents: write
-  id-token: write
 
 jobs:
-  npm-publish:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          registry-url: https://registry.npmjs.org
-      - run: npm install -g npm@latest
-      - run: npm ci
-      - name: Set version from tag
-        run: npm version "${GITHUB_REF#refs/tags/v}" --no-git-tag-version --allow-same-version
-      - run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
   release:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-      - run: npm ci
 
-      - name: Extract version from tag
-        id: version
-        run: echo "value=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+      - run: npm ci --ignore-scripts
 
-      - name: Package extension
-        run: node scripts/package-extension.js ${{ steps.version.outputs.value }}
+      - name: Set version from tag
+        run: npm version "${GITHUB_REF#refs/tags/v}" --no-git-tag-version --allow-same-version
 
-      - name: Publish to Chrome Web Store
+      - name: Build UI
+        run: npm run ui:build
+
+      - name: Publish Electron app (arm64)
+        run: npx electron-forge publish --arch=arm64
         env:
-          CHROME_EXTENSION_ID: ${{ secrets.CHROME_EXTENSION_ID }}
-          CHROME_CLIENT_ID: ${{ secrets.CHROME_CLIENT_ID }}
-          CHROME_CLIENT_SECRET: ${{ secrets.CHROME_CLIENT_SECRET }}
-          CHROME_REFRESH_TOKEN: ${{ secrets.CHROME_REFRESH_TOKEN }}
-        run: node scripts/publish-cws.js
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/browserwire-extension-${{ steps.version.outputs.value }}.zip
-          generate_release_notes: true
+      - name: Publish Electron app (x64)
+        run: npx electron-forge publish --arch=x64
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate checksums
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          mkdir -p checksums-tmp
+          gh release download "$TAG" --dir checksums-tmp
+          cd checksums-tmp
+          shasum -a 256 * > checksums.txt
+          gh release upload "$TAG" checksums.txt --clobber
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
