@@ -14,10 +14,6 @@ const processingListNode = document.querySelector("#processingList");
 
 const siteOriginNode = document.querySelector("#siteOrigin");
 const statSnapshots = document.querySelector("#statSnapshots");
-const statEntities = document.querySelector("#statEntities");
-const statActions = document.querySelector("#statActions");
-const statViews = document.querySelector("#statViews");
-const statBuffered = document.querySelector("#statBuffered");
 
 const setLineStatus = (node, text, level) => {
   node.textContent = text;
@@ -115,9 +111,6 @@ const renderState = (state) => {
     }
 
     statSnapshots.textContent = session.snapshotCount || 0;
-    statEntities.textContent = session.entityCount || 0;
-    statActions.textContent = session.actionCount || 0;
-    statViews.textContent = session.viewCount || 0;
     sessionStatsNode.classList.add("visible");
 
     // Show session note textarea during active session
@@ -211,10 +204,6 @@ chrome.runtime.onMessage.addListener((message) => {
     return;
   }
 
-  if (message.event === "manifest_ready") {
-    log("Manifest ready");
-  }
-
   if (message.event === "batch_status") {
     renderProcessingStatus(null);
     // Re-fetch full state to get current processingBatches
@@ -227,7 +216,7 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 
   if (message.event === "buffered") {
-    if (statBuffered) statBuffered.textContent = message.count || 0;
+    // Buffered count updates handled via snapshot count in state
   }
 });
 

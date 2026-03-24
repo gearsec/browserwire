@@ -7,6 +7,7 @@
  */
 
 import { createEnvelope } from "../../extension/shared/protocol.js";
+import { encode } from "../../extension/shared/codec.js";
 
 const DEFAULT_TIMEOUT_MS = 30000;
 
@@ -16,6 +17,8 @@ export const createBridge = () => {
 
   /**
    * Send a WS message and await a matching response by requestId.
+   * Uses the socket's _bwSender (set by server.js on HELLO) to pick
+   * binary vs JSON mode, falling back to JSON.
    */
   const sendAndAwait = (socket, type, payload, timeoutMs = DEFAULT_TIMEOUT_MS) =>
     new Promise((resolve, reject) => {
@@ -32,7 +35,13 @@ export const createBridge = () => {
       }, timeoutMs);
 
       pending.set(requestId, { resolve, reject, timer });
-      socket.send(JSON.stringify(createEnvelope(type, payload, requestId)));
+
+      // Use the socket's sender if available (binary-aware), else JSON fallback
+      if (socket._bwSender) {
+        socket._bwSender.send(socket, type, payload, requestId);
+      } else {
+        socket.send(JSON.stringify(createEnvelope(type, payload, requestId)));
+      }
     });
 
   /**

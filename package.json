@@ -9,7 +9,13 @@
     "url": "https://github.com/gearsec/browserwire.git"
   },
   "homepage": "https://github.com/gearsec/browserwire",
-  "keywords": ["browser", "automation", "ai-agent", "api", "discovery"],
+  "keywords": [
+    "browser",
+    "automation",
+    "ai-agent",
+    "api",
+    "discovery"
+  ],
   "bin": {
     "browserwire": "cli/index.js"
   },
@@ -32,18 +38,36 @@
     "test:watch": "vitest",
     "cli:dev": "node cli/index.js",
     "cli:debug": "node cli/index.js --debug",
+    "proto:generate": "buf generate",
+    "proto:bundle": "esbuild extension/shared/gen/index.js --bundle --format=esm --outfile=extension/shared/proto-bundle.js",
+    "vendor:rrweb-snapshot": "esbuild node_modules/rrweb-snapshot/dist/rrweb-snapshot.js --bundle --format=iife --global-name=rrwebSnapshot --outfile=extension/vendor/rrweb-snapshot.js --minify",
+    "proto": "npm run proto:generate && npm run proto:bundle",
     "ext:package": "node scripts/package-extension.js",
-    "ext:publish": "node scripts/publish-cws.js"
+    "ext:publish": "node scripts/publish-cws.js",
+    "postinstall": "npx playwright install chromium --with-deps"
   },
   "devDependencies": {
+    "@bufbuild/buf": "^1.66.1",
+    "@bufbuild/protoc-gen-es": "^2.11.0",
     "@types/node": "^22.10.2",
     "archiver": "^7.0.1",
     "chrome-webstore-upload": "^3.0.4",
+    "esbuild": "^0.27.4",
+    "jsdom": "^25.0.1",
     "typescript": "^5.8.2",
     "vitest": "^3.2.4"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.58",
+    "@ai-sdk/google": "^3.0.43",
+    "@ai-sdk/openai": "^3.0.41",
+    "@bufbuild/protobuf": "^2.11.0",
     "@rrweb/record": "^2.0.0-alpha.20",
-    "ws": "^8.19.0"
+    "ai": "^6.0.116",
+    "htmlparser2": "^11.0.0",
+    "langsmith": "^0.5.11",
+    "playwright": "^1.58.2",
+    "ws": "^8.19.0",
+    "zod": "^4.3.6"
   }
 }

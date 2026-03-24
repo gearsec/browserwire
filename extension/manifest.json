@@ -3,7 +3,7 @@
   "name": "BrowserWire",
   "description": "Boilerplate side panel extension for BrowserWire local connectivity.",
   "version": "0.1.0",
-  "permissions": ["sidePanel", "tabs", "scripting", "activeTab", "webRequest"],
+  "permissions": ["sidePanel", "tabs", "scripting", "activeTab", "webRequest", "dom"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js",
@@ -23,7 +23,7 @@
     },
     {
       "matches": ["http://*/*", "https://*/*"],
-      "js": ["discovery.js", "executor.js"],
+      "js": ["vendor/rrweb-snapshot.js", "discovery.js", "executor.js"],
       "run_at": "document_idle"
     }
   ],

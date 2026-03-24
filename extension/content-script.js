@@ -164,36 +164,38 @@ const executeScan = () => {
 
   if (DEBUG) console.debug("[browserwire] executeScan", trigger?.kind, "snapshot#", state.snapshotCount + 1);
 
-  if (typeof runSkeletonScan !== "function") {
-    if (DEBUG) console.debug("[browserwire] runSkeletonScan unavailable — skipping");
+  if (typeof serializeDom !== "function") {
+    if (DEBUG) console.debug("[browserwire] serializeDom unavailable — skipping");
     return;
   }
 
   try {
-    const skeletonResult = runSkeletonScan();
+    const domHtml = serializeDom();
+    const pageText = typeof collectPageText === "function" ? collectPageText() : "";
+    const pageState = typeof capturePageState === "function" ? capturePageState() : {};
     state.snapshotCount += 1;
 
     chrome.runtime.sendMessage({
       source: "content",
-      type: "discovery_incremental",
+      type: "snapshot",
       payload: {
         snapshotId: `snap_${state.sessionId}_${state.snapshotCount}`,
         sessionId: state.sessionId,
         trigger,
-        skeleton: skeletonResult.skeleton,
-        pageText: skeletonResult.pageText,
-        url: skeletonResult.url,
-        title: skeletonResult.title,
-        devicePixelRatio: skeletonResult.devicePixelRatio,
-        capturedAt: skeletonResult.capturedAt,
-        pageState: skeletonResult.pageState,
+        domHtml,
+        pageText,
+        url: window.location.href,
+        title: document.title,
+        devicePixelRatio: window.devicePixelRatio || 1,
+        capturedAt: new Date().toISOString(),
+        pageState,
         networkLog: drainNetworkLog()
       }
     }, () => {
       void chrome.runtime.lastError;
     });
   } catch (error) {
-    console.warn("[browserwire] skeleton scan failed:", error);
+    console.warn("[browserwire] DOM serialization failed:", error);
   }
 };
 
@@ -382,11 +384,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.command === "get_network_log") {
     const apiRequest = message.apiRequest;
-    let entries = _networkLog.splice(0);
+    const sinceTs = typeof message.sinceTs === "number" ? message.sinceTs : null;
+    let entries = [..._networkLog];  // non-destructive copy
+    if (sinceTs != null) {
+      entries = entries.filter(e => (e.timestamp || 0) >= sinceTs);
+    }
     if (apiRequest) {
       entries = entries.filter(e => matchesApiRequest(e, apiRequest));
     }
     sendResponse({ ok: true, entries });
+    return false;
+  }
+
+  if (message.command === "clear_network_log") {
+    _networkLog.splice(0);
+    sendResponse({ ok: true });
     return false;
   }
 

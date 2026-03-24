@@ -1,15 +1,30 @@
 import {
-  createEnvelope,
   MessageType,
   parseEnvelope,
   PROTOCOL_VERSION
 } from "./shared/protocol.js";
+import { encode, decode } from "./shared/codec.js";
 
 
 const DEFAULT_WS_URL = "ws://127.0.0.1:8787";
 const HEARTBEAT_INTERVAL_MS = 20000;
 const MAX_LOG_ENTRIES = 200;
 const AUTO_CONNECT_MAX_ATTEMPTS = 5;
+const PAGE_READY_TIMEOUT_MS = 20000;
+const NAVIGATION_OBSERVE_WINDOW_MS = 1200;
+const DOM_IDLE_MS = 600;
+const DOM_IDLE_PROBE_TIMEOUT_MS = 4000;
+const NETWORK_QUIET_MS = 600;
+const SETTLE_POLL_INTERVAL_MS = 150;
+
+const BLOCKING_REQUEST_TYPES = new Set([
+  "main_frame",
+  "sub_frame",
+  "xmlhttprequest",
+  "fetch"
+]);
+
+const NON_BLOCKING_REQUEST_URL_RE = /google-analytics|segment\.io|sentry\.io|hotjar|intercom|doubleclick|fonts\.(googleapis|gstatic)|\.woff2?|\.ttf|\.css(\?|$)|\.png|\.jpg|\.jpeg|\.svg|\.gif/i;
 
 let wsUrl = DEFAULT_WS_URL;
 let socket = null;
@@ -19,38 +34,52 @@ let reconnectAttempt = 0;
 let shouldReconnect = false;
 let autoConnectGaveUp = false;
 let activeSession = null;
-let currentManifest = null;
 let logs = [];
 let pendingSnapshots = [];
 const processingBatches = new Map();
-const extensionOpenedTabs = new Set();
 
 // ─── Per-Tab In-Flight Network Request Tracking ─────────────────────
-// Maps tabId → Set of requestIds currently in flight
+// Maps tabId → Map(requestId -> request metadata)
 const pendingRequests = new Map();
 
-const getPendingCount = (tabId) => {
-  const set = pendingRequests.get(tabId);
-  return set ? set.size : 0;
+const getPendingSnapshot = (tabId) => {
+  const requests = pendingRequests.get(tabId);
+  if (!requests) return { total: 0, blocking: 0 };
+
+  let blocking = 0;
+  for (const req of requests.values()) {
+    if (req?.blocking) blocking += 1;
+  }
+
+  return { total: requests.size, blocking };
 };
 
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
     if (details.tabId < 0) return; // ignore non-tab requests (e.g. service worker)
     if (!pendingRequests.has(details.tabId)) {
-      pendingRequests.set(details.tabId, new Set());
+      pendingRequests.set(details.tabId, new Map());
     }
-    pendingRequests.get(details.tabId).add(details.requestId);
+
+    const requests = pendingRequests.get(details.tabId);
+    const type = details.type || "other";
+    const url = details.url || "";
+    requests.set(details.requestId, {
+      type,
+      url,
+      startedAt: Date.now(),
+      blocking: BLOCKING_REQUEST_TYPES.has(type) && !NON_BLOCKING_REQUEST_URL_RE.test(url)
+    });
   },
   { urls: ["<all_urls>"] }
 );
 
 const onRequestFinished = (details) => {
   if (details.tabId < 0) return;
-  const set = pendingRequests.get(details.tabId);
-  if (set) {
-    set.delete(details.requestId);
-    if (set.size === 0) pendingRequests.delete(details.tabId);
+  const requests = pendingRequests.get(details.tabId);
+  if (requests) {
+    requests.delete(details.requestId);
+    if (requests.size === 0) pendingRequests.delete(details.tabId);
   }
 };
 
@@ -60,7 +89,6 @@ chrome.webRequest.onErrorOccurred.addListener(onRequestFinished, { urls: ["<all_
 // Clean up when a tab is closed
 chrome.tabs.onRemoved.addListener((tabId) => {
   pendingRequests.delete(tabId);
-  extensionOpenedTabs.delete(tabId);
 });
 
 const notifyAllContexts = (payload) => {
@@ -122,7 +150,7 @@ const sendToBackend = (type, payload = {}, requestId = crypto.randomUUID()) => {
     return false;
   }
 
-  socket.send(JSON.stringify(createEnvelope(type, payload, requestId)));
+  socket.send(encode(type, payload, requestId));
   return true;
 };
 
@@ -145,51 +173,32 @@ const scheduleReconnect = () => {
 };
 
 const onBackendMessage = (rawMessage) => {
-  const message = parseEnvelope(rawMessage);
-
-  if (!message) {
-    addLog("received non-JSON message from backend");
-    return;
+  // Try binary (protobuf) first, then JSON fallback
+  let message;
+  if (rawMessage instanceof ArrayBuffer || rawMessage instanceof Uint8Array) {
+    const bytes = rawMessage instanceof ArrayBuffer ? new Uint8Array(rawMessage) : rawMessage;
+    message = decode(bytes);
+  } else {
+    message = parseEnvelope(rawMessage);
   }
 
-  if (message.type === MessageType.DISCOVERY_ACK) {
-    const elementCount = message.payload?.elementCount ?? 0;
-    const a11yCount = message.payload?.a11yCount ?? 0;
-    addLog(`backend discovery ack: ${elementCount} elements, ${a11yCount} a11y entries`);
+  if (!message) {
+    addLog("received undecodable message from backend");
     return;
   }
 
   if (message.type === MessageType.DISCOVERY_SESSION_STATUS) {
-    const stats = message.payload || {};
-    addLog(`session status: snapshots=${stats.snapshotCount ?? 0} entities=${stats.entityCount ?? 0} actions=${stats.actionCount ?? 0}`);
+    const { sessionId, status } = message.payload || {};
+    addLog(`session status: sessionId=${sessionId ?? "unknown"} status=${status ?? "unknown"}`);
 
     if (activeSession) {
-      activeSession = {
-        ...activeSession,
-        snapshotCount: stats.snapshotCount ?? activeSession.snapshotCount,
-        entityCount: stats.entityCount ?? 0,
-        actionCount: stats.actionCount ?? 0
-      };
       broadcastState();
     }
     return;
   }
 
-  if (message.type === MessageType.MANIFEST_READY) {
-    currentManifest = message.payload?.manifest || null;
-    const actionCount = currentManifest?.actions?.length ?? 0;
-    const viewCount = currentManifest?.views?.length ?? 0;
-    addLog(`manifest ready: ${actionCount} actions, ${viewCount} views`);
-    if (activeSession) {
-      activeSession = { ...activeSession, viewCount };
-    }
-    notifyAllContexts({ event: "manifest_ready", manifest: currentManifest });
-    broadcastState();
-    return;
-  }
-
   if (message.type === MessageType.BATCH_PROCESSING_STATUS) {
-    const { batchId, status, manifest, error } = message.payload || {};
+    const { batchId, status, error } = message.payload || {};
     if (!batchId) return;
 
     if (status === "pending") {
@@ -201,20 +210,13 @@ const onBackendMessage = (rawMessage) => {
       addLog(`batch ${batchId.slice(0, 8)}… processing`);
     } else if (status === "complete") {
       processingBatches.delete(batchId);
-      if (manifest) {
-        currentManifest = manifest;
-        const actionCount = manifest?.actions?.length ?? 0;
-        const viewCount = manifest?.views?.length ?? 0;
-        addLog(`batch ${batchId.slice(0, 8)}… complete: ${actionCount} actions, ${viewCount} views`);
-      } else {
-        addLog(`batch ${batchId.slice(0, 8)}… complete: no manifest`);
-      }
+      addLog(`batch ${batchId.slice(0, 8)}… complete`);
     } else if (status === "error") {
       processingBatches.set(batchId, { ...(processingBatches.get(batchId) || {}), status: "error", error: error || "unknown", updatedAt: Date.now() });
       addLog(`batch ${batchId.slice(0, 8)}… error: ${error || "unknown"}`);
     }
 
-    notifyAllContexts({ event: "batch_status", batchId, status, manifest: manifest || null, error: error || null });
+    notifyAllContexts({ event: "batch_status", batchId, status, error: error || null });
     broadcastState();
     return;
   }
@@ -260,6 +262,7 @@ const connectBackend = (nextUrl) => {
   addLog(`connecting to ${wsUrl}`);
   try {
     socket = new WebSocket(wsUrl);
+    socket.binaryType = "arraybuffer";
   } catch (error) {
     shouldReconnect = false;
     addLog("invalid backend websocket URL");
@@ -320,6 +323,7 @@ const connectBackend = (nextUrl) => {
 
 const disconnectBackend = () => {
   shouldReconnect = false;
+  autoConnectGaveUp = true;
   reconnectAttempt = 0;
   clearTimers();
 
@@ -339,15 +343,6 @@ const queryActiveTab = () =>
       resolve(tabs[0] || null);
     });
   });
-
-/** Prefer the explored tab tracked by activeSession; fall back to the active tab. */
-const getTargetTab = async () => {
-  if (activeSession && activeSession.tabId != null) {
-    const tab = await chrome.tabs.get(activeSession.tabId).catch(() => null);
-    if (tab) return tab;
-  }
-  return queryActiveTab();
-};
 
 
 const sendTabMessage = (tabId, message) =>
@@ -447,8 +442,6 @@ const startExploring = async () => {
     entityCount: 0,
     actionCount: 0
   };
-
-  extensionOpenedTabs.add(tab.id);
 
   sendToBackend(MessageType.DISCOVERY_SESSION_START, {
     sessionId,
@@ -581,7 +574,7 @@ const annotateScreenshot = async (screenshotDataUrl, skeleton, devicePixelRatio)
  * Snapshots are only sent to the backend on a CHECKPOINT or STOP event.
  * Runs async — the content script response is sent before this completes.
  */
-const handleDiscoveryIncremental = async (message, sender) => {
+const handleSnapshot = async (message, sender) => {
   const payload = message.payload || {};
 
   if (!activeSession || payload.sessionId !== activeSession.sessionId) {
@@ -752,72 +745,11 @@ const PAGE_EXECUTE_ACTION = (payload) => {
 };
 
 /**
- * Self-contained entity state reader. Injected directly into the page.
- */
-const PAGE_READ_ENTITY = (payload) => {
-  const { strategies } = payload;
-
-  const isVisible = (el) => {
-    if (!(el instanceof HTMLElement)) return false;
-    const s = window.getComputedStyle(el);
-    if (s.display === "none" || s.visibility === "hidden") return false;
-    const r = el.getBoundingClientRect();
-    return r.width > 0 && r.height > 0;
-  };
-
-  const tryCSS = (v) => { const m = document.querySelectorAll(v); if (m.length === 1) return m[0]; for (const el of m) { if (isVisible(el)) return el; } return null; };
-  const tryXPath = (v) => {
-    const x = v.startsWith("/body") ? `/html${v}` : v;
-    const r = document.evaluate(x, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-    if (r.snapshotLength === 1) return r.snapshotItem(0);
-    for (let i = 0; i < r.snapshotLength; i++) { const el = r.snapshotItem(i); if (isVisible(el)) return el; }
-    return null;
-  };
-  const tryAttr = (v) => {
-    const ci = v.indexOf(":"); if (ci === -1) return null;
-    try { const m = document.querySelectorAll(`[${v.slice(0,ci)}="${CSS.escape(v.slice(ci+1))}"]`); if (m.length === 1) return m[0]; for (const el of m) { if (isVisible(el)) return el; } } catch {}
-    return null;
-  };
-
-  const sorted = [...(strategies || [])].sort((a, b) => b.confidence - a.confidence);
-  let element = null, usedStrategy = null;
-  for (const s of sorted) {
-    let el = null;
-    try {
-      if (s.kind === "css" || s.kind === "dom_path") el = tryCSS(s.value);
-      else if (s.kind === "xpath") el = tryXPath(s.value);
-      else if (s.kind === "attribute") el = tryAttr(s.value);
-    } catch {}
-    if (el) { element = el; usedStrategy = { kind: s.kind, value: s.value }; break; }
-  }
-
-  if (!element) return { ok: false, error: "ERR_TARGET_NOT_FOUND", message: "No locator matched" };
-
-  const rect = element.getBoundingClientRect();
-  const IMPLICIT = { button:"button",a:"link",nav:"navigation",footer:"contentinfo",header:"banner",main:"main" };
-
-  return {
-    ok: true,
-    usedStrategy,
-    state: {
-      visible: isVisible(element),
-      tag: element.tagName.toLowerCase(),
-      text: (element.textContent || "").trim().slice(0, 500),
-      value: "value" in element ? element.value : undefined,
-      disabled: element.disabled || element.getAttribute("aria-disabled") === "true",
-      rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
-      role: element.getAttribute("role") || IMPLICIT[element.tagName.toLowerCase()] || null,
-      name: element.getAttribute("aria-label") || element.getAttribute("title") || element.textContent?.trim().slice(0,100) || ""
-    }
-  };
-};
-
-/**
  * Self-contained view data extractor. Injected directly into the page.
  * Extracts structured data using CSS selectors — no LLM at runtime.
  */
 const PAGE_READ_VIEW = (payload) => {
-  const { containerLocator, itemLocator, fields, isList } = payload;
+  const { containerLocator, itemContainer, fields, isList } = payload;
 
   // ── Locator helpers (same as PAGE_EXECUTE_ACTION) ──
 
@@ -921,13 +853,39 @@ const PAGE_READ_VIEW = (payload) => {
     return raw || null;
   };
 
+  // Shadow-DOM-aware query helpers
+  const qsDeep = (root, sel) => {
+    try { return root.querySelector(sel) || root.shadowRoot?.querySelector(sel) || null; }
+    catch { return null; }
+  };
+
+  const qsaDeep = (root, sel) => {
+    try {
+      const light = root.querySelectorAll(sel);
+      if (light.length > 0) return light;
+      return root.shadowRoot?.querySelectorAll(sel) || [];
+    } catch { return []; }
+  };
+
   const extractField = (root, field) => {
     if (!field || !field.locator) return null;
     const selector = field.locator.value;
 
+    // 0. Attribute extraction (when field specifies an attribute to extract)
+    if (field.locator.attribute) {
+      let el = qsDeep(root, selector);
+      // Self-match: if root IS the target (e.g., item=shreddit-post, selector=shreddit-post)
+      if (!el) try { if (root.matches?.(selector)) el = root; } catch {}
+      if (el) {
+        const val = el.getAttribute(field.locator.attribute);
+        if (val != null) return coerceValue(val.trim(), field.type);
+      }
+      return null;  // Don't fall through — attribute fields never use textContent
+    }
+
     // 1. Direct CSS selector
     try {
-      const el = root.querySelector(selector);
+      const el = qsDeep(root, selector);
       if (el) return coerceValue((el.textContent || "").trim(), field.type);
     } catch { /* invalid selector */ }
 
@@ -939,10 +897,10 @@ const PAGE_READ_VIEW = (payload) => {
         const [, leadClass, rest] = leadClassMatch;
         if (root.matches && root.matches(leadClass)) {
           // Try :scope > rest
-          const scopeEl = root.querySelector(`:scope > ${rest}`);
+          const scopeEl = qsDeep(root, `:scope > ${rest}`);
           if (scopeEl) return coerceValue((scopeEl.textContent || "").trim(), field.type);
           // Try just the structural part
-          const restEl = root.querySelector(rest);
+          const restEl = qsDeep(root, rest);
           if (restEl) return coerceValue((restEl.textContent || "").trim(), field.type);
         }
       }
@@ -953,7 +911,7 @@ const PAGE_READ_VIEW = (payload) => {
     try {
       if (/title|name/i.test(field.name)) {
         for (const tag of ["a", "button"]) {
-          const els = root.querySelectorAll(`${tag}[aria-label]`);
+          const els = qsaDeep(root, `${tag}[aria-label]`);
           for (const el of els) {
             const label = (el.getAttribute("aria-label") || "").trim();
             if (label.length > 3) return coerceValue(label, field.type);
@@ -967,7 +925,7 @@ const PAGE_READ_VIEW = (payload) => {
     try {
       const nameParts = field.name.split("_").filter(p => p.length > 2);
       for (const part of nameParts) {
-        const matches = root.querySelectorAll(`:scope > [class*="${part}"], :scope > * > [class*="${part}"]`);
+        const matches = qsaDeep(root, `:scope > [class*="${part}"], :scope > * > [class*="${part}"]`);
         for (const el of matches) {
           if (el !== root) {
             const raw = (el.textContent || "").trim();
@@ -989,17 +947,22 @@ const PAGE_READ_VIEW = (payload) => {
   const extractFieldsByTextBlocks = (root, fieldDefs) => {
     if (!fieldDefs || fieldDefs.length === 0) return {};
     const blocks = [];
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode(n) {
-        const t = (n.textContent || "").replace(ZERO_WIDTH_RE, "").trim();
-        return t.length > 1 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    const walkRoot = (r) => {
+      const walker = document.createTreeWalker(r, NodeFilter.SHOW_TEXT, {
+        acceptNode(n) {
+          const t = (n.textContent || "").replace(ZERO_WIDTH_RE, "").trim();
+          return t.length > 1 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+        }
+      });
+      let node;
+      while ((node = walker.nextNode()) && blocks.length < fieldDefs.length + 10) {
+        const text = (node.textContent || "").replace(ZERO_WIDTH_RE, "").trim();
+        if (text.length > 1 && !blocks.includes(text)) blocks.push(text);
       }
-    });
-    let node;
-    while ((node = walker.nextNode()) && blocks.length < fieldDefs.length + 10) {
-      const text = (node.textContent || "").replace(ZERO_WIDTH_RE, "").trim();
-      if (text.length > 1 && !blocks.includes(text)) blocks.push(text);
-    }
+    };
+    walkRoot(root);
+    // Pierce shadow DOM if light DOM yielded nothing
+    if (blocks.length === 0 && root.shadowRoot) walkRoot(root.shadowRoot);
     const row = {};
     for (let i = 0; i < fieldDefs.length; i++) {
       row[fieldDefs[i].name] = i < blocks.length ? blocks[i] : null;
@@ -1007,27 +970,37 @@ const PAGE_READ_VIEW = (payload) => {
     return row;
   };
 
-  if (isList && itemLocator) {
+  if (isList) {
     // List view: find all items, extract fields per item
     let items;
-    try {
-      const selector = itemLocator.value || itemLocator;
-      items = container.querySelectorAll(typeof selector === "string" ? selector : selector.value);
-    } catch {
-      return { ok: false, error: "ERR_TARGET_NOT_FOUND", message: "Item selector invalid" };
-    }
 
-    // If no items found with the item selector, try document-wide before generic fallbacks
-    if (!items || items.length === 0) {
+    // Try itemContainer if provided
+    if (itemContainer) {
       try {
-        const selector = itemLocator.value || itemLocator;
-        const sel = typeof selector === "string" ? selector : selector.value;
-        const docItems = document.querySelectorAll(sel);
-        if (docItems.length > 0) {
-          items = docItems;
-          console.warn(`[browserwire] read_view items found document-wide: ${sel} (${docItems.length} items)`);
-        }
-      } catch { /* skip */ }
+        const selector = itemContainer.value || itemContainer;
+        items = container.querySelectorAll(typeof selector === "string" ? selector : selector.value);
+      } catch { /* invalid selector — fall through to fallbacks */ }
+
+      // Try container's shadow root
+      if ((!items || items.length === 0) && container.shadowRoot) {
+        try {
+          const sel = itemContainer.value || itemContainer;
+          items = container.shadowRoot.querySelectorAll(typeof sel === "string" ? sel : sel.value);
+        } catch {}
+      }
+
+      // If no items found with the item selector, try document-wide before generic fallbacks
+      if (!items || items.length === 0) {
+        try {
+          const selector = itemContainer.value || itemContainer;
+          const sel = typeof selector === "string" ? selector : selector.value;
+          const docItems = document.querySelectorAll(sel);
+          if (docItems.length > 0) {
+            items = docItems;
+            console.warn(`[browserwire] read_view items found document-wide: ${sel} (${docItems.length} items)`);
+          }
+        } catch { /* skip */ }
+      }
     }
 
     // If still no items, try common list patterns within container
@@ -1117,27 +1090,21 @@ const PAGE_READ_VIEW = (payload) => {
 /**
  * Navigate a tab to a URL and wait for the page to finish loading.
  * Resolves relative URLs against baseOrigin.
- * After load complete, waits 500ms for SPA hydration.
  */
-const navigateTabAndWait = (tabId, url, baseOrigin, timeoutMs = 10000) =>
-  new Promise((resolve, reject) => {
-    const fullUrl = url.startsWith("http") ? url : `${baseOrigin}${url}`;
-    const timer = setTimeout(() => {
-      chrome.tabs.onUpdated.removeListener(listener);
-      reject(new Error(`Navigation to ${fullUrl} timed out`));
-    }, timeoutMs);
+const navigateTabAndWait = async (tabId, url, baseOrigin, timeoutMs = PAGE_READY_TIMEOUT_MS) => {
+  const fullUrl = url.startsWith("http") ? url : `${baseOrigin}${url}`;
+  await chrome.tabs.update(tabId, { url: fullUrl });
 
-    const listener = (updatedTabId, changeInfo) => {
-      if (updatedTabId !== tabId || changeInfo.status !== "complete") return;
-      chrome.tabs.onUpdated.removeListener(listener);
-      clearTimeout(timer);
-      // 500ms grace for SPA hydration
-      setTimeout(resolve, 500);
-    };
-
-    chrome.tabs.onUpdated.addListener(listener);
-    chrome.tabs.update(tabId, { url: fullUrl });
+  const settle = await waitForPageSettle(tabId, {
+    timeoutMs,
+    expectNavigation: true,
+    context: `navigate:${fullUrl}`
   });
+
+  if (!settle.settled) {
+    throw new Error(`Navigation to ${fullUrl} did not settle (${settle.reason || "timeout"})`);
+  }
+};
 
 /**
  * Self-contained outcome evaluator. Injected into the page after workflow steps complete.
@@ -1180,13 +1147,21 @@ const PAGE_EVALUATE_OUTCOME = (payload) => {
 const pollReadView = async (tabId, viewConfig, { timeoutMs = 20000, readyQuietMs = 500 } = {}) => {
   const start = Date.now();
   let lastActivityTime = start;
+  let stableNonEmptyReads = 0;
+  let lastNonEmptySignature = null;
 
   while (Date.now() - start < timeoutMs) {
     // Wait for DOM to be briefly quiet before reading
-    const domResult = await executeInTab(tabId, PAGE_WAIT_FOR_DOM_IDLE, [{ idleMs: 300, timeoutMs: 3000 }]);
+    const domResult = await executeInTab(tabId, PAGE_WAIT_FOR_DOM_IDLE, [{
+      idleMs: 300,
+      timeoutMs: 3000,
+      requireReadyStateComplete: true
+    }]);
     const result = await executeInTab(tabId, PAGE_READ_VIEW, [viewConfig]);
 
     if (!result || result.ok === false) {
+      stableNonEmptyReads = 0;
+      lastNonEmptySignature = null;
       lastActivityTime = Date.now();
       await new Promise(r => setTimeout(r, 500));
       continue;
@@ -1195,14 +1170,37 @@ const pollReadView = async (tabId, viewConfig, { timeoutMs = 20000, readyQuietMs
     const isEmpty = viewConfig.isList
       ? (Array.isArray(result.result) && result.result.length === 0)
       : (result.result && Object.values(result.result).every(v => v === null));
-
-    if (!isEmpty) return result;
-
-    // Empty result — check for activity signals
-    const pending = getPendingCount(tabId);
+    const pending = getPendingSnapshot(tabId);
     const domActive = !domResult?.domIdle;
 
-    if (pending > 0 || domActive) {
+    if (!isEmpty) {
+      if (pending.blocking === 0 && !domActive) {
+        const signature = JSON.stringify(result.result).slice(0, 2000);
+        if (signature === lastNonEmptySignature) {
+          stableNonEmptyReads += 1;
+        } else {
+          stableNonEmptyReads = 1;
+          lastNonEmptySignature = signature;
+        }
+
+        if (stableNonEmptyReads >= 2) {
+          return result;
+        }
+      } else {
+        stableNonEmptyReads = 0;
+        lastNonEmptySignature = null;
+        lastActivityTime = Date.now();
+      }
+
+      await new Promise(r => setTimeout(r, 200));
+      continue;
+    }
+
+    stableNonEmptyReads = 0;
+    lastNonEmptySignature = null;
+
+    // Empty result — check for activity signals
+    if (pending.blocking > 0 || domActive) {
       lastActivityTime = Date.now();
       await new Promise(r => setTimeout(r, 500));
       continue;
@@ -1225,29 +1223,67 @@ const pollReadView = async (tabId, viewConfig, { timeoutMs = 20000, readyQuietMs
 // Page-injected: watches DOM mutations only.
 // Network idle is tracked separately in the background via chrome.webRequest.
 const PAGE_WAIT_FOR_DOM_IDLE = (opts) => {
-  const { idleMs = 500, timeoutMs = 10000 } = opts || {};
-  return new Promise((resolve) => {
-    let lastActivity = Date.now();
-    const start = lastActivity;
+  const {
+    idleMs = 500,
+    timeoutMs = 10000,
+    requireReadyStateComplete = true
+  } = opts || {};
 
-    const observer = new MutationObserver(() => { lastActivity = Date.now(); });
-    observer.observe(document.body || document.documentElement, {
+  return new Promise((resolve) => {
+    const target = document.body || document.documentElement;
+    if (!target) {
+      resolve({ domIdle: false, elapsed: 0, reason: "no_dom_root", readyState: document.readyState });
+      return;
+    }
+
+    const start = Date.now();
+    let lastActivity = start;
+
+    const observer = new MutationObserver(() => {
+      lastActivity = Date.now();
+    });
+
+    observer.observe(target, {
       childList: true, subtree: true, attributes: true, characterData: true
     });
+
+    const finish = (domIdle, reason) => {
+      observer.disconnect();
+      resolve({
+        domIdle,
+        elapsed: Date.now() - start,
+        reason,
+        readyState: document.readyState
+      });
+    };
+
+    const flushPaint = (cb) => {
+      if (typeof requestAnimationFrame !== "function") {
+        setTimeout(cb, 0);
+        return;
+      }
+      requestAnimationFrame(() => requestAnimationFrame(cb));
+    };
 
     const check = () => {
       const now = Date.now();
       const elapsed = now - start;
+
       if (elapsed >= timeoutMs) {
-        observer.disconnect();
-        resolve({ domIdle: false, elapsed, reason: "timeout" });
+        finish(false, "timeout");
         return;
       }
+
+      if (requireReadyStateComplete && document.readyState !== "complete") {
+        setTimeout(check, 100);
+        return;
+      }
+
       if (now - lastActivity >= idleMs) {
-        observer.disconnect();
-        resolve({ domIdle: true, elapsed, reason: "idle" });
+        flushPaint(() => finish(true, "idle"));
         return;
       }
+
       setTimeout(check, 100);
     };
 
@@ -1256,26 +1292,237 @@ const PAGE_WAIT_FOR_DOM_IDLE = (opts) => {
   });
 };
 
-const waitForNavigation = async (tabId, timeoutMs = 10000) => {
-  await new Promise(r => setTimeout(r, 100));
-  const tab = await chrome.tabs.get(tabId);
-  if (tab.status === "loading") {
-    await new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        chrome.tabs.onUpdated.removeListener(listener);
-        resolve();
-      }, timeoutMs);
-      const listener = (id, info) => {
-        if (id !== tabId || info.status !== "complete") return;
-        chrome.tabs.onUpdated.removeListener(listener);
-        clearTimeout(timeout);
-        resolve();
-      };
-      chrome.tabs.onUpdated.addListener(listener);
-    });
+const waitForNavigation = async (
+  tabId,
+  {
+    timeoutMs = PAGE_READY_TIMEOUT_MS,
+    observeWindowMs = NAVIGATION_OBSERVE_WINDOW_MS,
+    expectNavigation = false
+  } = {}
+) => {
+  const currentTab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!currentTab) {
+    return { ok: false, navigated: false, complete: false, reason: "tab_not_found" };
   }
-  // Grace period for SPA framework to begin post-navigation work
-  await new Promise(r => setTimeout(r, 150));
+
+  const initialUrl = currentTab.url || "";
+  let sawLoading = currentTab.status === "loading";
+  let sawComplete = currentTab.status === "complete";
+
+  return await new Promise((resolve) => {
+    let done = false;
+    let observeTimer = null;
+    let navigationTimer = null;
+
+    const cleanup = () => {
+      if (observeTimer) {
+        clearTimeout(observeTimer);
+        observeTimer = null;
+      }
+      if (navigationTimer) {
+        clearTimeout(navigationTimer);
+        navigationTimer = null;
+      }
+      chrome.tabs.onUpdated.removeListener(listener);
+    };
+
+    const finish = (result) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve(result);
+    };
+
+    const startNavigationTimer = () => {
+      if (navigationTimer) return;
+      navigationTimer = setTimeout(() => {
+        finish({
+          ok: false,
+          navigated: true,
+          complete: sawComplete,
+          reason: "navigation_timeout"
+        });
+      }, timeoutMs);
+    };
+
+    const listener = (id, info) => {
+      if (id !== tabId) return;
+
+      if (info.status === "loading") {
+        sawLoading = true;
+        startNavigationTimer();
+      }
+
+      if (info.status === "complete") {
+        sawComplete = true;
+        if (sawLoading) {
+          finish({ ok: true, navigated: true, complete: true, reason: "complete" });
+        }
+      }
+    };
+
+    chrome.tabs.onUpdated.addListener(listener);
+
+    const pollStatus = async () => {
+      if (done) return;
+      const tab = await chrome.tabs.get(tabId).catch(() => null);
+      if (!tab) {
+        finish({ ok: false, navigated: sawLoading, complete: false, reason: "tab_not_found" });
+        return;
+      }
+
+      if (tab.status === "loading") {
+        sawLoading = true;
+        startNavigationTimer();
+      }
+
+      if (tab.status === "complete") {
+        sawComplete = true;
+        if (sawLoading) {
+          finish({ ok: true, navigated: true, complete: true, reason: "complete" });
+          return;
+        }
+      }
+
+      setTimeout(pollStatus, 100);
+    };
+    setTimeout(pollStatus, 100);
+
+    if (sawLoading) {
+      startNavigationTimer();
+      return;
+    }
+
+    observeTimer = setTimeout(async () => {
+      if (sawLoading) {
+        startNavigationTimer();
+        return;
+      }
+
+      const latestTab = await chrome.tabs.get(tabId).catch(() => null);
+      const latestUrl = latestTab?.url || "";
+      const latestComplete = latestTab?.status === "complete" || sawComplete;
+      const urlChanged = latestUrl !== "" && latestUrl !== initialUrl;
+
+      if (latestTab?.status === "loading") {
+        sawLoading = true;
+        startNavigationTimer();
+        return;
+      }
+
+      if (expectNavigation && urlChanged && latestComplete) {
+        finish({ ok: true, navigated: true, complete: true, reason: "url_changed" });
+        return;
+      }
+
+      if (expectNavigation) {
+        finish({ ok: false, navigated: false, complete: sawComplete, reason: "navigation_not_detected" });
+      } else {
+        finish({ ok: true, navigated: false, complete: sawComplete, reason: "no_navigation_detected" });
+      }
+    }, observeWindowMs);
+  });
+};
+
+/**
+ * Wait for the page to fully settle after an interaction.
+ * Combines waitForNavigation (full page loads) with DOM idle + network quiescence
+ * checks (SPA transitions that don't trigger tab status changes).
+ */
+const waitForPageSettle = async (
+  tabId,
+  {
+    timeoutMs = PAGE_READY_TIMEOUT_MS,
+    expectNavigation = false,
+    context = "default"
+  } = {}
+) => {
+  const start = Date.now();
+
+  // 1) Catch both immediate and slightly delayed navigations.
+  const navigation = await waitForNavigation(tabId, {
+    timeoutMs,
+    observeWindowMs: NAVIGATION_OBSERVE_WINDOW_MS,
+    expectNavigation
+  });
+
+  if (!navigation.ok) {
+    return {
+      settled: false,
+      reason: navigation.reason || "navigation_failed",
+      elapsedMs: Date.now() - start,
+      navigation,
+      pending: getPendingSnapshot(tabId)
+    };
+  }
+
+  // 2) Require both DOM quietness and blocking-network quietness.
+  let quietStart = null;
+  let lastDomResult = null;
+  let lastPending = getPendingSnapshot(tabId);
+
+  while (Date.now() - start < timeoutMs) {
+    const remaining = timeoutMs - (Date.now() - start);
+    const domProbeTimeout = Math.max(500, Math.min(DOM_IDLE_PROBE_TIMEOUT_MS, remaining));
+
+    let domResult;
+    try {
+      domResult = await executeInTab(tabId, PAGE_WAIT_FOR_DOM_IDLE, [{
+        idleMs: DOM_IDLE_MS,
+        timeoutMs: domProbeTimeout,
+        requireReadyStateComplete: true
+      }]);
+    } catch (error) {
+      return {
+        settled: false,
+        reason: "dom_probe_failed",
+        elapsedMs: Date.now() - start,
+        navigation,
+        pending: getPendingSnapshot(tabId),
+        error: error instanceof Error ? error.message : "dom_probe_failed"
+      };
+    }
+
+    lastDomResult = domResult;
+    lastPending = getPendingSnapshot(tabId);
+
+    const domIdle = Boolean(domResult?.domIdle);
+    const networkIdle = lastPending.blocking === 0;
+
+    if (domIdle && networkIdle) {
+      const now = Date.now();
+      if (quietStart === null) {
+        quietStart = now;
+      }
+      if (now - quietStart >= NETWORK_QUIET_MS) {
+        return {
+          settled: true,
+          reason: "settled",
+          elapsedMs: now - start,
+          navigation,
+          dom: domResult,
+          pending: lastPending
+        };
+      }
+    } else {
+      quietStart = null;
+    }
+
+    await new Promise(r => setTimeout(r, SETTLE_POLL_INTERVAL_MS));
+  }
+
+  addLog(
+    `[settle-timeout] tab=${tabId} ctx=${context} nav=${navigation.reason || "unknown"} dom=${lastDomResult?.reason || "unknown"} pendingBlocking=${lastPending.blocking} pendingTotal=${lastPending.total}`
+  );
+
+  return {
+    settled: false,
+    reason: "timeout",
+    elapsedMs: Date.now() - start,
+    navigation,
+    dom: lastDomResult,
+    pending: lastPending
+  };
 };
 
 /**
@@ -1313,19 +1560,47 @@ const extractApiFields = (data, apiFields) => {
 };
 
 /**
+ * Clears the in-page network capture buffer.
+ */
+const clearNetworkLog = async (tabId) => {
+  try {
+    await chrome.tabs.sendMessage(tabId, {
+      source: "background",
+      command: "clear_network_log"
+    });
+  } catch {
+    // no-op (content script unavailable or tab navigated)
+  }
+};
+
+/**
  * Read API data from the content script's network log, matching by request signature.
  * If apiFields is provided, extracts only the mapped fields from the response.
  */
-const readNetworkData = async (tabId, apiRequest, apiFields) => {
+const readNetworkData = async (tabId, apiRequest, apiFields, { sinceTs = null } = {}) => {
   try {
     const result = await chrome.tabs.sendMessage(tabId, {
       source: "background",
       command: "get_network_log",
-      apiRequest
+      apiRequest,
+      sinceTs
     });
+
     if (result?.ok && result.entries?.length > 0) {
-      const bodies = result.entries.map(e => e.responseBody).filter(Boolean);
+      const entriesWithBodies = result.entries.filter((e) => e?.responseBody != null);
+      if (entriesWithBodies.length === 0) return null;
+
+      entriesWithBodies.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+      const newestTs = entriesWithBodies[0].timestamp || 0;
+      const freshnessWindowMs = 1500;
+      const freshEntries = entriesWithBodies.filter((e) => {
+        const ts = e.timestamp || 0;
+        return newestTs - ts <= freshnessWindowMs;
+      });
+
+      const bodies = freshEntries.map(e => e.responseBody).filter(Boolean);
       if (bodies.length === 0) return null;
+
       let data;
       if (bodies.length === 1) data = bodies[0];
       else if (Array.isArray(bodies[0])) data = bodies.flat();
@@ -1345,16 +1620,38 @@ const readNetworkData = async (tabId, apiRequest, apiFields) => {
 const runWorkflowSteps = async (tabId, baseOrigin, steps, outcomes, inputs) => {
   let lastReadData = null;
   let hasReadView = false;
+  let networkScopeStartTs = 0;
+
+  const readinessError = (stepType, phase, settle) => ({
+    ok: false,
+    error: "ERR_PAGE_NOT_READY",
+    message: `Page did not settle ${phase} ${stepType} step`,
+    details: settle
+  });
 
   for (const step of (steps || [])) {
     try {
+      const shouldWaitBefore = ["read_view", "fill", "select", "click", "submit"].includes(step.type);
+      if (shouldWaitBefore) {
+        const preStepSettle = await waitForPageSettle(tabId, {
+          timeoutMs: PAGE_READY_TIMEOUT_MS,
+          context: `before:${step.type}`
+        });
+        if (!preStepSettle.settled) {
+          return readinessError(step.type, "before", preStepSettle);
+        }
+      }
+
       if (step.type === "navigate") {
         // Replace :param placeholders with input values
         const url = step.url.replace(/:([a-zA-Z_][a-zA-Z0-9_]*)/g, (match, param) => {
           const value = inputs?.[param];
           return value != null ? encodeURIComponent(value) : match;
         });
-        await navigateTabAndWait(tabId, url, baseOrigin);
+
+        networkScopeStartTs = Date.now();
+        await clearNetworkLog(tabId);
+        await navigateTabAndWait(tabId, url, baseOrigin, PAGE_READY_TIMEOUT_MS);
         continue;
       }
 
@@ -1363,13 +1660,24 @@ const runWorkflowSteps = async (tabId, baseOrigin, steps, outcomes, inputs) => {
 
         // Try network-first if apiRequest signature is available
         if (step.viewConfig?.apiRequest) {
-          // Wait for network to settle before reading
-          await new Promise(r => setTimeout(r, 1000));
-          const apiData = await readNetworkData(tabId, step.viewConfig.apiRequest, step.viewConfig.apiFields);
+          const apiData = await readNetworkData(
+            tabId,
+            step.viewConfig.apiRequest,
+            step.viewConfig.apiFields,
+            { sinceTs: networkScopeStartTs }
+          );
+
           if (apiData != null) {
-            console.log("[browserwire] read_view: got data from network API");
-            lastReadData = apiData;
-            continue;
+            // Quality gate: check that the data has substance
+            const hasSubstance = Array.isArray(apiData)
+              ? apiData.length > 0 && apiData.some(row => Object.values(row).some(v => v != null && v !== ''))
+              : Object.values(apiData).some(v => v != null && v !== '');
+            if (hasSubstance) {
+              console.log("[browserwire] read_view: got data from network API");
+              lastReadData = apiData;
+              continue;
+            }
+            console.log("[browserwire] read_view: network API data empty, falling back to DOM");
           }
           console.log("[browserwire] read_view: no network match, falling back to DOM");
         }
@@ -1377,7 +1685,7 @@ const runWorkflowSteps = async (tabId, baseOrigin, steps, outcomes, inputs) => {
         // DOM fallback (existing logic)
         const viewConfig = {
           containerLocator: step.viewConfig?.containerLocator || [],
-          itemLocator: step.viewConfig?.itemLocator || null,
+          itemContainer: step.viewConfig?.itemContainer || null,
           fields: step.viewConfig?.fields || [],
           isList: step.viewConfig?.isList || false
         };
@@ -1404,6 +1712,9 @@ const runWorkflowSteps = async (tabId, baseOrigin, steps, outcomes, inputs) => {
           ? { text: inputValue, value: inputValue }
           : {};
 
+        networkScopeStartTs = Date.now();
+        await clearNetworkLog(tabId);
+
         const result = await executeInTab(tabId, PAGE_EXECUTE_ACTION, [{
           strategies: step.strategies || [],
           interactionKind,
@@ -1417,14 +1728,22 @@ const runWorkflowSteps = async (tabId, baseOrigin, steps, outcomes, inputs) => {
             message: result?.message || `${step.type} step failed`
           };
         }
-        await waitForNavigation(tabId);
+
+        const postStepSettle = await waitForPageSettle(tabId, {
+          timeoutMs: PAGE_READY_TIMEOUT_MS,
+          context: `after:${step.type}`
+        });
+        if (!postStepSettle.settled) {
+          return readinessError(step.type, "after", postStepSettle);
+        }
+
         continue;
       }
     } catch (error) {
       return {
         ok: false,
         error: "ERR_WORKFLOW_STEP_FAILED",
-        message: error.message || `Step ${step.type} threw an error`
+        message: error instanceof Error ? error.message : `Step ${step.type} threw an error`
       };
     }
   }
@@ -1434,8 +1753,20 @@ const runWorkflowSteps = async (tabId, baseOrigin, steps, outcomes, inputs) => {
     return { ok: true, data: lastReadData };
   }
 
-  // Write workflow: wait for navigation then evaluate outcomes
-  await waitForNavigation(tabId);
+  // Write workflow: wait for page to settle then evaluate outcomes
+  const finalSettle = await waitForPageSettle(tabId, {
+    timeoutMs: PAGE_READY_TIMEOUT_MS,
+    context: "final_outcome"
+  });
+  if (!finalSettle.settled) {
+    return {
+      ok: false,
+      error: "ERR_PAGE_NOT_READY",
+      message: "Page did not settle before outcome evaluation",
+      details: finalSettle
+    };
+  }
+
   try {
     const evalResult = await executeInTab(tabId, PAGE_EVALUATE_OUTCOME, [{ outcomes }]);
     return { ok: true, outcome: evalResult?.outcome || "unknown" };
@@ -1451,12 +1782,14 @@ const handleExecuteWorkflow = async (message) => {
   const { steps, outcomes, inputs, origin } = message.payload || {};
   const requestId = message.requestId;
 
-  // Create a dedicated background tab for this workflow
-  const tab = await chrome.tabs.create({ url: "about:blank", active: false });
+  // Create a dedicated minimized window for this workflow
+  const win = await chrome.windows.create({ url: "about:blank", focused: false, state: "minimized" });
+  const tab = win.tabs[0];
 
   try {
     // Navigate to the site origin so content scripts can run on the right domain
-    if (origin) {
+    const firstStepIsNav = steps?.length > 0 && steps[0].type === "navigate";
+    if (origin && !firstStepIsNav) {
       await navigateTabAndWait(tab.id, origin, "");
     }
 
@@ -1468,10 +1801,11 @@ const handleExecuteWorkflow = async (message) => {
       ok: false, error: "ERR_WORKFLOW_FAILED", message: error.message || "Workflow execution failed"
     }, requestId);
   } finally {
-    // Always clean up the tab
-    try { await chrome.tabs.remove(tab.id); } catch { /* already closed */ }
+    // Always clean up the window
+    try { await chrome.windows.remove(win.id); } catch { /* already closed */ }
   }
 };
+
 
 // ─── Sidepanel Command Handler ──────────────────────────────────────
 
@@ -1519,11 +1853,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
-  // Content script sends incremental discovery snapshots.
-  // Respond immediately; screenshot capture + backend forwarding runs async.
-  if (message.source === "content" && message.type === "discovery_incremental") {
+  // Content script sends buffered snapshots.
+  // Respond immediately; screenshot capture runs async.
+  if (message.source === "content" && message.type === "snapshot") {
     sendResponse({ ok: true });
-    handleDiscoveryIncremental(message, sender).catch((error) => {
+    handleSnapshot(message, sender).catch((error) => {
       addLog(`incremental handler error: ${error.message}`);
     });
     return false;
@@ -1545,13 +1879,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   return false;
-});
-
-// Notify sidepanel when the active tab URL changes so it can re-filter by route
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.url && currentManifest) {
-    notifyAllContexts({ event: "tab_url_changed", url: changeInfo.url });
-  }
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {

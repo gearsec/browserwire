@@ -38,7 +38,8 @@ export const PROVIDER_DEFAULTS = {
 const DEFAULTS = {
   host: "127.0.0.1",
   port: 8787,
-  debug: false
+  debug: false,
+  telemetryEnabled: false,
 };
 
 const CONFIG_FILE_PATH = join(homedir(), ".browserwire", "config.json");
@@ -80,6 +81,7 @@ const readEnvVars = () => {
   if (process.env.BROWSERWIRE_LLM_API_KEY) env.llmApiKey = process.env.BROWSERWIRE_LLM_API_KEY;
   if (process.env.BROWSERWIRE_LLM_MODEL) env.llmModel = process.env.BROWSERWIRE_LLM_MODEL;
   if (process.env.BROWSERWIRE_LLM_BASE_URL) env.llmBaseUrl = process.env.BROWSERWIRE_LLM_BASE_URL;
+  if (process.env.BROWSERWIRE_TELEMETRY) env.telemetryEnabled = process.env.BROWSERWIRE_TELEMETRY === "true";
   return env;
 };
 

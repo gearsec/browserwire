@@ -6,6 +6,13 @@
  * via window.postMessage.
  */
 (function() {
+  // Force all shadow roots to open mode so ISOLATED-world content scripts
+  // (discovery.js) can traverse them via el.shadowRoot.
+  const _origAttachShadow = Element.prototype.attachShadow;
+  Element.prototype.attachShadow = function(init) {
+    return _origAttachShadow.call(this, { ...init, mode: "open" });
+  };
+
   const SKIP_URL_RE = /google-analytics|segment\.io|sentry\.io|hotjar|intercom|doubleclick|fonts\.(googleapis|gstatic)|\.woff2?|\.ttf|\.css(\?|$)|\.png|\.jpg|\.svg|\.gif/i;
   const JSON_CT_RE = /application\/(?:.*\+)?json/i;
   const MAX_BODY_BYTES = 50 * 1024;
@@ -47,27 +54,37 @@
       if (shouldCapture) {
         try {
           const ct = response.headers.get('content-type') || '';
+          let responseBody = null;
+          let bodyTruncated = false;
+          let bodySizeBytes = null;
+
           if (JSON_CT_RE.test(ct)) {
             const clone = response.clone();
             const text = await clone.text();
+            bodySizeBytes = text.length;
             if (text.length <= MAX_BODY_BYTES) {
-              let queryParams = null;
-              try {
-                const u = new URL(reqUrl);
-                if (u.search) queryParams = Object.fromEntries(u.searchParams);
-              } catch {}
-
-              post("entry", {
-                id: ++_idCounter,
-                transport: "fetch",
-                url: reqUrl, method: reqMethod, status: response.status,
-                timestamp: startTime, durationMs: Date.now() - startTime,
-                requestBody,
-                queryParams,
-                responseBody: JSON.parse(text), bodySizeBytes: text.length
-              });
+              responseBody = JSON.parse(text);
+            } else {
+              bodyTruncated = true;
+              try { responseBody = JSON.parse(text.slice(0, MAX_BODY_BYTES)); } catch {}
             }
           }
+
+          let queryParams = null;
+          try {
+            const u = new URL(reqUrl);
+            if (u.search) queryParams = Object.fromEntries(u.searchParams);
+          } catch {}
+
+          post("entry", {
+            id: ++_idCounter,
+            transport: "fetch",
+            url: reqUrl, method: reqMethod, status: response.status,
+            contentType: ct,
+            timestamp: startTime, durationMs: Date.now() - startTime,
+            requestBody, queryParams,
+            responseBody, bodySizeBytes, bodyTruncated
+          });
         } catch {}
         post("req_end", { url: reqUrl });
       }
@@ -123,23 +140,36 @@
       if (shouldCapture) {
         try {
           const ct = this.getResponseHeader('content-type') || '';
-          if (JSON_CT_RE.test(ct) && this.responseText && this.responseText.length <= MAX_BODY_BYTES) {
-            let queryParams = null;
-            try {
-              const u = new URL(reqUrl, window.location.origin);
-              if (u.search) queryParams = Object.fromEntries(u.searchParams);
-            } catch {}
+          let responseBody = null;
+          let bodyTruncated = false;
+          let bodySizeBytes = null;
 
-            post("entry", {
-              id: ++_idCounter,
-              transport: "xhr",
-              url: reqUrl, method: reqMethod, status: this.status,
-              timestamp: startTime, durationMs: Date.now() - startTime,
-              requestBody,
-              queryParams,
-              responseBody: JSON.parse(this.responseText), bodySizeBytes: this.responseText.length
-            });
+          if (JSON_CT_RE.test(ct) && this.responseText) {
+            const respText = this.responseText;
+            bodySizeBytes = respText.length;
+            if (respText.length <= MAX_BODY_BYTES) {
+              responseBody = JSON.parse(respText);
+            } else {
+              bodyTruncated = true;
+              try { responseBody = JSON.parse(respText.slice(0, MAX_BODY_BYTES)); } catch {}
+            }
           }
+
+          let queryParams = null;
+          try {
+            const u = new URL(reqUrl, window.location.origin);
+            if (u.search) queryParams = Object.fromEntries(u.searchParams);
+          } catch {}
+
+          post("entry", {
+            id: ++_idCounter,
+            transport: "xhr",
+            url: reqUrl, method: reqMethod, status: this.status,
+            contentType: ct,
+            timestamp: startTime, durationMs: Date.now() - startTime,
+            requestBody, queryParams,
+            responseBody, bodySizeBytes, bodyTruncated
+          });
         } catch {}
         post("req_end", { url: reqUrl });
       }

@@ -6,7 +6,7 @@
  */
 
 import { MessageType } from "../../extension/shared/protocol.js";
-import { generateOpenApiSpec } from "./openapi.js";
+import { generateOpenApiSpec, collectReadViews } from "./openapi.js";
 import { swaggerUiHtml } from "./swagger-ui.js";
 
 const CORS_HEADERS = {
@@ -46,12 +46,66 @@ const readBody = (req) =>
  */
 const buildLookups = (manifest) => {
   const workflowMap = new Map();
-  for (const workflow of manifest.workflowActions || []) {
-    const name = sanitize(workflow.name);
-    workflowMap.set(name, workflow);
+  const viewMap = new Map();
+  const endpointMap = new Map();
+
+  for (const page of manifest.pages || []) {
+    for (const wf of page.workflows || []) {
+      workflowMap.set(sanitize(wf.name), wf);
+    }
+    for (const v of page.views || []) {
+      viewMap.set(v.name, v);
+    }
+    for (const ep of page.endpoints || []) {
+      endpointMap.set(ep.name, ep);
+    }
   }
 
-  return { workflowMap };
+  return { workflowMap, viewMap, endpointMap };
+};
+
+const buildStrategies = (endpoint, inputParam) => {
+  if (inputParam && endpoint.inputs) {
+    const input = endpoint.inputs.find((i) => i.name === inputParam);
+    if (input?.selector) return [{ kind: "css", value: input.selector, confidence: 0.90 }];
+  }
+  const strategies = [];
+  if (endpoint.locator) {
+    strategies.push({ kind: endpoint.locator.kind, value: endpoint.locator.value, confidence: 0.90 });
+  }
+  if (endpoint.selector) {
+    strategies.push({ kind: "css", value: endpoint.selector, confidence: 0.85 });
+  }
+  return strategies;
+};
+
+const resolveWorkflowSteps = (workflow, viewMap, endpointMap) => {
+  const resolved = [];
+  for (const step of workflow.steps || []) {
+    if (step.type === "navigate") {
+      resolved.push({ type: "navigate", url: step.url });
+      continue;
+    }
+    if (step.type === "read_view") {
+      const view = viewMap.get(step.view_name);
+      if (!view) return { error: `Unknown view: "${step.view_name}"` };
+      const viewConfig = toViewConfig(view);
+      if (!viewConfig) return { error: `View "${step.view_name}" has no selectors` };
+      resolved.push({ type: "read_view", viewConfig });
+      continue;
+    }
+    // Action steps: fill, select, click, submit
+    const endpoint = endpointMap.get(step.endpoint_name);
+    if (!endpoint) return { error: `Unknown endpoint: "${step.endpoint_name}"` };
+    const strategies = buildStrategies(endpoint, step.input_param);
+    if (strategies.length === 0) return { error: `No selectors for endpoint "${step.endpoint_name}"` };
+    resolved.push({
+      type: step.type,
+      strategies,
+      ...(step.input_param ? { inputParam: step.input_param } : {}),
+    });
+  }
+  return resolved;
 };
 
 const sanitize = (name) =>
@@ -59,6 +113,25 @@ const sanitize = (name) =>
     .toLowerCase()
     .replace(/[^a-z0-9_]+/g, "_")
     .replace(/^_+|_+$/g, "");
+
+const toViewConfig = (view) => {
+  if (!view.container_selector && !view.fields?.some(f => f.selector)) return null;
+  return {
+    containerLocator: view.container_selector
+      ? [{ kind: "css", value: view.container_selector, confidence: 0.90 }]
+      : [],
+    itemContainer: view.item_selector
+      ? { kind: "css", value: view.item_selector, confidence: 0.90 }
+      : null,
+    fields: (view.fields || [])
+      .filter(f => f.selector)
+      .map(f => ({
+        name: f.name,
+        locator: { kind: "css", value: f.selector, attribute: f.attribute || null },
+      })),
+    isList: view.isList || false,
+  };
+};
 
 /**
  * Render an HTML landing page listing all known sites with links to their docs.
@@ -179,13 +252,83 @@ export const createHttpHandler = ({ getManifestBySlug, listSites, bridge, getSoc
         let body = {};
         try { body = await readBody(req); } catch { return json(res, 400, { ok: false, error: "Invalid JSON body" }); }
 
+        const steps = resolveWorkflowSteps(workflow, lookups.viewMap, lookups.endpointMap);
+        if (steps.error) return json(res, 400, { ok: false, error: steps.error });
+
         try {
           const result = await bridge.sendAndAwait(socket, MessageType.EXECUTE_WORKFLOW, {
-            steps: workflow.steps || [],
-            outcomes: workflow.outcomes || {},
-            inputs: body,
-            origin
+            steps, outcomes: workflow.outcomes || {}, inputs: body, origin
           }, 60000);
+          return json(res, 200, result);
+        } catch (err) {
+          return json(res, 500, { ok: false, error: err.message });
+        }
+      }
+
+      // GET /api/sites/:slug/reads/:name — execute as navigate+read_view workflow
+      const readMatch = subPath.match(/^\/reads\/([^/]+)$/);
+      if (readMatch && req.method === "GET") {
+        const readName = readMatch[1];
+        const readViews = collectReadViews(manifest);
+        const match = readViews.find(({ view }) => sanitize(view.name) === readName);
+        if (!match) return json(res, 404, { ok: false, error: `Read API '${readName}' not found in manifest` });
+
+        const page = (manifest.pages || []).find((p) =>
+          (p.views || []).some((v) => v.name === match.view.name)
+        );
+        const pageUrl = page?.routePattern || "/";
+
+        const params = {};
+        for (const [key, val] of url.searchParams.entries()) {
+          params[key] = val;
+        }
+
+        // Resolve navigation URL with param substitution
+        let navUrl = (pageUrl || "/").replace(/:([a-zA-Z_][a-zA-Z0-9_]*)/g, (m, param) => {
+          const value = params[param];
+          return value != null ? encodeURIComponent(value) : m;
+        });
+        if (!navUrl || navUrl === "/") navUrl = origin;
+
+        // Build viewConfig, enriching with network info if available
+        const rc = match.view.readContract;
+        let viewConfig;
+
+        if (rc && rc.dataSources?.length > 0) {
+          const primary = rc.dataSources.find((ds) => ds.role === "primary") || rc.dataSources[0];
+          const apiRequest = {
+            method: primary.method,
+            pathPattern: primary.urlPattern,
+            responsePath: primary.responsePath || null,
+            ...(primary.operationName || primary.queryParams?.length ? {
+              matchOn: {
+                ...(primary.operationName ? { operationName: primary.operationName } : {}),
+                ...(primary.queryParams?.length ? { queryParams: primary.queryParams.map((q) => q.name) } : {})
+              }
+            } : {})
+          };
+          const apiFields = {};
+          for (const fm of primary.fieldMappings || []) {
+            apiFields[fm.viewField] = fm.jsonPath;
+          }
+          const domConfig = toViewConfig(match.view);
+          viewConfig = { apiRequest, apiFields, ...(domConfig || {}) };
+        } else {
+          viewConfig = toViewConfig(match.view);
+          if (!viewConfig) {
+            return json(res, 500, { ok: false, error: "View has neither readContract nor selectors" });
+          }
+        }
+
+        const steps = [
+          { type: "navigate", url: navUrl },
+          { type: "read_view", viewConfig }
+        ];
+
+        try {
+          const result = await bridge.sendAndAwait(socket, MessageType.EXECUTE_WORKFLOW, {
+            steps, outcomes: {}, inputs: params, origin
+          }, 30000);
           return json(res, 200, result);
         } catch (err) {
           return json(res, 500, { ok: false, error: err.message });

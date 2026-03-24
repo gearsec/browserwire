@@ -1,0 +1,295 @@
+syntax = "proto3";
+
+package browserwire.v1;
+
+// ─── Enums ───────────────────────────────────────────────────────────
+
+enum SignalKind {
+  SIGNAL_KIND_UNSPECIFIED = 0;
+  SIGNAL_KIND_ROLE = 1;
+  SIGNAL_KIND_TEXT = 2;
+  SIGNAL_KIND_URL_PATTERN = 3;
+  SIGNAL_KIND_STATE = 4;
+  SIGNAL_KIND_ATTRIBUTE = 5;
+}
+
+enum LocatorKind {
+  LOCATOR_KIND_UNSPECIFIED = 0;
+  LOCATOR_KIND_ROLE_NAME = 1;
+  LOCATOR_KIND_CSS = 2;
+  LOCATOR_KIND_XPATH = 3;
+  LOCATOR_KIND_TEXT = 4;
+  LOCATOR_KIND_DATA_TESTID = 5;
+  LOCATOR_KIND_ATTRIBUTE = 6;
+  LOCATOR_KIND_DOM_PATH = 7;
+}
+
+enum ErrorClassification {
+  ERROR_CLASSIFICATION_UNSPECIFIED = 0;
+  ERROR_CLASSIFICATION_RECOVERABLE = 1;
+  ERROR_CLASSIFICATION_FATAL = 2;
+  ERROR_CLASSIFICATION_SECURITY = 3;
+}
+
+enum ActionInputType {
+  ACTION_INPUT_TYPE_UNSPECIFIED = 0;
+  ACTION_INPUT_TYPE_STRING = 1;
+  ACTION_INPUT_TYPE_NUMBER = 2;
+  ACTION_INPUT_TYPE_BOOLEAN = 3;
+  ACTION_INPUT_TYPE_ENUM = 4;
+}
+
+enum ConfidenceLevel {
+  CONFIDENCE_LEVEL_UNSPECIFIED = 0;
+  CONFIDENCE_LEVEL_LOW = 1;
+  CONFIDENCE_LEVEL_MEDIUM = 2;
+  CONFIDENCE_LEVEL_HIGH = 3;
+}
+
+enum ProvenanceSource {
+  PROVENANCE_SOURCE_UNSPECIFIED = 0;
+  PROVENANCE_SOURCE_HUMAN = 1;
+  PROVENANCE_SOURCE_AGENT = 2;
+  PROVENANCE_SOURCE_HYBRID = 3;
+}
+
+enum ViewFieldType {
+  VIEW_FIELD_TYPE_UNSPECIFIED = 0;
+  VIEW_FIELD_TYPE_STRING = 1;
+  VIEW_FIELD_TYPE_NUMBER = 2;
+  VIEW_FIELD_TYPE_BOOLEAN = 3;
+  VIEW_FIELD_TYPE_DATE = 4;
+}
+
+enum StateSignalKind {
+  STATE_SIGNAL_KIND_UNSPECIFIED = 0;
+  STATE_SIGNAL_KIND_SELECTOR_EXISTS = 1;
+  STATE_SIGNAL_KIND_TEXT_MATCH = 2;
+  STATE_SIGNAL_KIND_URL_PATTERN = 3;
+}
+
+enum WorkflowStepType {
+  WORKFLOW_STEP_TYPE_UNSPECIFIED = 0;
+  WORKFLOW_STEP_TYPE_NAVIGATE = 1;
+  WORKFLOW_STEP_TYPE_FILL = 2;
+  WORKFLOW_STEP_TYPE_SELECT = 3;
+  WORKFLOW_STEP_TYPE_CLICK = 4;
+  WORKFLOW_STEP_TYPE_SUBMIT = 5;
+  WORKFLOW_STEP_TYPE_READ_VIEW = 6;
+}
+
+enum WorkflowKind {
+  WORKFLOW_KIND_UNSPECIFIED = 0;
+  WORKFLOW_KIND_READ = 1;
+  WORKFLOW_KIND_WRITE = 2;
+  WORKFLOW_KIND_MIXED = 3;
+}
+
+enum OutcomeSignalKind {
+  OUTCOME_SIGNAL_KIND_UNSPECIFIED = 0;
+  OUTCOME_SIGNAL_KIND_URL_CHANGE = 1;
+  OUTCOME_SIGNAL_KIND_ELEMENT_APPEARS = 2;
+  OUTCOME_SIGNAL_KIND_TEXT_CONTAINS = 3;
+  OUTCOME_SIGNAL_KIND_ELEMENT_DISAPPEARS = 4;
+}
+
+// ─── Core Building Blocks ────────────────────────────────────────────
+
+message ConfidenceDef {
+  double score = 1;
+  ConfidenceLevel level = 2;
+  string rationale = 3;
+}
+
+message SignalDef {
+  SignalKind kind = 1;
+  string value = 2;
+  double weight = 3;
+}
+
+message ProvenanceDef {
+  ProvenanceSource source = 1;
+  string session_id = 2;
+  repeated string trace_ids = 3;
+  repeated string annotation_ids = 4;
+  string captured_at = 5;
+}
+
+message LocatorStrategyDef {
+  LocatorKind kind = 1;
+  string value = 2;
+  double confidence = 3;
+}
+
+message LocatorSetDef {
+  string id = 1;
+  repeated LocatorStrategyDef strategies = 2;
+}
+
+// ─── Entity ──────────────────────────────────────────────────────────
+
+message EntityDef {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  string semantic_name = 4;
+  repeated SignalDef signals = 5;
+  ConfidenceDef confidence = 6;
+  ProvenanceDef provenance = 7;
+}
+
+// ─── Action ──────────────────────────────────────────────────────────
+
+message ActionInputDef {
+  string name = 1;
+  ActionInputType type = 2;
+  bool required = 3;
+  string description = 4;
+  repeated string enum_values = 5;
+}
+
+message GuardConditionDef {
+  string id = 1;
+  string description = 2;
+  repeated string input_refs = 3;
+  string state_ref = 4;
+  string expected_value = 5;
+  string page_id = 6;
+}
+
+message ErrorDef {
+  string code = 1;
+  string message_template = 2;
+  ErrorClassification classification = 3;
+}
+
+message ActionDef {
+  string id = 1;
+  string entity_id = 2;
+  string name = 3;
+  string description = 4;
+  string semantic_name = 5;
+  string interaction_kind = 6;
+  string text_content = 7;
+  repeated ActionInputDef inputs = 8;
+  repeated string required_input_refs = 9;
+  repeated GuardConditionDef preconditions = 10;
+  repeated GuardConditionDef postconditions = 11;
+  string recipe_ref = 12;
+  LocatorSetDef locator_set = 13;
+  repeated string errors = 14;
+  ConfidenceDef confidence = 15;
+  ProvenanceDef provenance = 16;
+}
+
+// ─── View ────────────────────────────────────────────────────────────
+
+message ViewFieldDef {
+  string name = 1;
+  ViewFieldType type = 2;
+  string description = 3;
+  LocatorStrategyDef locator = 4;
+}
+
+message ViewDef {
+  string id = 1;
+  string name = 2;
+  string semantic_name = 3;
+  string description = 4;
+  string entity_id = 5;
+  bool is_list = 6;
+  bool is_dynamic = 7;
+  LocatorSetDef container_locator = 8;
+  LocatorStrategyDef item_container = 9;
+  repeated ViewFieldDef fields = 10;
+  ConfidenceDef confidence = 11;
+  ProvenanceDef provenance = 12;
+}
+
+// ─── Page ────────────────────────────────────────────────────────────
+
+message StateSignal {
+  StateSignalKind kind = 1;
+  string value = 2;
+  string selector = 3;
+  double weight = 4;
+}
+
+message PageDef {
+  string id = 1;
+  string route_pattern = 2;
+  string name = 3;
+  string description = 4;
+  repeated string view_ids = 5;
+  repeated string action_ids = 6;
+  repeated StateSignal state_signals = 7;
+}
+
+// ─── Composite Action ────────────────────────────────────────────────
+
+message CompositeActionDef {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  repeated string step_action_ids = 4;
+  repeated ActionInputDef inputs = 5;
+  ProvenanceDef provenance = 6;
+}
+
+// ─── Workflow ────────────────────────────────────────────────────────
+
+message WorkflowStep {
+  WorkflowStepType type = 1;
+  string url = 2;
+  string action_id = 3;
+  string view_id = 4;
+  string input_param = 5;
+}
+
+message OutcomeSignal {
+  OutcomeSignalKind kind = 1;
+  string value = 2;
+  string selector = 3;
+}
+
+message WorkflowOutcomes {
+  OutcomeSignal success = 1;
+  OutcomeSignal failure = 2;
+}
+
+message WorkflowActionDef {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  WorkflowKind kind = 4;
+  repeated ActionInputDef inputs = 5;
+  repeated WorkflowStep steps = 6;
+  WorkflowOutcomes outcomes = 7;
+  ProvenanceDef provenance = 8;
+}
+
+// ─── Manifest Metadata ──────────────────────────────────────────────
+
+message ManifestMetadata {
+  string id = 1;
+  string site = 2;
+  string created_at = 3;
+  string updated_at = 4;
+}
+
+// ─── Top-Level Manifest ─────────────────────────────────────────────
+
+message BrowserWireManifest {
+  string contract_version = 1;
+  string manifest_version = 2;
+  ManifestMetadata metadata = 3;
+  string domain = 4;
+  string domain_description = 5;
+  repeated EntityDef entities = 6;
+  repeated ActionDef actions = 7;
+  repeated CompositeActionDef composite_actions = 8;
+  repeated ViewDef views = 9;
+  repeated PageDef pages = 10;
+  repeated WorkflowActionDef workflow_actions = 11;
+  repeated ErrorDef errors = 12;
+}

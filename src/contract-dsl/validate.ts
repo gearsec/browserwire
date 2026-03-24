@@ -576,13 +576,13 @@ function validateView(issues: ValidationIssue[], path: string, view: unknown): v
     });
   }
 
-  // Optional itemLocator (for lists)
-  if (view.itemLocator !== undefined && view.itemLocator !== null) {
-    const itemPath = `${path}.itemLocator`;
-    if (!isRecord(view.itemLocator)) {
+  // Optional itemContainer (for lists)
+  if (view.itemContainer !== undefined && view.itemContainer !== null) {
+    const itemPath = `${path}.itemContainer`;
+    if (!isRecord(view.itemContainer)) {
       addIssue(issues, "ERR_SCHEMA_TYPE", itemPath, "Expected locator strategy object.");
     } else {
-      if (!LOCATOR_KINDS.includes(view.itemLocator.kind as (typeof LOCATOR_KINDS)[number])) {
+      if (!LOCATOR_KINDS.includes(view.itemContainer.kind as (typeof LOCATOR_KINDS)[number])) {
         addIssue(
           issues,
           "ERR_ENUM_INVALID",
@@ -590,7 +590,7 @@ function validateView(issues: ValidationIssue[], path: string, view: unknown): v
           `Locator kind must be one of: ${LOCATOR_KINDS.join(", ")}.`
         );
       }
-      requireString(issues, itemPath, "value", view.itemLocator.value);
+      requireString(issues, itemPath, "value", view.itemContainer.value);
     }
   }
 

@@ -51,6 +51,8 @@ You will receive:
 - Every :param placeholder in a navigate URL MUST have a corresponding entry in inputs[] (e.g., /events/:id requires an input named "id")
 - Include ALL useful workflows — every action that a developer would want to call as an API should become a workflow
 - Skip cosmetic/utility actions that are not useful as APIs (e.g., toggle dark mode, expand sidebar, close modal, scroll to top)
+- CRITICAL: Only pair a view with a workflow if the view's description and fields match what the workflow produces. Do NOT reuse a view for a different purpose.
+- If no matching view exists for a read workflow, omit the workflow entirely.
 - URL: use routePattern from pages[]; replace :param with the input variable name
 
 ## Output format (JSON only, no prose)
@@ -279,7 +281,9 @@ export const synthesizeWorkflows = async (manifest) => {
     views: views.map((v) => ({
       id: v.id,
       name: v.semanticName || v.name,
-      isList: v.isList || false
+      description: v.description || "",
+      isList: v.isList || false,
+      fieldNames: (v.fields || []).map(f => f.name)
     })),
     compositeActions: compositeActions.map((ca) => ({
       name: ca.name,
