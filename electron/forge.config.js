@@ -10,14 +10,11 @@ export default {
     icon: "./electron/icons/icon",
     asar: true,
     ignore: [/electron\/ui\/src/, /electron\/ui\/build\.js/, /electron\/ui\/tsconfig/],
+    osxSign: {
+      identity: "-",
+    },
   },
   makers: [
-    {
-      name: "@electron-forge/maker-dmg",
-      config: {
-        format: "ULFO",
-      },
-    },
     {
       name: "@electron-forge/maker-zip",
       platforms: ["darwin"],
