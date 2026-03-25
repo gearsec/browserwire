@@ -82,6 +82,8 @@ const readEnvVars = () => {
   if (process.env.BROWSERWIRE_LLM_MODEL) env.llmModel = process.env.BROWSERWIRE_LLM_MODEL;
   if (process.env.BROWSERWIRE_LLM_BASE_URL) env.llmBaseUrl = process.env.BROWSERWIRE_LLM_BASE_URL;
   if (process.env.BROWSERWIRE_TELEMETRY) env.telemetryEnabled = process.env.BROWSERWIRE_TELEMETRY === "true";
+  if (process.env.LANGSMITH_API_KEY) env.langsmithApiKey = process.env.LANGSMITH_API_KEY;
+  if (process.env.LANGSMITH_PROJECT) env.langsmithProject = process.env.LANGSMITH_PROJECT;
   return env;
 };
 

@@ -29,6 +29,9 @@ export function SettingsPanel() {
   const [baseUrl, setBaseUrl] = useState("");
   const [port, setPort] = useState("8787");
   const [hasApiKey, setHasApiKey] = useState(false);
+  const [langsmithApiKey, setLangsmithApiKey] = useState("");
+  const [langsmithProject, setLangsmithProject] = useState("");
+  const [hasLangsmithKey, setHasLangsmithKey] = useState(false);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<{ text: string; level: string }>({ text: "", level: "" });
   const [providerDefaults, setProviderDefaults] = useState(FALLBACK_DEFAULTS);
@@ -40,6 +43,8 @@ export function SettingsPanel() {
       if (settings.baseUrl) setBaseUrl(settings.baseUrl);
       if (settings.port) setPort(String(settings.port));
       setHasApiKey(settings.hasApiKey);
+      setHasLangsmithKey(settings.hasLangsmithKey || false);
+      if (settings.langsmithProject) setLangsmithProject(settings.langsmithProject);
       if (settings.providerDefaults) setProviderDefaults(settings.providerDefaults);
 
       if (settings.llmConfigured) {
@@ -65,6 +70,8 @@ export function SettingsPanel() {
         model: model || undefined,
         baseUrl: baseUrl || undefined,
         port: port ? Number(port) : undefined,
+        langsmithApiKey: langsmithApiKey || undefined,
+        langsmithProject: langsmithProject || undefined,
       };
 
       const result = await window.browserwire.saveSettings(payload);
@@ -73,6 +80,10 @@ export function SettingsPanel() {
         if (apiKey) {
           setApiKey("");
           setHasApiKey(true);
+        }
+        if (langsmithApiKey) {
+          setLangsmithApiKey("");
+          setHasLangsmithKey(true);
         }
 
         if (result.llmConfigured) {
@@ -88,7 +99,7 @@ export function SettingsPanel() {
     } finally {
       setSaving(false);
     }
-  }, [provider, apiKey, model, baseUrl, port]);
+  }, [provider, apiKey, model, baseUrl, port, langsmithApiKey, langsmithProject]);
 
   return (
     <ScrollArea className="flex-1">
@@ -170,6 +181,39 @@ export function SettingsPanel() {
           />
           <p className="text-xs text-muted-foreground">
             Restart required after changing the port.
+          </p>
+        </div>
+
+        <Separator className="my-1" />
+
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+          Telemetry (LangSmith)
+        </h3>
+
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="langsmith-api-key" className="text-muted-foreground">LangSmith API Key</Label>
+          <Input
+            id="langsmith-api-key"
+            type="password"
+            placeholder={hasLangsmithKey ? "Key saved (enter new to replace)" : "Enter LangSmith API key..."}
+            value={langsmithApiKey}
+            onChange={(e) => setLangsmithApiKey(e.target.value)}
+          />
+          {hasLangsmithKey && !langsmithApiKey && (
+            <p className="text-xs text-muted-foreground">Saved securely in Keychain</p>
+          )}
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="langsmith-project" className="text-muted-foreground">LangSmith Project</Label>
+          <Input
+            id="langsmith-project"
+            placeholder="browserwire"
+            value={langsmithProject}
+            onChange={(e) => setLangsmithProject(e.target.value)}
+          />
+          <p className="text-xs text-muted-foreground">
+            Optional. Leave blank for default project.
           </p>
         </div>
 

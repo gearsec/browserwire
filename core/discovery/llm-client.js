@@ -82,7 +82,7 @@ const callOpenAIVision = async (url, systemPrompt, screenshotBase64, textContent
         ]
       }
     ],
-    temperature: 0.2,
+    temperature: 0.3,
     response_format: { type: "json_object" }
   };
 
@@ -247,7 +247,7 @@ const callOpenAICompatible = async (url, systemPrompt, userMessage, config) => {
       { role: "system", content: systemPrompt },
       { role: "user", content: userMessage }
     ],
-    temperature: 0.2,
+    temperature: 0.3,
     response_format: { type: "json_object" }
   };
 

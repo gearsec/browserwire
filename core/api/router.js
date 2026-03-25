@@ -7,7 +7,7 @@
 
 import { generateOpenApiSpec, collectReadViews } from "./openapi.js";
 import { swaggerUiHtml } from "./swagger-ui.js";
-import { buildLookups, resolveWorkflowSteps, sanitize, toViewConfig } from "../workflow-resolver.js";
+import { buildLookups, resolveWorkflowSteps, resolvePagination, sanitize, toViewConfig } from "../workflow-resolver.js";
 
 const EXECUTE_WORKFLOW = "execute_workflow";
 
@@ -82,10 +82,10 @@ const landingPageHtml = (sites, host, port) => {
 /**
  * Create the HTTP request handler.
  *
- * @param {{ getManifestBySlug: (slug: string) => object|null, listSites: () => Array, bridge: object, getSocket: () => WebSocket|null, host: string, port: number }} deps
+ * @param {{ getManifestBySlug: (slug: string) => object|null, listSites: () => Array, bridge: object, host: string, port: number }} deps
  * @returns {(req: import("http").IncomingMessage, res: import("http").ServerResponse) => void}
  */
-export const createHttpHandler = ({ getManifestBySlug, listSites, bridge, getSocket, host, port }) => {
+export const createHttpHandler = ({ getManifestBySlug, listSites, bridge, host, port }) => {
   return async (req, res) => {
     // CORS preflight
     if (req.method === "OPTIONS") {
@@ -100,11 +100,7 @@ export const createHttpHandler = ({ getManifestBySlug, listSites, bridge, getSoc
     // ── System routes ──
 
     if (path === "/api/health" && req.method === "GET") {
-      const socket = getSocket();
-      return json(res, 200, {
-        ok: true,
-        extensionConnected: socket !== null && socket.readyState === 1
-      });
+      return json(res, 200, { ok: true });
     }
 
     if (path === "/api/sites" && req.method === "GET") {
@@ -147,12 +143,6 @@ export const createHttpHandler = ({ getManifestBySlug, listSites, bridge, getSoc
         return html(res, 200, swaggerUiHtml(`/api/sites/${slug}/openapi.json`));
       }
 
-      // Routes below require an extension connection
-      const socket = getSocket();
-      if (!socket || socket.readyState !== 1) {
-        return json(res, 503, { ok: false, error: "Extension not connected" });
-      }
-
       const lookups = buildLookups(manifest);
 
       // POST /api/sites/:slug/workflows/:name
@@ -164,12 +154,13 @@ export const createHttpHandler = ({ getManifestBySlug, listSites, bridge, getSoc
         let body = {};
         try { body = await readBody(req); } catch { return json(res, 400, { ok: false, error: "Invalid JSON body" }); }
 
-        const steps = resolveWorkflowSteps(workflow, lookups.viewMap, lookups.endpointMap);
-        if (steps.error) return json(res, 400, { ok: false, error: steps.error });
+        const resolved = resolveWorkflowSteps(workflow, lookups.viewMap, lookups.endpointMap);
+        if (resolved.error) return json(res, 400, { ok: false, error: resolved.error });
 
         try {
-          const result = await bridge.sendAndAwait(socket, EXECUTE_WORKFLOW, {
-            steps, outcomes: workflow.outcomes || {}, inputs: body, origin
+          const result = await bridge.sendAndAwait(null, EXECUTE_WORKFLOW, {
+            steps: resolved.steps, pagination: resolved.pagination,
+            outcomes: workflow.outcomes || {}, inputs: body, origin
           }, 60000);
           return json(res, 200, result);
         } catch (err) {
@@ -237,9 +228,17 @@ export const createHttpHandler = ({ getManifestBySlug, listSites, bridge, getSoc
           { type: "read_view", viewConfig }
         ];
 
+        // Find the read workflow for this view and resolve its pagination
+        const readWorkflow = (page.workflows || []).find((w) =>
+          w.kind === "read" && w.steps?.some((s) => s.view_name === match.view.name)
+        );
+        const pagination = readWorkflow?.pagination
+          ? resolvePagination(readWorkflow.pagination, lookups.endpointMap)
+          : undefined;
+
         try {
-          const result = await bridge.sendAndAwait(socket, EXECUTE_WORKFLOW, {
-            steps, outcomes: {}, inputs: params, origin
+          const result = await bridge.sendAndAwait(null, EXECUTE_WORKFLOW, {
+            steps, pagination, outcomes: {}, inputs: params, origin
           }, 30000);
           return json(res, 200, result);
         } catch (err) {

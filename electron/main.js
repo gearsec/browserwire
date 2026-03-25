@@ -18,11 +18,16 @@ import { ManifestStore } from "../core/manifest-store.js";
 import { collectReadViews } from "../core/api/openapi.js";
 import { createHttpHandler } from "../core/api/router.js";
 import { createSessionBridge } from "./capture/session-bridge.js";
-import { createElectronBridge, executeWorkflowSteps } from "./capture/workflow-executor.js";
+import { createPlaywrightBridge, executeWorkflowSteps } from "./capture/workflow-executor.js";
 import { buildLookups, resolveWorkflowSteps, sanitize } from "../core/workflow-resolver.js";
 import { initUpdater } from "./updater.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// ─── CDP for Playwright ──────────────────────────────────────────────────────
+
+const CDP_PORT = 9223;
+app.commandLine.appendSwitch("remote-debugging-port", String(CDP_PORT));
 
 // ─── Global State ────────────────────────────────────────────────────────────
 
@@ -125,18 +130,37 @@ const startApp = async () => {
   // LLM config is only needed when discovery actually runs.
   let config = loadConfig({}, { strict: false });
 
-  // Decrypt API key from safeStorage if available
+  // Decrypt API keys from safeStorage if available
   const fileConfig = readConfigFile();
+  const overrides = {};
+
   if (fileConfig.llmApiKeyEncrypted && safeStorage.isEncryptionAvailable()) {
     try {
-      const decrypted = safeStorage.decryptString(
+      overrides.llmApiKey = safeStorage.decryptString(
         Buffer.from(fileConfig.llmApiKeyEncrypted, "base64")
       );
-      config = reloadConfig({ llmApiKey: decrypted });
     } catch (err) {
-      console.warn("[browserwire] Failed to decrypt API key:", err.message);
+      console.warn("[browserwire] Failed to decrypt LLM API key:", err.message);
     }
   }
+
+  if (fileConfig.langsmithApiKeyEncrypted && safeStorage.isEncryptionAvailable()) {
+    try {
+      overrides.langsmithApiKey = safeStorage.decryptString(
+        Buffer.from(fileConfig.langsmithApiKeyEncrypted, "base64")
+      );
+    } catch (err) {
+      console.warn("[browserwire] Failed to decrypt LangSmith API key:", err.message);
+    }
+  }
+
+  if (Object.keys(overrides).length > 0) {
+    config = reloadConfig(overrides);
+  }
+
+  // Initialize telemetry (no-op if no LangSmith key configured)
+  const { initTelemetry } = await import("../core/telemetry.js");
+  await initTelemetry();
 
   const host = config.host || "127.0.0.1";
   const port = config.port || 8787;
@@ -150,13 +174,12 @@ const startApp = async () => {
 
   // Start HTTP server (REST API only, no WS)
   // Use Electron bridge that executes workflows directly via hidden BrowserWindow
-  const bridge = createElectronBridge();
+  const bridge = createPlaywrightBridge({ cdpPort: CDP_PORT });
 
   const httpHandler = createHttpHandler({
     getManifestBySlug: (slug) => sessionManager.getManifestBySlug(slug),
     listSites: () => sessionManager.listSites({ collectReadViews }),
     bridge,
-    getSocket: () => ({ readyState: 1 }), // Fake socket — Electron bridge doesn't need a real one
     host,
     port,
   });
@@ -397,10 +420,12 @@ const wireIPC = () => {
       providerDefaults: PROVIDER_DEFAULTS,
       port: activePort,
       portOk,
+      hasLangsmithKey: !!(cfg.langsmithApiKey || file.langsmithApiKeyEncrypted),
+      langsmithProject: file.langsmithProject || "",
     };
   });
 
-  ipcMain.handle("browserwire:save-settings", (_event, settings) => {
+  ipcMain.handle("browserwire:save-settings", async (_event, settings) => {
     try {
       const fileFields = {};
 
@@ -409,7 +434,7 @@ const wireIPC = () => {
       if (settings.baseUrl !== undefined) fileFields.llmBaseUrl = settings.baseUrl || undefined;
       if (settings.port !== undefined) fileFields.port = settings.port ? Number(settings.port) : undefined;
 
-      // Encrypt and store API key
+      // Encrypt and store LLM API key
       if (settings.apiKey) {
         if (safeStorage.isEncryptionAvailable()) {
           const encrypted = safeStorage.encryptString(settings.apiKey);
@@ -422,14 +447,28 @@ const wireIPC = () => {
         }
       }
 
+      // Encrypt and store LangSmith API key
+      if (settings.langsmithApiKey) {
+        if (safeStorage.isEncryptionAvailable()) {
+          const encrypted = safeStorage.encryptString(settings.langsmithApiKey);
+          fileFields.langsmithApiKeyEncrypted = encrypted.toString("base64");
+          fileFields.langsmithApiKey = undefined;
+        } else {
+          fileFields.langsmithApiKey = settings.langsmithApiKey;
+        }
+      }
+      if (settings.langsmithProject !== undefined) {
+        fileFields.langsmithProject = settings.langsmithProject || undefined;
+      }
+
       writeConfigFile(fileFields);
 
-      // Reload config with decrypted key in memory
+      // Reload config with decrypted keys in memory
       const overrides = {};
       if (settings.apiKey) {
         overrides.llmApiKey = settings.apiKey;
       } else {
-        // Preserve existing decrypted key
+        // Preserve existing decrypted LLM key
         const existing = readConfigFile();
         if (existing.llmApiKeyEncrypted && safeStorage.isEncryptionAvailable()) {
           try {
@@ -440,7 +479,27 @@ const wireIPC = () => {
         }
       }
 
+      // Decrypt LangSmith key for in-memory config
+      if (settings.langsmithApiKey) {
+        overrides.langsmithApiKey = settings.langsmithApiKey;
+      } else {
+        const existing = readConfigFile();
+        if (existing.langsmithApiKeyEncrypted && safeStorage.isEncryptionAvailable()) {
+          try {
+            overrides.langsmithApiKey = safeStorage.decryptString(
+              Buffer.from(existing.langsmithApiKeyEncrypted, "base64")
+            );
+          } catch { /* ignore */ }
+        }
+      }
+
       const newConfig = reloadConfig(overrides);
+
+      // Re-initialize telemetry so new LangSmith key takes effect immediately
+      if (overrides.langsmithApiKey) {
+        const { initTelemetry } = await import("../core/telemetry.js");
+        await initTelemetry();
+      }
 
       // Notify main window of config change
       if (mainWindow && !mainWindow.isDestroyed()) {
@@ -473,15 +532,16 @@ const wireIPC = () => {
     const workflow = lookups.workflowMap.get(sanitize(workflowName));
     if (!workflow) return { ok: false, error: `Workflow '${workflowName}' not found` };
 
-    const steps = resolveWorkflowSteps(workflow, lookups.viewMap, lookups.endpointMap);
-    if (steps.error) return { ok: false, error: steps.error };
+    const resolved = resolveWorkflowSteps(workflow, lookups.viewMap, lookups.endpointMap);
+    if (resolved.error) return { ok: false, error: resolved.error };
 
     // Notify renderer: execution starting
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("browserwire:execution-state", { running: true });
     }
 
-    // Open a visible window so the user can watch the workflow execute
+    // Open a visible Electron BrowserWindow controlled via Playwright CDP
+    const { chromium } = await import("playwright");
     const execWin = new BrowserWindow({
       width: 1280,
       height: 800,
@@ -495,12 +555,25 @@ const wireIPC = () => {
     });
 
     try {
-      const result = await executeWorkflowSteps(execWin.webContents, {
-        steps, outcomes: workflow.outcomes || {}, inputs: inputs || {}, origin,
+      // Navigate the Electron window to the origin
+      await execWin.loadURL(origin);
+
+      // Connect Playwright to Electron via CDP and find this page
+      const browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
+      const allPages = browser.contexts().flatMap((c) => c.pages());
+      const page = allPages.find((p) => p.url().startsWith(origin)) || allPages[allPages.length - 1];
+
+      if (!page) {
+        return { ok: false, error: "Could not find execution page via CDP" };
+      }
+
+      const result = await executeWorkflowSteps(page, {
+        steps: resolved.steps, pagination: resolved.pagination,
+        outcomes: workflow.outcomes || {}, inputs: inputs || {}, origin,
       });
       return result;
     } catch (err) {
-      return { ok: false, error: "ERR_WORKFLOW_FAILED", message: err.message };
+      return { ok: false, error: err.message || "Workflow execution failed" };
     } finally {
       execWin.destroy();
 

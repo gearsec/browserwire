@@ -114,8 +114,28 @@ export class ElectronBrowser {
       })();
     `);
 
-    this.page = wc;
-    return wc;
+    // Wrap webContents with an evaluate() method compatible with Playwright's
+    // page.evaluate(fn, arg) API.  testing.js calls browser.page.evaluate()
+    // directly — Playwright Pages have this natively, but webContents only has
+    // executeJavaScript(string).  The wrapper serializes fn+arg into an IIFE.
+    this.page = new Proxy(wc, {
+      get(target, prop) {
+        if (prop === "evaluate") {
+          return async (fn, arg) => {
+            const script = arg !== undefined
+              ? `(${fn.toString()})(${JSON.stringify(arg)})`
+              : `(${fn.toString()})()`;
+            return target.executeJavaScript(script);
+          };
+        }
+        const value = target[prop];
+        if (typeof value === "function") {
+          return value.bind(target);
+        }
+        return value;
+      },
+    });
+    return this.page;
   }
 
   /**

@@ -1,110 +1,15 @@
 /**
  * page-executor.js — Self-contained page functions for workflow execution.
- * Extracted from extension/background.js. Injected into page context via executeJavaScript.
+ *
+ * PAGE_READ_VIEW and PAGE_EVALUATE_OUTCOME run inside page context via
+ * Playwright's page.evaluate(). Actions (click, fill, select) are handled
+ * by Playwright's native locator APIs in workflow-executor.js.
  */
-
-const PAGE_EXECUTE_ACTION = (payload) => {
-  const { strategies, interactionKind, inputs } = payload;
-
-  const isVisible = (el) => {
-    if (!(el instanceof HTMLElement)) return false;
-    const s = window.getComputedStyle(el);
-    if (s.display === "none" || s.visibility === "hidden") return false;
-    const r = el.getBoundingClientRect();
-    return r.width > 0 && r.height > 0;
-  };
-
-  const tryCSS = (v) => { const m = document.querySelectorAll(v); if (m.length === 1) return m[0]; for (const el of m) { if (isVisible(el)) return el; } return null; };
-
-  const tryXPath = (v) => {
-    const x = v.startsWith("/body") ? `/html${v}` : v;
-    const r = document.evaluate(x, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-    if (r.snapshotLength === 1) return r.snapshotItem(0);
-    for (let i = 0; i < r.snapshotLength; i++) { const el = r.snapshotItem(i); if (isVisible(el)) return el; }
-    return null;
-  };
-
-  const tryAttr = (v) => {
-    const ci = v.indexOf(":");
-    if (ci === -1) return null;
-    const a = v.slice(0, ci), av = v.slice(ci + 1);
-    try {
-      const m = document.querySelectorAll(`[${a}="${CSS.escape(av)}"]`);
-      if (m.length === 1) return m[0];
-      for (const el of m) { if (isVisible(el)) return el; }
-    } catch { /* invalid selector */ }
-    return null;
-  };
-
-  const tryRoleName = (v) => {
-    const match = v.match(/^(\w+)\s+"(.+)"$/);
-    if (!match) return null;
-    const [, role, name] = match;
-    const IMPLICIT = { button:"button",a:"link",nav:"navigation",footer:"contentinfo",header:"banner",main:"main",select:"combobox",textarea:"textbox" };
-    let found = null, count = 0;
-    for (const el of document.querySelectorAll("*")) {
-      const r = el.getAttribute("role") || IMPLICIT[el.tagName.toLowerCase()] || (el.tagName.toLowerCase() === "input" ? "textbox" : null);
-      if (r !== role) continue;
-      const n = el.getAttribute("aria-label") || el.getAttribute("title") || el.getAttribute("alt") || el.textContent?.trim().slice(0,100) || "";
-      if (n === name) { found = el; count++; if (count > 1) return null; }
-    }
-    return found;
-  };
-
-  const tryText = (v) => {
-    const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, { acceptNode(n) { return (n.textContent||"").trim() === v ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT; } });
-    const t = w.nextNode(); if (!t) return null; if (w.nextNode()) return null;
-    return t.parentElement;
-  };
-
-  const sorted = [...(strategies || [])].sort((a, b) => b.confidence - a.confidence);
-  let element = null, usedStrategy = null;
-
-  for (const s of sorted) {
-    let el = null;
-    try {
-      if (s.kind === "css" || s.kind === "dom_path") el = tryCSS(s.value);
-      else if (s.kind === "xpath") el = tryXPath(s.value);
-      else if (s.kind === "attribute") el = tryAttr(s.value);
-      else if (s.kind === "role_name") el = tryRoleName(s.value);
-      else if (s.kind === "text") el = tryText(s.value);
-    } catch { /* skip */ }
-    if (el) { element = el; usedStrategy = { kind: s.kind, value: s.value }; break; }
-  }
-
-  if (!element) return { ok: false, error: "ERR_TARGET_NOT_FOUND", message: "No locator matched" };
-
-  const kind = (interactionKind || "click").toLowerCase();
-  if (kind === "click" || kind === "navigate") {
-    element.click();
-    return { ok: true, result: { action: "clicked" }, usedStrategy };
-  }
-  if (kind === "type") {
-    const text = inputs?.text || inputs?.value || "";
-    element.focus();
-    if ("value" in element) element.value = "";
-    for (const c of text) {
-      element.dispatchEvent(new KeyboardEvent("keydown", { key: c, bubbles: true }));
-      if ("value" in element) element.value += c;
-      element.dispatchEvent(new InputEvent("input", { data: c, inputType: "insertText", bubbles: true }));
-      element.dispatchEvent(new KeyboardEvent("keyup", { key: c, bubbles: true }));
-    }
-    element.dispatchEvent(new Event("change", { bubbles: true }));
-    return { ok: true, result: { action: "typed", length: text.length }, usedStrategy };
-  }
-  if (kind === "select") {
-    const val = inputs?.value || "";
-    if ("value" in element) { element.value = val; element.dispatchEvent(new Event("change", { bubbles: true })); }
-    return { ok: true, result: { action: "selected", value: val }, usedStrategy };
-  }
-  element.click();
-  return { ok: true, result: { action: "clicked" }, usedStrategy };
-};
 
 const PAGE_READ_VIEW = (payload) => {
   const { containerLocator, itemContainer, fields, isList } = payload;
 
-  // ── Locator helpers (same as PAGE_EXECUTE_ACTION) ──
+  // ── Locator helpers (used for container/field resolution in page context) ──
 
   const isVisible = (el) => {
     if (!(el instanceof HTMLElement)) return false;
