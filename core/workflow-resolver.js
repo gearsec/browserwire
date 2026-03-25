@@ -70,8 +70,23 @@ export const toViewConfig = (view) => {
 };
 
 /**
+ * Resolve pagination config: map endpoint name to concrete strategies.
+ */
+export const resolvePagination = (pagination, endpointMap) => {
+  if (!pagination) return undefined;
+  const result = { kind: pagination.kind };
+  if (pagination.endpoint_name) {
+    const endpoint = endpointMap.get(pagination.endpoint_name);
+    if (endpoint) {
+      result.strategies = buildStrategies(endpoint);
+    }
+  }
+  return result.strategies?.length > 0 || result.kind === "scroll" ? result : undefined;
+};
+
+/**
  * Resolve workflow steps: map endpoint/view names to concrete selectors.
- * Returns an array of resolved steps, or { error: string } on failure.
+ * Returns { steps, pagination? } or { error: string } on failure.
  */
 export const resolveWorkflowSteps = (workflow, viewMap, endpointMap) => {
   const resolved = [];
@@ -99,5 +114,7 @@ export const resolveWorkflowSteps = (workflow, viewMap, endpointMap) => {
       ...(step.input_param ? { inputParam: step.input_param } : {}),
     });
   }
-  return resolved;
+
+  const pagination = resolvePagination(workflow.pagination, endpointMap);
+  return { steps: resolved, ...(pagination ? { pagination } : {}) };
 };

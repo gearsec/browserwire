@@ -13,6 +13,7 @@ import { homedir } from "node:os";
 import { runDiscoveryAgent } from "./agent.js";
 import { runMergeAgent } from "./merge-agent.js";
 import { PlaywrightBrowser } from "./snapshot/playwright-browser.js";
+import { initTelemetry } from "../telemetry.js";  // still needed — sets LANGCHAIN_* env vars
 
 // ---------------------------------------------------------------------------
 // Trigger description helper (kept for logging)
@@ -75,6 +76,9 @@ export class DiscoverySession {
   }
 
   async _processSnapshot(payload) {
+    // Initialize LangSmith telemetry (no-op if already done or no key configured)
+    await initTelemetry();
+
     const snapshotNum = this._pendingSnapshots.length + 1;
     const snapshotId = payload.snapshotId || `snap_${snapshotNum}`;
     const trigger = payload.trigger || null;

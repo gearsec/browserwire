@@ -11,6 +11,7 @@
 
 import { z } from "zod";
 
+
 // ---------------------------------------------------------------------------
 // test_selector
 // ---------------------------------------------------------------------------
@@ -155,6 +156,78 @@ export const testViewExtraction = async (index, { container_selector, item_selec
     return { success: false, item_count: 0, sample_rows: [], errors: [`No items found within container. ${item_selector ? `Item selector "${item_selector}" matched 0 elements.` : "Container has no children."}`] };
   }
 
+  // Helper: resolve sibling-relative selectors (+ or ~ combinators)
+  // e.g. "+ tr > td.subtext > span.score" starts from the item element and
+  // navigates to its sibling, then queries within that sibling.
+  const resolveSiblingSelector = async (selector, itemRef) => {
+    try {
+      const rrwebIds = await browser.page.evaluate(({ sel, itemRrwebId }) => {
+        const mirror = window.__rrwebMirror;
+        const itemEl = mirror.getNode(itemRrwebId);
+        if (!itemEl) return [];
+
+        // Build a temporary wrapper approach: create a CSS selector that
+        // chains from the item. We use the item as the starting point.
+        // For "+ selector", we need the item's next sibling, then query within.
+        // For "~ selector", we need any following sibling.
+        let target = null;
+        const trimmed = sel.trimStart();
+
+        if (trimmed.startsWith("+")) {
+          // Adjacent sibling: get the remainder after "+"
+          const remainder = trimmed.slice(1).trimStart();
+          // Split into the sibling selector and the descendant part
+          // e.g. "tr > td.subtext > span.score" → sibling is next element, query "td.subtext > span.score" in it
+          // But we can also let the browser handle it by querying from the parent
+          // using :scope to reference the item
+          const parent = itemEl.parentElement;
+          if (parent) {
+            // Find the item's index among siblings, then use nth-child to scope
+            const siblings = Array.from(parent.children);
+            const idx = siblings.indexOf(itemEl);
+            if (idx >= 0 && idx < siblings.length - 1) {
+              // Query the remainder relative to the next sibling
+              const nextSibling = siblings[idx + 1];
+              // If remainder starts with a tag/selector, check if the sibling matches
+              // Then query descendants within it
+              // Simplest: use the full selector from parent context
+              // Build: itemEl + remainder as a CSS selector from parent scope
+              // But CSS doesn't let us scope to a specific child easily.
+              // Instead: navigate manually.
+              const parts = remainder.split(/\s*>\s*|\s+/);
+              // The first part might be a tag/class matching the sibling itself
+              const siblingSelector = parts[0];
+              if (nextSibling.matches(siblingSelector)) {
+                if (parts.length === 1) {
+                  target = nextSibling;
+                } else {
+                  // Query the rest within the sibling
+                  const restSelector = parts.slice(1).join(" > ");
+                  target = nextSibling.querySelector(restSelector);
+                }
+              }
+            }
+          }
+        }
+
+        if (!target) return [];
+        const id = mirror.getId(target);
+        return id > 0 ? [id] : [];
+      }, { sel: selector, itemRrwebId: _refToRrwebId(index, itemRef) });
+
+      const nodes = rrwebIds.map((id) => {
+        const ref = index.rrwebIdToRef.get(id);
+        return ref ? index.getNode(ref) : null;
+      }).filter(Boolean);
+
+      return { nodes };
+    } catch (e) {
+      return { nodes: [], error: `Sibling selector error: ${e.message}` };
+    }
+  };
+
+  const isSiblingSelector = (sel) => /^\s*[+~]/.test(sel);
+
   // 3. Extract fields from each item (sample first 5)
   const sampleRows = [];
   const fieldErrors = new Set();
@@ -163,7 +236,10 @@ export const testViewExtraction = async (index, { container_selector, item_selec
     const row = {};
 
     for (const field of fields) {
-      const fieldResult = await resolveSelector(field.selector, item.ref);
+      // Use sibling-aware resolution if selector starts with + or ~
+      const fieldResult = isSiblingSelector(field.selector)
+        ? await resolveSiblingSelector(field.selector, item.ref)
+        : await resolveSelector(field.selector, item.ref);
       if (fieldResult.error) {
         fieldErrors.add(`Invalid field selector "${field.selector}": ${fieldResult.error}`);
         continue;
@@ -200,7 +276,7 @@ export const testViewExtraction = async (index, { container_selector, item_selec
     }
   }
 
-  // If no assertions requested, return raw result (backward compat)
+  // If no assertions requested, return raw result
   if (!expected_first_item) {
     return {
       success: hasData && fieldErrors.size === 0,
@@ -296,6 +372,7 @@ const manifestViewSchema = z.object({
   description: z.string(),
   isList: z.boolean(),
   isDynamic: z.boolean().optional(),
+  item_schema: z.any().optional().describe("JSON Schema defining the structure of each extracted item"),
   fields: z.array(z.object({
     name: z.string(),
     type: z.enum(["string", "number", "boolean", "date"]),
@@ -337,6 +414,11 @@ const workflowOutcomeSignal = z.object({
   value: z.string(),
 });
 
+const workflowPaginationSchema = z.object({
+  kind: z.enum(["click_next", "scroll"]),
+  endpoint_name: z.string().optional().describe("For click_next: which endpoint to click for the next page"),
+});
+
 const manifestWorkflowSchema = z.object({
   name: z.string(),
   kind: z.enum(["read", "write", "mixed"]),
@@ -352,6 +434,7 @@ const manifestWorkflowSchema = z.object({
     success: workflowOutcomeSignal.optional(),
     failure: workflowOutcomeSignal.optional(),
   }).optional(),
+  pagination: workflowPaginationSchema.optional(),
 });
 
 const manifestSchema = z.object({
@@ -458,6 +541,268 @@ export const submitManifest = ({ manifest }) => {
   });
 
   return { valid: false, errors };
+};
+
+// ---------------------------------------------------------------------------
+// test_endpoint_grounding
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve a locator to rrweb IDs using the same paths as testSelector.
+ */
+const _resolveLocator = async (browser, { kind, value }) => {
+  return (kind === "css")
+    ? browser.querySelectorAll(browser.page, value)
+    : browser.locateElements(browser.page, kind, value);
+};
+
+/**
+ * Gather element metadata from reconstructed DOM for a set of rrweb IDs.
+ * Returns tag, type, role, text, visibility, and form ancestor rrwebId.
+ */
+const _getElementMeta = async (browser, rrwebIds) => {
+  return browser.page.evaluate((ids) => {
+    const mirror = window.__rrwebMirror;
+    return ids.map((id) => {
+      const el = mirror.getNode(id);
+      if (!el || el.nodeType !== 1) return null;
+      const cs = getComputedStyle(el);
+      // Walk up to find <form> ancestor
+      let formRrwebId = null;
+      let p = el.parentElement;
+      while (p) {
+        if (p.tagName === "FORM") { formRrwebId = mirror.getId(p); break; }
+        p = p.parentElement;
+      }
+      return {
+        rrwebId: id,
+        tag: el.tagName.toLowerCase(),
+        type: el.getAttribute("type"),
+        role: el.getAttribute("role"),
+        text: (el.textContent || "").trim().slice(0, 100),
+        visible: cs.display !== "none" && cs.visibility !== "hidden",
+        formRrwebId,
+      };
+    }).filter(Boolean);
+  }, rrwebIds);
+};
+
+/**
+ * Check if an element tag/role is interactive (clickable trigger).
+ */
+const INTERACTIVE_TAGS = new Set(["button", "a", "input", "select", "textarea", "summary"]);
+const INTERACTIVE_ROLES = new Set(["button", "link", "tab", "menuitem", "switch", "checkbox", "radio", "option"]);
+
+const _isInteractive = (meta) => {
+  if (!meta) return false;
+  return INTERACTIVE_TAGS.has(meta.tag) ||
+    INTERACTIVE_ROLES.has(meta.role) ||
+    meta.type === "submit";
+};
+
+/**
+ * Expected trigger tags/roles by endpoint kind.
+ */
+const TRIGGER_KIND_MATCH = {
+  click: { tags: ["button", "a", "div", "span", "img", "summary"], roles: ["button", "link", "tab", "menuitem", "switch"] },
+  form_submit: { tags: ["button", "input", "form"], roles: ["button"], types: ["submit"] },
+  navigation: { tags: ["a", "button"], roles: ["link", "button"] },
+  input: { tags: ["input", "textarea", "select"], roles: ["textbox", "combobox", "searchbox", "spinbutton"] },
+  toggle: { tags: ["button", "input", "div", "span"], roles: ["switch", "checkbox", "button"] },
+  select: { tags: ["select", "input", "div", "ul"], roles: ["combobox", "listbox", "radiogroup"] },
+};
+
+const _triggerKindMatches = (meta, endpointKind) => {
+  if (!meta) return true;
+  const expected = TRIGGER_KIND_MATCH[endpointKind];
+  if (!expected) return true; // unknown kind — skip check
+  if (expected.tags.includes(meta.tag)) return true;
+  if (expected.roles?.includes(meta.role)) return true;
+  if (expected.types?.includes(meta.type)) return true;
+  return false;
+};
+
+/**
+ * Expected input element types.
+ */
+const INPUT_TYPE_MATCH = {
+  text: { tags: ["input", "textarea"], types: ["text", "email", "password", "search", "tel", "url", "number", null] },
+  select: { tags: ["select"], roles: ["combobox", "listbox"] },
+  checkbox: { tags: ["input"], types: ["checkbox"], roles: ["checkbox"] },
+  radio: { tags: ["input"], types: ["radio"], roles: ["radio"] },
+  file: { tags: ["input"], types: ["file"] },
+  textarea: { tags: ["textarea"] },
+};
+
+const _inputTypeMatches = (meta, expectedType) => {
+  if (!meta) return false;
+  const expected = INPUT_TYPE_MATCH[expectedType];
+  if (!expected) return true; // unknown type — skip check
+  if (expected.tags?.includes(meta.tag)) {
+    // For tags that need further type checking (input)
+    if (meta.tag === "input" && expected.types) {
+      return expected.types.includes(meta.type);
+    }
+    return true;
+  }
+  if (expected.roles?.includes(meta.role)) return true;
+  return false;
+};
+
+/**
+ * Structurally validate an endpoint's locators against the rrweb snapshot.
+ *
+ * Checks: trigger resolves, kind matches, inputs resolve, input types match,
+ * form coherence (trigger + inputs in same <form>).
+ *
+ * @param {import('../snapshot/snapshot-index.js').SnapshotIndex} index
+ * @param {{ trigger_locator: object, endpoint_kind: string, inputs?: Array, expected_trigger_text?: string }} params
+ * @param {import('../snapshot/playwright-browser.js').PlaywrightBrowser} browser
+ */
+export const testEndpointGrounding = async (index, { trigger_locator, endpoint_kind, inputs, expected_trigger_text }, browser) => {
+  const failures = [];
+  const warnings = [];
+
+  // --- Resolve trigger ---
+  let triggerMeta = null;
+  try {
+    const triggerIds = await _resolveLocator(browser, trigger_locator);
+    if (triggerIds.length === 0) {
+      failures.push({ check: "trigger_not_found", locator: trigger_locator });
+    } else if (triggerIds.length > 1) {
+      warnings.push(`Trigger locator matched ${triggerIds.length} elements, using first`);
+    }
+
+    if (triggerIds.length > 0) {
+      const metas = await _getElementMeta(browser, [triggerIds[0]]);
+      triggerMeta = metas[0] || null;
+    }
+  } catch (e) {
+    failures.push({ check: "trigger_error", message: e.message });
+  }
+
+  let triggerResult = null;
+  if (triggerMeta) {
+    const ref = index.rrwebIdToRef.get(triggerMeta.rrwebId) || null;
+    triggerResult = {
+      found: true,
+      tag: triggerMeta.tag,
+      text: triggerMeta.text,
+      ref,
+      visible: triggerMeta.visible,
+      interactive: _isInteractive(triggerMeta),
+    };
+
+    if (!triggerMeta.visible) {
+      failures.push({ check: "trigger_not_visible" });
+    }
+    if (!_isInteractive(triggerMeta)) {
+      warnings.push(`Trigger element <${triggerMeta.tag}> may not be interactive`);
+    }
+    if (!_triggerKindMatches(triggerMeta, endpoint_kind)) {
+      failures.push({
+        check: "trigger_kind_mismatch",
+        endpoint_kind,
+        actual_tag: triggerMeta.tag,
+        actual_role: triggerMeta.role,
+      });
+    }
+  }
+
+  // --- Resolve inputs ---
+  const inputResults = [];
+  const inputFormIds = [];
+
+  for (const input of inputs || []) {
+    const { name, locator, expected_type } = input;
+    try {
+      const ids = await _resolveLocator(browser, locator);
+      if (ids.length === 0) {
+        failures.push({ check: "input_not_found", input: name, locator });
+        inputResults.push({ name, found: false });
+        continue;
+      }
+
+      const metas = await _getElementMeta(browser, [ids[0]]);
+      const meta = metas[0];
+      if (!meta) {
+        failures.push({ check: "input_not_found", input: name });
+        inputResults.push({ name, found: false });
+        continue;
+      }
+
+      const ref = index.rrwebIdToRef.get(meta.rrwebId) || null;
+      const typeMatched = expected_type ? _inputTypeMatches(meta, expected_type) : true;
+      if (expected_type && !typeMatched) {
+        failures.push({
+          check: "input_type_mismatch",
+          input: name,
+          expected: expected_type,
+          actual: meta.tag + (meta.type ? `[type=${meta.type}]` : ""),
+        });
+      }
+
+      inputFormIds.push(meta.formRrwebId);
+      inputResults.push({
+        name,
+        found: true,
+        tag: meta.tag,
+        inputType: meta.type || meta.tag,
+        ref,
+        matched_type: typeMatched,
+      });
+    } catch (e) {
+      failures.push({ check: "input_error", input: name, message: e.message });
+      inputResults.push({ name, found: false });
+    }
+  }
+
+  // --- Form coherence ---
+  let formCoherence = true;
+  if (endpoint_kind === "form_submit" && triggerMeta && inputFormIds.length > 0) {
+    const triggerFormId = triggerMeta.formRrwebId;
+    for (let i = 0; i < inputFormIds.length; i++) {
+      const inputFormId = inputFormIds[i];
+      if (triggerFormId !== inputFormId) {
+        formCoherence = false;
+        const inputName = inputResults[i]?.name || `input[${i}]`;
+        failures.push({
+          check: "form_coherence",
+          message: `trigger and input '${inputName}' not in same form`,
+        });
+      }
+    }
+  }
+
+  // --- Assertion: expected_trigger_text ---
+  if (expected_trigger_text && triggerMeta) {
+    if (!assertContains(triggerMeta.text, expected_trigger_text)) {
+      failures.push({
+        check: "trigger_text_mismatch",
+        expected: expected_trigger_text,
+        actual: triggerMeta.text,
+      });
+    }
+  }
+
+  // --- Return ---
+  if (expected_trigger_text != null) {
+    // Assertion mode
+    return {
+      pass: failures.length === 0,
+      ...(failures.length > 0 ? { failures } : {}),
+      ...(warnings.length > 0 ? { warnings } : {}),
+    };
+  }
+
+  // Raw mode
+  return {
+    trigger: triggerResult || { found: false },
+    inputs: inputResults,
+    form_coherence: formCoherence,
+    ...(warnings.length > 0 ? { warnings } : {}),
+    ...(failures.length > 0 ? { errors: failures } : {}),
+  };
 };
 
 export { manifestSchema, manifestViewSchema, manifestEndpointSchema, manifestWorkflowSchema };

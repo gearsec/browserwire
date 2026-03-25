@@ -119,17 +119,16 @@ export const getPageRegions = (index) => {
 
 /**
  * Pick relevant attributes for field candidate output.
- * Includes class, data-*, aria-*, href, src — omits style, event handlers, etc.
+ * Includes all attributes except known noise (style, event handlers, empty flags).
+ * Custom elements like shreddit-post store data in attributes (comment-count, score, etc.)
+ * so we surface everything that looks like extractable data.
  */
 const pickRelevantAttrs = (attributes) => {
   const result = {};
   for (const [key, val] of Object.entries(attributes)) {
-    if (
-      key === "class" || key === "href" || key === "src" || key === "alt" ||
-      key.startsWith("data-") || key.startsWith("aria-")
-    ) {
-      result[key] = typeof val === "string" ? val.slice(0, 200) : val;
-    }
+    if (key === "style" || key.startsWith("on")) continue;
+    if (val === "" || val === true) continue;
+    result[key] = typeof val === "string" ? val.slice(0, 200) : val;
   }
   return result;
 };

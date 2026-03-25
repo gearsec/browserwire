@@ -1,17 +1,16 @@
 /**
- * ai-provider.js — Maps BrowserWire config to a Vercel AI SDK model instance.
+ * ai-provider.js — Maps BrowserWire config to a LangChain ChatModel instance.
  *
- * Uses the centralized config singleton (cli/config.js) to resolve the
- * correct provider + model for use with `generateText()`.
+ * Uses the centralized config singleton to resolve the correct provider + model.
  */
 
-import { createOpenAI } from "@ai-sdk/openai";
-import { createAnthropic } from "@ai-sdk/anthropic";
-import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import { ChatOpenAI } from "@langchain/openai";
+import { ChatAnthropic } from "@langchain/anthropic";
+import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { getConfig } from "../config.js";
 
 /**
- * Return a Vercel AI SDK model instance based on the current BrowserWire config.
+ * Return a LangChain ChatModel instance based on the current BrowserWire config.
  * Returns null if no LLM provider is configured.
  */
 export const getModel = () => {
@@ -20,26 +19,34 @@ export const getModel = () => {
 
   switch (cfg.llmProvider) {
     case "openai":
-      return createOpenAI({
+      return new ChatOpenAI({
+        model: cfg.llmModel,
         apiKey: cfg.llmApiKey,
-        ...(cfg.llmBaseUrl ? { baseURL: cfg.llmBaseUrl } : {})
-      })(cfg.llmModel);
+        temperature: 0.3,
+        ...(cfg.llmBaseUrl ? { configuration: { baseURL: cfg.llmBaseUrl } } : {}),
+      });
 
     case "anthropic":
-      return createAnthropic({
-        apiKey: cfg.llmApiKey
-      })(cfg.llmModel);
+      return new ChatAnthropic({
+        model: cfg.llmModel,
+        apiKey: cfg.llmApiKey,
+        temperature: 0.3,
+      });
 
     case "gemini":
-      return createGoogleGenerativeAI({
-        apiKey: cfg.llmApiKey
-      })(cfg.llmModel);
+      return new ChatGoogleGenerativeAI({
+        model: cfg.llmModel,
+        apiKey: cfg.llmApiKey,
+        temperature: 0.3,
+      });
 
     case "ollama":
-      return createOpenAI({
-        baseURL: cfg.llmBaseUrl || "http://localhost:11434/v1",
-        apiKey: "ollama"
-      })(cfg.llmModel);
+      return new ChatOpenAI({
+        model: cfg.llmModel,
+        apiKey: "ollama",
+        temperature: 0.3,
+        configuration: { baseURL: cfg.llmBaseUrl || "http://localhost:11434/v1" },
+      });
 
     default:
       throw new Error(`Unknown LLM provider: ${cfg.llmProvider}`);

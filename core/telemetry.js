@@ -1,28 +1,45 @@
 /**
- * telemetry.js — LangSmith tracing via wrapAISDK for agent observability.
+ * telemetry.js — LangSmith tracing for LangGraph agent observability.
  *
- * Wraps Vercel AI SDK functions so every generateText call is automatically
- * traced to LangSmith. No OTel dependencies required.
+ * LangGraph traces natively to LangSmith when LANGCHAIN_TRACING_V2=true
+ * and LANGCHAIN_API_KEY are set. This module reads config and sets env vars.
  *
- * Auto-reads LANGSMITH_API_KEY and LANGSMITH_PROJECT from env.
- * No-op if LANGSMITH_API_KEY is not set.
+ * No-op if no API key is configured.
  */
 
-import * as ai from "ai";
+let _initialized = false;
 
-let _generateText = ai.generateText;
-
+/**
+ * Initialize LangSmith telemetry by setting env vars.
+ * LangGraph auto-traces all graph executions when these are set.
+ *
+ * Safe to call multiple times — only sets env vars once.
+ */
 export async function initTelemetry() {
-  if (!process.env.LANGSMITH_API_KEY) {
-    console.warn("[browserwire-cli] telemetry: LANGSMITH_API_KEY not set, skipping");
+  if (_initialized === "ok") return true;
+  _initialized = "pending";
+
+  let apiKey = process.env.LANGCHAIN_API_KEY || process.env.LANGSMITH_API_KEY;
+  let project = process.env.LANGCHAIN_PROJECT || process.env.LANGSMITH_PROJECT;
+
+  try {
+    const { getConfig } = await import("./config.js");
+    const cfg = getConfig();
+    if (cfg.langsmithApiKey) apiKey = cfg.langsmithApiKey;
+    if (cfg.langsmithProject) project = cfg.langsmithProject;
+  } catch { /* config not loaded yet — use env vars */ }
+
+  if (!apiKey) {
+    console.warn("[browserwire] telemetry: no LangSmith API key configured, skipping");
+    _initialized = "skipped";
     return false;
   }
-  const { wrapAISDK } = await import("langsmith/experimental/vercel");
-  const wrapped = wrapAISDK(ai);
-  _generateText = wrapped.generateText;
-  return true;
-}
 
-export function getGenerateText() {
-  return _generateText;
+  process.env.LANGCHAIN_TRACING_V2 = "true";
+  process.env.LANGCHAIN_API_KEY = apiKey;
+  if (project) process.env.LANGCHAIN_PROJECT = project;
+
+  _initialized = "ok";
+  console.log(`[browserwire] telemetry: LangSmith enabled (project: ${project || "default"})`);
+  return true;
 }
