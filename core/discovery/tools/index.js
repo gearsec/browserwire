@@ -403,7 +403,6 @@ export const getPlannerTools = (index, browser) => [
  * View agents get inspect_item_fields + test_view_extraction (not useful for endpoints).
  */
 export const getViewSubAgentTools = (index, browser) => [
-  toLangChainTool(tools.view_screenshot, index, browser),
   toLangChainTool(tools.get_accessibility_snapshot, index, browser),
   toLangChainTool(tools.get_element_details, index, browser),
   toLangChainTool(tools.inspect_item_fields, index, browser),
@@ -417,7 +416,6 @@ export const getViewSubAgentTools = (index, browser) => [
  * Endpoint agents get find_interactive + test_endpoint_grounding (not useful for views).
  */
 export const getEndpointSubAgentTools = (index, browser) => [
-  toLangChainTool(tools.view_screenshot, index, browser),
   toLangChainTool(tools.get_accessibility_snapshot, index, browser),
   toLangChainTool(tools.get_element_details, index, browser),
   toLangChainTool(tools.find_interactive, index, browser),

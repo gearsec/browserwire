@@ -10,7 +10,6 @@
 
 import { StateGraph, Annotation, messagesStateReducer, END } from "@langchain/langgraph";
 import { SystemMessage, ToolMessage, HumanMessage, AIMessage, BaseMessage } from "@langchain/core/messages";
-import { trimMessages } from "@langchain/core/messages";
 
 // LangGraph's Send API serializes messages to JSON ({type: "constructor", id: [...], kwargs: {...}}).
 // Both trimMessages and LLM invoke expect real BaseMessage instances. This helper converts them back.
@@ -29,6 +28,36 @@ const ensureMessageInstances = (messages) =>
     }
     return m;
   });
+
+// ---------------------------------------------------------------------------
+// Message compaction — truncate old large tool results to save tokens
+// ---------------------------------------------------------------------------
+
+const COMPACT_THRESHOLD = 5000; // chars
+
+const compactMessages = (messages) => {
+  // Find indices of all tool messages
+  const toolIndices = [];
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i] instanceof ToolMessage || messages[i]._getType?.() === "tool") {
+      toolIndices.push(i);
+    }
+  }
+  // Keep the last 2 tool results intact; truncate older large ones
+  const cutoff = toolIndices.length > 2 ? toolIndices[toolIndices.length - 2] : messages.length;
+
+  return messages.map((m, i) => {
+    if (i >= cutoff) return m;
+    if (!(m instanceof ToolMessage || m._getType?.() === "tool")) return m;
+    const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+    if (content.length <= COMPACT_THRESHOLD) return m;
+    return new ToolMessage({
+      content: `[Truncated: ${content.length} chars. Re-call tool if needed.]`,
+      tool_call_id: m.tool_call_id,
+      name: m.name,
+    });
+  });
+};
 
 // ---------------------------------------------------------------------------
 // State annotation for ReAct agent subgraphs
@@ -87,22 +116,7 @@ export function createReactAgent({
     }
 
     let messages = ensureMessageInstances(state.messages);
-
-    // Prune old messages if conversation is getting long
-    const toolMsgCount = messages.filter((m) => m._getType?.() === "tool" || m instanceof ToolMessage).length;
-    if (toolMsgCount > 6) {
-      // Keep system + last ~8000 tokens worth of messages
-      messages = await trimMessages(messages, {
-        maxTokens: 8000,
-        strategy: "last",
-        tokenCounter: (msgs) => msgs.reduce((n, m) => {
-          const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
-          return n + Math.ceil(content.length / 4);
-        }, 0),
-        includeSystem: true,
-        startOn: "human",
-      });
-    }
+    messages = compactMessages(messages);
 
     const response = await modelWithTools.invoke(messages);
     return { messages: [response] };
