@@ -1,27 +1,35 @@
 /**
  * session-bridge.js — Orchestrates the capture pipeline for Electron.
  *
- * Connects dom-capture + SettleCycleManager + screenshot to SessionManager.
- * Replaces extension/background.js's snapshot handling for the Electron path.
+ * On startExploring: injects rrweb recorder + page signals, starts settle cycle.
+ * On stopExploring: drains the rrweb event stream from the page, assembles the
+ * session recording, and saves it to disk.
+ *
+ * The session recording is the source of truth:
+ * {
+ *   sessionId, origin, startedAt, stoppedAt,
+ *   events: rrwebEvent[],      // continuous rrweb event stream
+ *   snapshots: [               // state boundary markers
+ *     { snapshotId, eventIndex, screenshot, url, title }
+ *   ]
+ * }
  */
 
 import { injectCapture, removeCapture } from "./dom-capture.js";
-import { ElectronBrowser } from "./electron-browser.js";
 import { SettleCycleManager } from "./settle-cycle.js";
 
 /**
- * Create a session bridge that orchestrates capture and SessionManager interaction.
+ * Create a session bridge that orchestrates capture and session recording.
  *
  * @param {{ sessionManager: import('../../core/session-manager.js').SessionManager, getBrowserView: () => Electron.BrowserView, sendToUI: (channel: string, data: any) => void }} deps
  */
 export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI }) => {
   let activeSessionId = null;
+  let activeOrigin = null;
+  let activeStartedAt = null;
   let pendingSnapshots = [];
   let settleCycle = null;
   let navListener = null;
-
-  // Set the browser factory on the session manager to use ElectronBrowser
-  sessionManager.browserFactory = () => new ElectronBrowser();
 
   /**
    * Start exploring the current page.
@@ -39,9 +47,15 @@ export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI }
 
     // Create session
     const sessionId = crypto.randomUUID();
-    const { session } = sessionManager.startSession(sessionId, url);
     activeSessionId = sessionId;
+    activeStartedAt = new Date().toISOString();
     pendingSnapshots = [];
+
+    try {
+      activeOrigin = new URL(url).origin;
+    } catch {
+      activeOrigin = url;
+    }
 
     // Reload the page so the first snapshot captures a clean page load
     await new Promise((resolve, reject) => {
@@ -74,16 +88,13 @@ export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI }
         });
 
         sendToUI("browserwire:log",
-          `Snapshot #${pendingSnapshots.length}: ${snap.trigger?.kind || "unknown"}`
+          `Snapshot #${pendingSnapshots.length}: ${snap.url}`
         );
       },
     });
     settleCycle.start();
 
-    // Show overlay immediately after reload so the user sees it while scripts inject
-    settleCycle._showOverlay();
-
-    // Now inject discovery scripts + page signal script.
+    // Now inject rrweb recorder + page signal script.
     // The settle cycle listener is already active, so the initial signal will be caught.
     await injectCapture(webContents);
 
@@ -113,14 +124,14 @@ export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI }
   };
 
   /**
-   * Stop exploring and send snapshots to SessionManager for processing.
-   * Returns immediately (non-blocking, same UX pattern as extension).
+   * Stop exploring: drain rrweb events, assemble session recording, save to disk.
    */
   const stopExploring = async (note) => {
     if (!activeSessionId) throw new Error("No active session");
 
     const sessionId = activeSessionId;
-    const batchId = crypto.randomUUID();
+    const browserView = getBrowserView();
+    const webContents = browserView?.webContents;
 
     // Stop the settle cycle manager
     if (settleCycle) {
@@ -129,45 +140,65 @@ export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI }
     }
 
     // Remove navigation listener
-    const browserView = getBrowserView();
     if (navListener && browserView) {
-      browserView.webContents.removeListener("did-navigate", navListener);
+      webContents.removeListener("did-navigate", navListener);
     }
     navListener = null;
 
-    // Remove injected page scripts
-    if (browserView) {
-      await removeCapture(browserView.webContents);
+    // Drain rrweb events from the page
+    let events = [];
+    if (webContents) {
+      try {
+        const eventsJson = await webContents.executeJavaScript(`
+          JSON.stringify(window.__bw_events || []);
+        `);
+        events = JSON.parse(eventsJson);
+      } catch (err) {
+        console.warn("[browserwire-electron] failed to drain rrweb events:", err.message);
+      }
     }
 
+    // Remove injected page scripts
+    if (browserView) {
+      await removeCapture(webContents);
+    }
+
+    // Assemble session recording — the source of truth
+    const sessionRecording = {
+      sessionId,
+      origin: activeOrigin,
+      startedAt: activeStartedAt,
+      stoppedAt: new Date().toISOString(),
+      events,
+      snapshots: pendingSnapshots,
+    };
+
     activeSessionId = null;
+    activeOrigin = null;
+    activeStartedAt = null;
+    pendingSnapshots = [];
 
     sendToUI("browserwire:session-status", {
       sessionId,
       status: "processing",
-      snapshotCount: pendingSnapshots.length,
+      snapshotCount: sessionRecording.snapshots.length,
     });
 
-    // Send to SessionManager (async — don't await)
-    sessionManager.stopSession(sessionId, {
-      pendingSnapshots,
-      note,
-      batchId,
-      onStatus: (status) => {
-        sendToUI("browserwire:batch-status", status);
-
-        if (status.status === "finalized") {
-          sendToUI("browserwire:session-status", {
-            sessionId: status.sessionId,
-            status: "finalized",
-          });
-        }
-      },
-    }).catch((err) => {
+    // Save session recording via core session manager
+    try {
+      const sessionDir = await sessionManager.saveRecording(sessionRecording);
+      sendToUI("browserwire:log",
+        `Session ${sessionId}: ${events.length} events, ${sessionRecording.snapshots.length} snapshots → ${sessionDir}`
+      );
+    } catch (err) {
+      console.error("[browserwire-electron] failed to save session recording:", err.message);
       sendToUI("browserwire:log", `Session error: ${err.message}`);
-    });
+    }
 
-    pendingSnapshots = [];
+    sendToUI("browserwire:session-status", {
+      sessionId,
+      status: "finalized",
+    });
   };
 
   return { startExploring, stopExploring };

@@ -1,14 +1,21 @@
 /**
  * settle-cycle.js — Main-process settle state machine for Electron.
  *
- * Replaces the injected SETTLE_CYCLE_SCRIPT with native Electron APIs:
+ * Determines WHEN to capture a snapshot marker by monitoring:
  *   - session.webRequest for network idle tracking
- *   - webContents.on('console-message') for page signals (click/input/mutation)
- *   - On settle: captures snapshot via executeJavaScript + capturePage
+ *   - webContents.on('console-message') for page signals (click/mutation/navigation)
+ *
+ * On settle: captures a screenshot + records a snapshot marker.
+ * The rrweb event stream (recorded in-page by dom-capture.js) is the source of
+ * truth for DOM state — this module only captures the screenshot and marks
+ * the boundary in the event stream.
+ *
+ * The snapshot marker is: { snapshotId, eventIndex, screenshot, url, title }
+ * where eventIndex points to the FullSnapshot event in the rrweb stream
+ * that corresponds to this settled state.
  */
 
 import { session } from "electron";
-import { annotateScreenshot } from "./screenshot.js";
 
 const SETTLE_DEBOUNCE_MS = 500;
 const SETTLE_HARD_TIMEOUT_MS = 4000;
@@ -32,7 +39,6 @@ export class SettleCycleManager {
 
     // State machine
     this._phase = "idle"; // "idle" | "settling"
-    this._pendingTrigger = null;
     this._settleTimer = null;
     this._hardTimer = null;
     this._capturing = false;
@@ -110,9 +116,7 @@ export class SettleCycleManager {
 
     this._clearTimers();
     this._phase = "idle";
-    this._pendingTrigger = null;
     this._pendingRequests.clear();
-    this._hideOverlay();
 
     this._wc.removeListener("console-message", this._onConsoleMessage);
 
@@ -140,7 +144,7 @@ export class SettleCycleManager {
     }
 
     if (signal.type === "interaction") {
-      this._beginSettleCycle(signal.trigger || { kind: "unknown" });
+      this._beginSettleCycle();
     } else if (signal.type === "mutation") {
       // DOM mutations during settling reset the debounce
       if (this._phase === "settling") {
@@ -149,20 +153,16 @@ export class SettleCycleManager {
     }
   }
 
-  _beginSettleCycle(trigger) {
+  _beginSettleCycle() {
     if (this._phase === "settling") {
-      // Already settling — update trigger, reset debounce, keep hard cap
-      this._pendingTrigger = trigger;
-      this._pendingRequests.clear(); // reset network tracking for this interaction
+      // Already settling — reset debounce, keep hard cap
+      this._pendingRequests.clear();
       this._resetDebounce();
       return;
     }
 
     this._phase = "settling";
-    this._pendingTrigger = trigger;
     this._pendingRequests.clear();
-
-    this._showOverlay();
 
     this._settleTimer = setTimeout(() => this._onSettle(), SETTLE_DEBOUNCE_MS);
     this._hardTimer = setTimeout(() => this._forceScan(), SETTLE_HARD_TIMEOUT_MS);
@@ -205,62 +205,57 @@ export class SettleCycleManager {
 
   _executeScan() {
     this._clearTimers();
-    const trigger = this._pendingTrigger;
     this._phase = "idle";
-    this._pendingTrigger = null;
 
     // Avoid concurrent captures
     if (this._capturing) return;
-    this._captureSnapshot(trigger).catch((err) => {
+    this._captureSnapshot().catch((err) => {
       console.warn("[browserwire-electron] snapshot capture failed:", err.message);
-      this._hideOverlay();
     });
   }
 
-  async _captureSnapshot(trigger) {
+  /**
+   * Capture a snapshot marker: screenshot + eventIndex into the rrweb stream.
+   *
+   * The rrweb event stream is recorded in-page (window.__bw_events).
+   * We ask the page for the current event count to get the eventIndex,
+   * then trigger a FullSnapshot checkpoint so the index points to a
+   * FullSnapshot event.
+   */
+  async _captureSnapshot() {
     this._capturing = true;
     try {
       const wc = this._wc;
 
-      // Remove overlay before capturing so it doesn't appear in screenshot/DOM
-      await this._hideOverlay();
-      await new Promise((r) => setTimeout(r, 50)); // wait one frame for repaint
+      // Wait one frame for repaint
+      await new Promise((r) => setTimeout(r, 50));
 
-      // 1. Capture DOM + skeleton as JSON string (avoids IPC serialization issues)
-      let json;
+      // 1. Trigger an rrweb checkout (emits a new FullSnapshot into the stream)
+      //    and get the eventIndex pointing to that FullSnapshot + page metadata
+      let meta;
       try {
-        json = await wc.executeJavaScript(`
+        meta = await wc.executeJavaScript(`
           (function() {
-            var domHtml = null;
-            try { domHtml = typeof serializeDom === 'function' ? serializeDom() : null; } catch(e) {}
-            var pageText = '';
-            try { pageText = typeof collectPageText === 'function' ? collectPageText() : ''; } catch(e) {}
-            var pageState = {};
-            try { pageState = typeof capturePageState === 'function' ? capturePageState() : {}; } catch(e) {}
-            var skeletonData = { skeleton: [] };
-            try { skeletonData = typeof runSkeletonScan === 'function' ? runSkeletonScan() : { skeleton: [] }; } catch(e) {}
+            if (typeof rrweb !== 'undefined' && rrweb.record) {
+              rrweb.record.takeFullSnapshot();
+            }
             return JSON.stringify({
-              domHtml: domHtml,
-              pageText: pageText,
-              pageState: pageState,
-              skeleton: skeletonData.skeleton || [],
+              eventIndex: (window.__bw_events || []).length - 1,
               url: location.href,
               title: document.title,
-              devicePixelRatio: window.devicePixelRatio || 1,
-              capturedAt: new Date().toISOString()
             });
           })()
         `);
       } catch (err) {
-        console.warn("[browserwire-electron] DOM capture failed:", err.message);
+        console.warn("[browserwire-electron] rrweb checkout failed:", err.message);
         return;
       }
 
-      let snapshot;
+      let parsed;
       try {
-        snapshot = JSON.parse(json);
+        parsed = JSON.parse(meta);
       } catch {
-        console.warn("[browserwire-electron] Failed to parse snapshot JSON");
+        console.warn("[browserwire-electron] Failed to parse snapshot meta");
         return;
       }
 
@@ -273,73 +268,17 @@ export class SettleCycleManager {
         console.warn("[browserwire-electron] screenshot failed:", err.message);
       }
 
-      // 3. Annotate screenshot with skeleton boxes
-      let annotated = screenshotBase64;
-      if (screenshotBase64 && snapshot.skeleton && snapshot.skeleton.length > 0) {
-        try {
-          annotated = await annotateScreenshot(
-            screenshotBase64,
-            snapshot.skeleton,
-            snapshot.devicePixelRatio || 1
-          );
-        } catch (err) {
-          console.warn("[browserwire-electron] annotation failed:", err.message);
-        }
-      }
-
       this._snapshotCount++;
 
       this._onSnapshot({
-        snapshotId: `snap_electron_${this._snapshotCount}`,
-        trigger,
-        domHtml: snapshot.domHtml,
-        pageText: snapshot.pageText,
-        pageState: { ...snapshot.pageState, skeleton: snapshot.skeleton },
-        skeleton: snapshot.skeleton,
-        url: snapshot.url,
-        title: snapshot.title,
-        devicePixelRatio: snapshot.devicePixelRatio,
-        capturedAt: snapshot.capturedAt,
-        networkLog: [],
-        screenshot: annotated,
+        snapshotId: `snap_${this._snapshotCount}`,
+        eventIndex: parsed.eventIndex,
+        screenshot: screenshotBase64,
+        url: parsed.url,
+        title: parsed.title,
       });
     } finally {
       this._capturing = false;
-    }
-  }
-
-  // ─── Overlay ─────────────────────────────────────────────────────
-
-  _showOverlay() {
-    this._wc.executeJavaScript(`
-      (function() {
-        if (document.getElementById('__bw_overlay')) return;
-        var d = document.createElement('div');
-        d.id = '__bw_overlay';
-        d.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.45);z-index:2147483647;display:flex;align-items:center;justify-content:center;';
-        d.innerHTML = '<div style="background:#fff;padding:12px 20px;border-radius:8px;font:500 13px/1.4 system-ui,-apple-system,sans-serif;color:#333;display:flex;align-items:center;gap:10px;box-shadow:0 2px 12px rgba(0,0,0,0.15)">'
-          + '<svg width="18" height="18" viewBox="0 0 24 24" style="animation:__bw_spin 0.8s linear infinite;flex-shrink:0"><circle cx="12" cy="12" r="10" stroke="#888" stroke-width="2.5" fill="none" stroke-dasharray="31.4 31.4" stroke-linecap="round"/></svg>'
-          + 'Taking snapshot\\u2026</div>';
-        var s = document.createElement('style');
-        s.id = '__bw_overlay_style';
-        s.textContent = '@keyframes __bw_spin{to{transform:rotate(360deg)}}';
-        document.head.appendChild(s);
-        document.body.appendChild(d);
-      })()
-    `).catch(() => {});
-  }
-
-  async _hideOverlay() {
-    try {
-      await this._wc.executeJavaScript(`
-        var el = document.getElementById('__bw_overlay');
-        if (el) el.remove();
-        var st = document.getElementById('__bw_overlay_style');
-        if (st) st.remove();
-        void 0;
-      `);
-    } catch {
-      // Page may have navigated
     }
   }
 
