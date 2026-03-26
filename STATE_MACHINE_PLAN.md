@@ -306,7 +306,29 @@ Node IDs are stable because the test replays from the same recording — the rrw
 
 ---
 
-### Phase 3: Serial Session Processing
+### Phase 3: Session History UI + Replay
+
+Add a "History" mode to the ActivityBar. Lists all session recordings from `~/.browserwire/logs/`. Selecting a session opens an rrweb-player replay of the recording with snapshot markers annotated on the timeline.
+
+**Dependencies**: Install `rrweb-player` npm package.
+
+**Backend (IPC)**:
+- `browserwire:list-sessions` — scan `~/.browserwire/logs/session-*/` for `session-recording.json` files, return summary list
+- `browserwire:load-session` — load a session's `events.json` + `session-recording.json`, return to renderer
+
+**UI**:
+- Add "History" mode to `ActivityBar.tsx` (4th mode alongside Discovery, Execution, Settings)
+- `HistoryPanel.tsx` — lists sessions with origin, date, snapshot count, event count
+- `ReplayPanel.tsx` — embeds `rrweb-player` component with the session's events
+  - Snapshot markers shown on the timeline (annotated with snapshotId + URL)
+  - Clicking a snapshot marker seeks the player to that point
+  - Screenshots shown alongside the replay for comparison
+
+**Checkpoint**: Can browse session history, replay any session, and visually verify what was recorded. Snapshot boundaries are visible on the timeline.
+
+---
+
+### Phase 4: Serial Session Processing
 
 **File**: `core/discovery/session.js`
 
@@ -339,7 +361,7 @@ Node IDs are stable because the test replays from the same recording — the rrw
 
 ---
 
-### Phase 4: State-Machine-Aware Agent Graph
+### Phase 5: State-Machine-Aware Agent Graph
 
 **File**: `core/discovery/agent.js`
 
@@ -370,7 +392,7 @@ Node IDs are stable because the test replays from the same recording — the rrw
 
 ---
 
-### Phase 5: New Planner Prompt
+### Phase 6: New Planner Prompt
 
 **File**: `core/discovery/planner.js`
 
@@ -403,7 +425,7 @@ Update `runPlanner`:
 
 ---
 
-### Phase 6: Assembler Rework
+### Phase 7: Assembler Rework
 
 **File**: `core/discovery/assembler.js`
 
@@ -423,7 +445,7 @@ Update `runPlanner`:
 
 ---
 
-### Phase 7: Delete Merge Agent
+### Phase 8: Delete Merge Agent
 
 **File**: `core/discovery/merge-agent.js` — **DELETE entirely**
 
@@ -435,7 +457,7 @@ Update `runPlanner`:
 
 ---
 
-### Phase 8: Session Manager Updates
+### Phase 9: Session Manager Updates
 
 **File**: `core/session-manager.js`
 
@@ -454,7 +476,7 @@ Update `runPlanner`:
 
 ---
 
-### Phase 9: API & Manifest Store Updates
+### Phase 10: API & Manifest Store Updates
 
 **`core/manifest-store.js`**:
 - Update `meta.json` fields: `stateCount`, `actionCount` (replace `entityCount`, `actionCount`)
@@ -512,14 +534,15 @@ Update `runPlanner`:
 ## Verification (per phase)
 
 1. **Phase 1**: ✅ Manifest module: schemas, validation, builder — all tested
-2. **Phase 2**: Single session payload with continuous rrweb event stream + snapshot markers. Events include FullSnapshot + Mutation(0) + MouseInteraction(2) + Input(5) + StyleSheetRule(8) + StyleDeclaration(13). Old per-snapshot fields (domHtml, trigger, pageText, etc.) removed. Replay to any state via `replayer.pause(snapshot.timestamp)`. Action testing via rrweb record-in-replay comparison.
-3. **Phase 3**: Snapshots process serially, StateMachineManifest accumulates correctly
-4. **Phase 4**: Agent graph passes state machine context through, returns step results
-5. **Phase 5**: Planner deduces semantic states, only extracts trigger-relevant actions
-6. **Phase 6**: Assembler produces valid state step results
-7. **Phase 7**: No merge agent references remain
-8. **Phase 8**: Session logs show states/actions instead of pages
-9. **Phase 9**: `http://127.0.0.1:8787/api/docs` renders state machine manifest
+2. **Phase 2**: ✅ Session recording: rrweb event stream + snapshot markers, typed with Zod, validated, saved via core/session-manager
+3. **Phase 3**: History UI shows session list, rrweb-player replays recordings with snapshot annotations
+4. **Phase 4**: Snapshots process serially, StateMachineManifest accumulates correctly
+5. **Phase 5**: Agent graph passes state machine context through, returns step results
+6. **Phase 6**: Planner deduces semantic states, only extracts trigger-relevant actions
+7. **Phase 7**: Assembler produces valid state step results
+8. **Phase 8**: No merge agent references remain
+9. **Phase 9**: Session logs show states/actions instead of pages
+10. **Phase 10**: `http://127.0.0.1:8787/api/docs` renders state machine manifest
 
 ## End-to-End Test
 1. Run Electron app, navigate to a site

@@ -9,7 +9,7 @@ import { app, BrowserWindow, BrowserView, ipcMain, session, Menu, safeStorage, d
 import { createServer } from "node:http";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 
 import { loadConfig, readConfigFile, writeConfigFile, reloadConfig, getConfig, PROVIDER_DEFAULTS } from "../core/config.js";
@@ -402,6 +402,49 @@ const wireIPC = () => {
     try {
       await sessionBridge.stopExploring(note);
       return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Session history
+  ipcMain.handle("browserwire:list-sessions", () => {
+    const logsDir = resolve(homedir(), ".browserwire", "logs");
+    if (!existsSync(logsDir)) return [];
+
+    const sessions = [];
+    for (const entry of readdirSync(logsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith("session-")) continue;
+      const sessionDir = resolve(logsDir, entry.name);
+      const metaPath = resolve(sessionDir, "session-recording.json");
+      if (!existsSync(metaPath)) continue;
+      try {
+        const meta = JSON.parse(readFileSync(metaPath, "utf8"));
+        sessions.push(meta);
+      } catch { /* skip corrupt files */ }
+    }
+    // Sort by startedAt descending (most recent first)
+    sessions.sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || ""));
+    return sessions;
+  });
+
+  ipcMain.handle("browserwire:load-session-events", async (_event, sessionId) => {
+    const eventsPath = resolve(homedir(), ".browserwire", "logs", `session-${sessionId}`, "events.json");
+    if (!existsSync(eventsPath)) return { ok: false, error: "Events file not found" };
+    try {
+      const events = JSON.parse(readFileSync(eventsPath, "utf8"));
+      return { ok: true, events };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle("browserwire:load-session-screenshot", async (_event, sessionId, snapshotId) => {
+    const screenshotPath = resolve(homedir(), ".browserwire", "logs", `session-${sessionId}`, `${snapshotId}.jpg`);
+    if (!existsSync(screenshotPath)) return { ok: false, error: "Screenshot not found" };
+    try {
+      const data = readFileSync(screenshotPath);
+      return { ok: true, screenshot: data.toString("base64") };
     } catch (err) {
       return { ok: false, error: err.message };
     }

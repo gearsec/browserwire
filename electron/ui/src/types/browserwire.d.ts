@@ -38,8 +38,24 @@ interface ConfigChanged {
 }
 
 interface LayoutState {
-  activeMode: "discovery" | "execution" | "settings";
+  activeMode: "discovery" | "execution" | "history" | "settings";
   rightPanelOpen: boolean;
+}
+
+interface SessionRecordingMeta {
+  sessionId: string;
+  origin: string;
+  startedAt: string;
+  stoppedAt: string;
+  eventCount: number;
+  snapshotCount: number;
+  snapshots: {
+    snapshotId: string;
+    eventIndex: number;
+    screenshotFile: string;
+    url: string;
+    title: string;
+  }[];
 }
 
 interface StartResult {
@@ -69,6 +85,9 @@ interface BrowserWireAPI {
   onExecutionState: (callback: (state: ExecutionState) => void) => () => void;
   startExploring: () => Promise<StartResult>;
   stopExploring: (note?: string) => Promise<{ ok: boolean; error?: string }>;
+  listSessions: () => Promise<SessionRecordingMeta[]>;
+  loadSessionEvents: (sessionId: string) => Promise<{ ok: boolean; events?: any[]; error?: string }>;
+  loadSessionScreenshot: (sessionId: string, snapshotId: string) => Promise<{ ok: boolean; screenshot?: string; error?: string }>;
   getSettings: () => Promise<Settings>;
   saveSettings: (settings: SaveSettingsPayload) => Promise<{ ok: boolean; llmConfigured?: boolean; error?: string }>;
   reportLayout: (state: LayoutState) => void;

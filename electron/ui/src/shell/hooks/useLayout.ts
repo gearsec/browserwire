@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from "react";
 
-export type Mode = "discovery" | "execution" | "settings";
+export type Mode = "discovery" | "execution" | "history" | "settings";
 
 export interface LayoutState {
   activeMode: Mode;
@@ -34,7 +34,7 @@ export function useLayout() {
   // Listen for switch-mode IPC from main process (e.g. Cmd+, for Settings)
   useEffect(() => {
     const cleanup = window.browserwire.onSwitchMode((mode: string) => {
-      if (mode === "discovery" || mode === "execution" || mode === "settings") {
+      if (mode === "discovery" || mode === "execution" || mode === "history" || mode === "settings") {
         setActiveMode(mode);
         if (mode === "discovery") {
           setRightPanelOpen(true);

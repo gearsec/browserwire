@@ -8,6 +8,7 @@ import { RightPanel } from "./RightPanel";
 import { StatusBar } from "./StatusBar";
 import { SettingsPanel } from "./panels/SettingsPanel";
 import { ExecutionPanel } from "./panels/ExecutionPanel";
+import { HistoryPanel } from "./panels/HistoryPanel";
 import { useBrowserWire } from "./hooks/useBrowserWire";
 import { useLayout } from "./hooks/useLayout";
 import { useTour } from "./hooks/useTour";
@@ -56,6 +57,7 @@ export function ShellApp() {
             <div className="flex-1 flex flex-col min-w-0 overflow-auto">
               {layout.activeMode === "settings" && <SettingsPanel />}
               {layout.activeMode === "execution" && <ExecutionPanel />}
+              {layout.activeMode === "history" && <HistoryPanel />}
             </div>
           )}
 

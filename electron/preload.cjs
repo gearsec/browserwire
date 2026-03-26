@@ -35,6 +35,11 @@ contextBridge.exposeInMainWorld("browserwire", {
     return () => ipcRenderer.removeListener("browserwire:execution-state", handler);
   },
 
+  // Session history
+  listSessions: () => ipcRenderer.invoke("browserwire:list-sessions"),
+  loadSessionEvents: (sessionId) => ipcRenderer.invoke("browserwire:load-session-events", sessionId),
+  loadSessionScreenshot: (sessionId, snapshotId) => ipcRenderer.invoke("browserwire:load-session-screenshot", sessionId, snapshotId),
+
   // Settings
   getSettings: () => ipcRenderer.invoke("browserwire:get-settings"),
   saveSettings: (settings) => ipcRenderer.invoke("browserwire:save-settings", settings),
