@@ -22,6 +22,23 @@ import {
 } from "../../manifest/schema.js";
 
 // ---------------------------------------------------------------------------
+// done — signal agent completion
+// ---------------------------------------------------------------------------
+
+export const done = {
+  name: "done",
+  description:
+    "Signal that you have finished processing this snapshot. " +
+    "Call this after you have submitted the state and all views/actions. " +
+    "CRITICAL: You MUST call this tool to complete your task.",
+  parameters: z.object({}),
+  execute: (ctx) => {
+    ctx._done = true;
+    return { valid: true };
+  },
+};
+
+// ---------------------------------------------------------------------------
 // submit_state — register the state for this snapshot
 // ---------------------------------------------------------------------------
 

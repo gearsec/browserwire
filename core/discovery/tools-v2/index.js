@@ -21,7 +21,7 @@ import { inspect_element } from "./inspect.js";
 import { get_transition_events } from "./transition.js";
 import { get_state_machine } from "./context.js";
 import { test_code } from "./test-code.js";
-import { submit_state, submit_view, submit_action } from "./submit.js";
+import { submit_state, submit_view, submit_action, done } from "./submit.js";
 
 // All tool definitions
 const allTools = [
@@ -41,6 +41,7 @@ const allTools = [
   submit_state,
   submit_view,
   submit_action,
+  done,
 ];
 
 /**

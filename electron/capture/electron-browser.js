@@ -2,7 +2,7 @@
  * electron-browser.js — Drop-in replacement for PlaywrightBrowser.
  *
  * Uses a hidden BrowserWindow + webContents.debugger (CDP) instead of Playwright.
- * Same public API so DiscoverySession can use either via browserFactory.
+ * Same public API as PlaywrightBrowser.
  */
 
 import { BrowserWindow } from "electron";
