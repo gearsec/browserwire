@@ -20,6 +20,12 @@ const RRWEB_SNAPSHOT_UMD_PATH = resolve(
   "../../../node_modules/rrweb-snapshot/dist/rrweb-snapshot.umd.cjs"
 );
 
+// Path to rrweb record UMD bundle for event capture during testing
+const RRWEB_RECORD_UMD_PATH = resolve(
+  __dirname,
+  "../../../node_modules/@rrweb/record/dist/record.umd.cjs"
+);
+
 export class PlaywrightBrowser {
   constructor() {
     /** @type {import('playwright').Browser|null} */
@@ -28,6 +34,8 @@ export class PlaywrightBrowser {
     this.page = null;
     /** @type {string|null} Cached UMD script content */
     this._rrwebScript = null;
+    /** @type {string|null} Cached rrweb record UMD script */
+    this._rrwebRecordScript = null;
   }
 
   /**
@@ -269,6 +277,85 @@ export class PlaywrightBrowser {
     }
 
     return mapping;
+  }
+
+  /**
+   * Inject rrweb record into the page and start capturing events.
+   * Call this before executing action code to capture generated events.
+   * Call collectRecordedEvents() after to retrieve them.
+   */
+  async startRecording() {
+    if (!this.page) throw new Error("No page loaded");
+
+    // Load and cache the rrweb record script
+    if (!this._rrwebRecordScript) {
+      this._rrwebRecordScript = await readFile(RRWEB_RECORD_UMD_PATH, "utf-8");
+    }
+
+    // Inject rrweb record UMD (exposes window.rrweb.record)
+    await this.page.addScriptTag({ content: this._rrwebRecordScript });
+
+    // Start recording, filtering to only interaction events
+    await this.page.evaluate(() => {
+      window.__bw_test_events = [];
+      window.__bw_test_stop = window.rrweb.record({
+        emit: (event) => {
+          // Only capture IncrementalSnapshot (type=3) with MouseInteraction (source=2) or Input (source=5)
+          if (event.type === 3 && (event.data.source === 2 || event.data.source === 5)) {
+            window.__bw_test_events.push(event);
+          }
+        },
+        sampling: {
+          mousemove: false,
+          scroll: 0,
+          media: 0,
+          canvas: 0,
+        },
+        recordCanvas: false,
+        collectFonts: false,
+      });
+    });
+  }
+
+  /**
+   * Collect events captured by startRecording() and stop recording.
+   * Returns interaction events with rrweb node IDs.
+   *
+   * @returns {Promise<Array<{ type: string, rrweb_node_id: number, interaction_type?: number, text?: string }>>}
+   */
+  async collectRecordedEvents() {
+    if (!this.page) return [];
+
+    const rawEvents = await this.page.evaluate(() => {
+      // Stop recording
+      if (window.__bw_test_stop) {
+        window.__bw_test_stop();
+        window.__bw_test_stop = null;
+      }
+      const events = window.__bw_test_events || [];
+      window.__bw_test_events = [];
+      return events;
+    });
+
+    // Parse into a structured format
+    return rawEvents.map((event) => {
+      if (event.data.source === 2) {
+        // MouseInteraction
+        return {
+          type: "mouse_interaction",
+          interaction_type: event.data.type,
+          rrweb_node_id: event.data.id,
+        };
+      } else if (event.data.source === 5) {
+        // Input
+        return {
+          type: "input",
+          rrweb_node_id: event.data.id,
+          text: event.data.text || null,
+        };
+      }
+      return null;
+    }).filter(Boolean);
   }
 
   /**

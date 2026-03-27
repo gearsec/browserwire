@@ -13,3 +13,4 @@ export {
   snapshotMarkerSchema,
   sessionRecordingSchema,
 } from "./schema.js";
+export { EventType, IncrementalSource, MouseInteraction } from "./rrweb-constants.js";

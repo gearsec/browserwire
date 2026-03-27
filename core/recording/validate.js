@@ -3,13 +3,14 @@
  *
  * Validates beyond what Zod catches:
  *   - Every snapshot's eventIndex is within bounds of the events array
- *   - Every snapshot's eventIndex points to a FullSnapshot event (type=2)
+ *   - Every snapshot's eventIndex points to a FullSnapshot event
  *   - Snapshot eventIndexes are in ascending order
- *   - The events array starts with a Meta event (type=4)
+ *   - The events array starts with a Meta event
  *   - At least one FullSnapshot event exists
  */
 
 import { sessionRecordingSchema } from "./schema.js";
+import { EventType } from "./rrweb-constants.js";
 
 /**
  * Validate a session recording.
@@ -31,15 +32,15 @@ export function validateRecording(recording) {
   const data = result.data;
   const errors = [];
 
-  // Events must start with a Meta event (type=4)
-  if (data.events[0]?.type !== 4) {
-    errors.push(`First event must be Meta (type=4), got type=${data.events[0]?.type}`);
+  // Events must start with a Meta event
+  if (data.events[0]?.type !== EventType.Meta) {
+    errors.push(`First event must be Meta (type=${EventType.Meta}), got type=${data.events[0]?.type}`);
   }
 
-  // Must contain at least one FullSnapshot (type=2)
-  const hasFullSnapshot = data.events.some((e) => e.type === 2);
+  // Must contain at least one FullSnapshot
+  const hasFullSnapshot = data.events.some((e) => e.type === EventType.FullSnapshot);
   if (!hasFullSnapshot) {
-    errors.push("Events must contain at least one FullSnapshot (type=2)");
+    errors.push(`Events must contain at least one FullSnapshot (type=${EventType.FullSnapshot})`);
   }
 
   // Validate each snapshot marker
@@ -53,11 +54,11 @@ export function validateRecording(recording) {
       continue;
     }
 
-    // eventIndex must point to a FullSnapshot (type=2)
+    // eventIndex must point to a FullSnapshot
     const event = data.events[snap.eventIndex];
-    if (event.type !== 2) {
+    if (event.type !== EventType.FullSnapshot) {
       errors.push(
-        `Snapshot "${snap.snapshotId}": eventIndex ${snap.eventIndex} points to event type=${event.type}, expected FullSnapshot (type=2)`
+        `Snapshot "${snap.snapshotId}": eventIndex ${snap.eventIndex} points to event type=${event.type}, expected FullSnapshot (type=${EventType.FullSnapshot})`
       );
     }
 

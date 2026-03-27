@@ -58,12 +58,24 @@ const RRWEB_RECORD_SCRIPT = `
   window.__bw_recording = true;
   window.__bw_events = window.__bw_events || [];
 
-  var ALLOWED_SOURCES = { 0: true, 2: true, 5: true, 8: true, 13: true };
+  // rrweb EventType and IncrementalSource constants (can't import in page context)
+  var EventType_IncrementalSnapshot = 3;
+  var IncrementalSource_Mutation = 0;
+  var IncrementalSource_MouseInteraction = 2;
+  var IncrementalSource_Input = 5;
+  var IncrementalSource_StyleSheetRule = 8;
+  var IncrementalSource_StyleDeclaration = 13;
+
+  var ALLOWED_SOURCES = {};
+  ALLOWED_SOURCES[IncrementalSource_Mutation] = true;
+  ALLOWED_SOURCES[IncrementalSource_MouseInteraction] = true;
+  ALLOWED_SOURCES[IncrementalSource_Input] = true;
+  ALLOWED_SOURCES[IncrementalSource_StyleSheetRule] = true;
+  ALLOWED_SOURCES[IncrementalSource_StyleDeclaration] = true;
 
   window.__bw_stopRecording = rrweb.record({
     emit: function(event) {
-      // type 3 = IncrementalSnapshot — filter by source
-      if (event.type === 3 && !ALLOWED_SOURCES[event.data.source]) {
+      if (event.type === EventType_IncrementalSnapshot && !ALLOWED_SOURCES[event.data.source]) {
         return;
       }
       window.__bw_events.push(event);

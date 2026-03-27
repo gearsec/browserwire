@@ -328,174 +328,214 @@ Add a "History" mode to the ActivityBar. Lists all session recordings from `~/.b
 
 ---
 
-### Phase 4: Serial Session Processing
+### Phase 4: Agent Tools
+
+The agent system is redesigned around three shifts:
+- **Code generation** — agent writes Playwright functions, not CSS selectors
+- **rrweb replay** — tools query against a DOM reconstructed from the recording, not a live page
+- **State machine awareness** — agent sees accumulated context and transition events
+
+#### Tool inventory
+
+**Page Understanding** (query the replayed DOM at the current snapshot)
+
+| Tool | Description | Parameters | Returns |
+|------|-------------|------------|---------|
+| `view_screenshot` | View the screenshot captured at this snapshot | — | base64 JPEG |
+| `get_accessibility_tree` | YAML-style accessibility tree with stable ref IDs (role, name, value, state, children). Optionally scoped to a subtree. | `root_ref?` | YAML string |
+| `get_page_regions` | High-level page sections: landmark roles, headings, child counts, data list presence | — | regions array |
+| `find_interactive` | Find buttons, links, inputs, forms by role. Filterable by kind, text, subtree. | `near_ref?`, `kind?`, `text?` | elements array |
+| `inspect_element` | Magnifying lens: element details + ancestor chain UP (containment) + descendant tree DOWN (structure) + form context if inside a `<form>`. | `ref`, `ancestor_depth?`, `descendant_depth?` | element + ancestors + descendants + form_context |
+
+The first 4 are carried over from the old system. `inspect_element` is new — merges the old `get_element_details` (element info + form context) and `inspect_item_fields` (ancestor/descendant structure) into one tool. Drops CSS selectors and locator strategies (agent writes Playwright code directly). They already work against a SnapshotIndex built from an rrweb snapshot — no changes needed. The rrweb replay reconstructs the DOM, we build the index from it.
+
+**Transition Understanding** (understand what the user did after this state)
+
+| Tool | Description | Parameters | Returns |
+|------|-------------|------------|---------|
+| `get_transition_events` | Get the rrweb interaction events between this snapshot and the NEXT snapshot. Shows MouseInteraction (clicks) and Input (form fills) events with their target node IDs. These are the actions the user performed to leave this state. | — | filtered events array with element refs |
+
+This is new. Returns the interaction events (clicks, inputs) from this snapshot forward to the next one — mapped to ref IDs via the rrweb mirror so the agent can identify which elements on the current page were interacted with. For the last snapshot (terminal state), returns empty — no actions to generate.
+
+**State Machine Context** (understand what's been built so far)
+
+| Tool | Description | Parameters | Returns |
+|------|-------------|------------|---------|
+| `get_state_machine` | Get the accumulated state machine summary: states with signatures, actions with leads_to. Omits code. | — | StateMachineManifest.toSummary() |
+
+This is new. Gives the agent the full picture of what states and transitions have been discovered so far, so it can decide if the current snapshot is a new state or a revisit.
+
+**Code Generation & Testing** (write and test Playwright code against the replayed DOM)
+
+| Tool | Description | Parameters | Returns |
+|------|-------------|------------|---------|
+| `test_code` | Execute a Playwright code snippet against the replayed DOM. Optionally verify output against expected values or compare generated rrweb events against the recorded transition. | `code`, `inputs?`, `expected?`, `verify_against_recording?` | `{ success, result?, error?, comparison?: { expected, actual, matched } }` |
+
+Parameters:
+- `code` (required) — Playwright async function body: `async (page, inputs) => { ... }`
+- `inputs` (optional) — input values to pass to the function
+- `expected` (optional) — expected return value. When provided, the tool compares actual vs expected and returns the diff.
+- `verify_against_recording` (optional, boolean) — when true, enables rrweb recording inside the replayed iframe, executes the code, then compares generated events (clicks, inputs) against the recorded forward transition events. Returns whether the action targets the same elements.
+
+Usage patterns:
+- **Test a view**: `test_code({ code: "async (page) => { ... }", expected: [{ title: "Product A", price: 29.99 }] })` — runs extraction code, compares output against expected
+- **Test an action**: `test_code({ code: "async (page, { query }) => { ... }", inputs: { query: "test" }, verify_against_recording: true })` — runs action code, verifies it targets the same elements the user actually clicked/filled
+
+Replaces the old `test_selector`, `test_view_extraction`, and `test_endpoint_grounding` tools.
+
+**Submission** (incremental — submit state, views, actions individually)
+
+The agent submits each piece as it discovers it, keeping context lightweight.
+
+| Tool | Description | Parameters | Returns |
+|------|-------------|------------|---------|
+| `submit_state` | Register the state for this snapshot. For an existing state, pass `existing_state_id`. For a new state, pass the full identity. | See below | `{ submitted: true }` |
+| `submit_view` | Submit a single view with Playwright extraction code. Only for new states. | `view: viewSchema` | `{ valid, view_count }` |
+| `submit_action` | Submit a single action with Playwright interaction code. | `action: actionSchema` | `{ valid, action_count }` |
+
+`submit_state` parameters — two cases:
+
+**Existing state** (agent recognized it from `get_state_machine`):
+```
+submit_state({ existing_state_id: "s2" })
+```
+
+**New state**:
+```
+submit_state({
+  name: "product_list",
+  description: "Product listing page",
+  url_pattern: "/products",
+  page_purpose: "browse products",
+  domain: "ecommerce",
+  domainDescription: "Online store"
+})
+```
+
+- The agent decides new vs existing based on what it saw in `get_state_machine`.
+- No signature with view/action names — the signature is derived automatically by the orchestrator from the views and actions submitted via `submit_view` / `submit_action`.
+- For existing states: agent skips view discovery (views already in manifest). Only submits new actions if any.
+- For new states: agent proceeds to `submit_view` for each view, then `submit_action` for each action.
+- All views and actions attach to the current state (the one registered via `submit_state`).
+- The orchestrator handles all manifest mutations after the agent finishes.
+
+Replaces `submit_skeleton` + `submit_item` + `submit_manifest` + `submit_state_step`.
+
+#### What's removed
+
+| Old Tool | Why removed |
+|----------|-------------|
+| `test_selector` | Replaced by `test_code` — agent writes full Playwright functions |
+| `test_view_extraction` | Replaced by `test_code` with `expected` — agent writes extraction code, compares output |
+| `test_endpoint_grounding` | Replaced by `test_code` with `verify_against_recording` — verifies against recorded events |
+| `get_element_details` | Merged into `inspect_element` — form context preserved, CSS selectors/locator strategies dropped |
+| `inspect_item_fields` | Merged into `inspect_element` — general magnifying lens (ancestors + descendants), not limited to list items |
+| `submit_skeleton` | Replaced by `submit_state` + `submit_view` + `submit_action` |
+| `submit_item` | Replaced by `submit_view` + `submit_action` |
+| `submit_manifest` | Removed — manifest built by orchestrator |
+| `get_snapshot_manifest` | Removed — no merge agent |
+| `submit_site_manifest` | Removed — no merge agent |
+
+#### Agent architecture
+
+The old 3-phase pipeline (planner → parallel sub-agents → assembler) is replaced by a **single ReAct agent per snapshot** with incremental submission:
+
+1. **Orient** — `view_screenshot`, `get_page_regions`, `get_accessibility_tree`
+2. **Determine state** — `get_state_machine` to review existing states, then `submit_state` with the signature
+   - If **existing state**: tool returns existing views/actions. Skip to step 5.
+   - If **new state**: proceed to step 3.
+3. **Identify + write views** (new states only) — for each data region:
+   - `get_accessibility_tree` scoped to region, `inspect_element` for structure
+   - Write Playwright extraction code, `test_code` with `expected` to verify
+   - `submit_view` — submit and forget, move to next view
+4. **Identify + write actions** (if not last snapshot) — `get_transition_events` to see forward events:
+   - For each interaction: `inspect_element` to understand the target element
+   - Write Playwright interaction code, `test_code` with `verify_against_recording` to verify
+   - `submit_action` — submit and forget, move to next action
+5. **Done** — agent stops. Orchestrator wires the manifest.
+
+Key properties:
+- **Last snapshot** = terminal state. No forward events, no actions.
+- **Existing state** = skip view discovery entirely. Only submit new actions if any.
+- **Context stays light** — each view/action is submitted individually and can be forgotten.
+- **Orchestrator handles manifest** — `addState`, `mergeActions`, `setLeadsTo` are all deterministic, outside the agent.
+
+**Checkpoint**: All tools defined. Ready to implement.
+
+---
+
+### Phase 5: Implement Tools + Agent
+
+Implement the tools from Phase 4 and the single ReAct agent per snapshot.
+
+**New files:**
+- `core/discovery/tools/` — rewrite with new tool implementations
+- `core/discovery/agent.js` — single ReAct agent per snapshot (replaces planner + sub-agents + assembler)
+
+**Delete:**
+- `core/discovery/planner.js` — subsumed by single agent
+- `core/discovery/sub-agents/item-agent.js` — subsumed by single agent
+- `core/discovery/assembler.js` — subsumed by submit_state_step validation
+- `core/discovery/merge-agent.js` — no merge step
+
+**Checkpoint**: Agent processes a single snapshot and produces a state step result (semantic state + views with code + actions with code).
+
+---
+
+### Phase 6: Serial Session Processing
 
 **File**: `core/discovery/session.js`
 
-- Remove `_pendingSnapshots` (parallel Promise array)
-- Add `_snapshotQueue` (plain array of payloads — `addSnapshot()` just pushes)
-- Use `StateMachineManifest` from `core/manifest/`:
-  ```js
-  this._manifest = new StateMachineManifest();
-  this._previousStateId = null;
-  ```
-- Rewrite `finalize()` — serial for-loop:
-  ```
-  for each snapshot in _snapshotQueue:
-    1. Create browser instance
-    2. Call runDiscoveryAgent() with manifest.toSummary() as context
-    3. Call _integrateStepResult() to update manifest
-    4. Close browser
-  return { siteSchema: _manifest.toJSON() }
-  ```
-- Add `_integrateStepResult(result, isFirst)`:
-  - `is_existing: true` → reuse existing state id
-  - `is_existing: false` → `manifest.addState()` with grounded views
-  - `manifest.mergeActions()` to add the grounded trigger action to the previous state
-  - If first snapshot → set `manifest.initial_state`
-  - If not first → `manifest.setLeadsTo()` on the previous state's action
-  - Update `_previousStateId`
-- Remove merge agent call entirely
+Takes a session recording (`events` + `snapshots`) and processes each snapshot serially. The agent does LLM work (state determination, view/action code generation). The orchestrator does deterministic manifest wiring.
 
-**Checkpoint**: Session processes snapshots serially using StateMachineManifest. Agent interface changes are needed next.
+```
+prev_state_id = null
+prev_action_name = null
 
----
+for each snapshot[i] in recording.snapshots:
 
-### Phase 5: State-Machine-Aware Agent Graph
+  1. REPLAY: Load events into rrweb Replayer, seek to snapshot[i]
+     → DOM reconstructed in headless Playwright
 
-**File**: `core/discovery/agent.js`
+  2. AGENT (LLM): Receives replayed DOM + screenshot + state machine summary
+     + forward transition events (events from snapshot[i] to snapshot[i+1])
+     → Produces: semantic_state + views (with code) + actions (with code)
 
-- Update `DiscoveryAnnotation`:
-  - Replace `skeleton` → `stateStep` (planner output per snapshot)
-  - Add `stateMachineContext` (the accumulated state machine, read-only context)
-  - Add `trigger` (the trigger that caused this snapshot)
-  - Add `isFirstSnapshot` flag
-  - Replace `manifest` → `stateStepResult` (output: semantic state + grounded views + grounded actions)
-- Update `plannerNode`: pass `stateMachineContext` and `trigger` through `config.configurable` (trigger is used internally by the planner to identify which action caused the transition — not stored in manifest)
-- Update `dispatchToWorkers`:
-  - Fan out `stateStep.views` as view items to ground
-  - Fan out `stateStep.transition_actions` as action items to ground
-  - For first snapshot: `transition_actions` is empty → only view grounding happens
-- Update `assembleNode`: produce `stateStepResult` instead of per-page manifest
-- Update `runDiscoveryAgent` signature:
-  ```js
-  runDiscoveryAgent({
-    snapshot, browser,
-    stateMachine,       // accumulated state machine for context
-    isFirstSnapshot,    // boolean
-    trigger,            // the trigger that caused this snapshot (internal use only)
-    onProgress, sessionId
-  })
-  ```
+  3. ORCHESTRATOR (deterministic):
+     a. Add or reuse state:
+        - is_existing → current_state_id = existing_state_id
+        - new state → current_state_id = manifest.addState(views, actions)
+     b. Link previous action to this state:
+        - if prev_state_id != null:
+          manifest.setLeadsTo(prev_state_id, prev_action_name, current_state_id)
+     c. Remember for next iteration:
+        - prev_state_id = current_state_id
+        - prev_action_name = action name from this step (if actions exist)
 
-**Checkpoint**: Agent graph accepts state machine context and returns step results. Planner prompt changes next.
+return manifest.toJSON()
+```
+
+The agent never touches the manifest directly. It only produces state step results. All manifest mutations are deterministic.
+
+**Checkpoint**: Full pipeline: recording → serial agent runs → state machine manifest.
 
 ---
 
-### Phase 6: New Planner Prompt
-
-**File**: `core/discovery/planner.js`
-
-Rewrite `SYSTEM_PROMPT` entirely. New workflow:
-
-1. **ORIENT** — same as before (screenshot, page regions, domain)
-2. **DETERMINE STATE** (new step):
-   - Examine page content semantically (not just URL)
-   - Review accumulated state machine context (provided in HumanMessage)
-   - Decide: is this a state we've already seen, or a new one?
-   - If existing → set `is_existing: true`, reference by `existing_state_id`
-   - If new → set `is_existing: false`, assign semantic `name` + `description`
-3. **IDENTIFY VIEWS** — same as before but scoped to this state's visible data only
-4. **IDENTIFY TRIGGER ACTIONS** (replaces "identify all endpoints"):
-   - First snapshot (`trigger.kind === 'initial'`): NO actions — no incoming transition
-   - Subsequent snapshots: receive trigger data in the HumanMessage. Find ONLY the DOM elements that correspond to the trigger interaction
-   - Example: trigger says "click on `<button>` 'Add to Cart'" → find that button, that's the only action
-   - Example: trigger says "click on `<button>` 'Submit'" near a form → find the form fields + submit button
-   - Use `find_interactive` and `get_element_details` to match trigger to actual elements
-5. **SUBMIT** — call `submit_state_step` (not `submit_skeleton`)
-
-Update `runPlanner`:
-- Accept `stateMachine` and `trigger` parameters
-- Build HumanMessage with:
-  - Compact state machine summary (state names + ids, signatures)
-  - Raw trigger details (kind, target, url)
-  - URL and title of current snapshot
-
-**Checkpoint**: Planner produces state steps with semantic state deduction and trigger-scoped actions.
-
----
-
-### Phase 7: Assembler Rework
-
-**File**: `core/discovery/assembler.js`
-
-- Input: `{ stateStep, views, actions }` — stateStep from planner, views/actions grounded by sub-agents
-- Output: `{ stateStepResult }`:
-  ```js
-  {
-    semanticState: stateStep.semantic_state,  // { name, description, signature, is_existing, existing_state_id }
-    groundedViews: [...],                      // grounded view objects
-    groundedActions: [...]                     // grounded action objects (trigger-relevant only)
-  }
-  ```
-- Remove all workflow assembly logic
-- Validation: validate grounded items match what planner requested (views by name, actions by name)
-
-**Checkpoint**: Assembler produces state step results. All core discovery pipeline updated.
-
----
-
-### Phase 8: Delete Merge Agent
-
-**File**: `core/discovery/merge-agent.js` — **DELETE entirely**
-
-- Remove import in `session.js` (already done in Phase 2)
-- Remove `getMergeTools` export from `tools/index.js` (already done in Phase 1)
-- Remove `siteManifestSchema`, `sitePageSchema` from `tools/index.js`
-
-**Checkpoint**: No merge agent. State machine is built incrementally.
-
----
-
-### Phase 9: Session Manager Updates
-
-**File**: `core/session-manager.js`
-
-- `stopSession()`: manifest shape changes from `{ pages[] }` to `{ states[] }` — update all logging
-- Update `session.json` output: per-snapshot summaries now show which state was deduced and which action got its `leads_to` set
-- Update `listSites()`:
-  ```js
-  // Old: pageCount, viewCount, endpointCount, workflowCount
-  // New: stateCount, viewCount, actionCount
-  stateCount: m.states?.length || 0,
-  viewCount: m.states?.reduce((n, s) => n + (s.views?.length || 0), 0) || 0,
-  actionCount: m.states?.reduce((n, s) => n + (s.actions?.length || 0), 0) || 0,
-  ```
-
-**Checkpoint**: Session manager works with new manifest shape.
-
----
-
-### Phase 10: API & Manifest Store Updates
+### Phase 7: API & Manifest Store Updates
 
 **`core/manifest-store.js`**:
-- Update `meta.json` fields: `stateCount`, `actionCount` (replace `entityCount`, `actionCount`)
+- Update meta fields for state machine shape
 
 **`core/api/openapi.js`**:
-- Rewrite `generateOpenApiSpec`: iterate `manifest.states[].views` for read APIs
-- Actions with `leads_to` are executable — generate action APIs from `manifest.states[].actions`
-- Rewrite `collectReadViews` to navigate states instead of pages
-
-**`core/workflow-resolver.js`**:
-- Rewrite for action-based resolution
-- An action = navigate to `state.url_pattern` → execute `state.actions[name]` → arrive at `action.leads_to` state
+- Generate API spec from `manifest.states[].views` (read) and `manifest.states[].actions` (execute)
 
 **`core/api/router.js`**:
-- Update routes: actions on states replace workflows
-- Update landing page HTML: show state/action counts
-- Update read API routes to work with states
+- Update routes and counts for state machine manifest
 
-**Checkpoint**: Full end-to-end working. API docs render state machine. All old page-centric code removed.
+**`core/workflow-resolver.js`**:
+- Rewrite for action-based resolution: navigate to state URL → execute action code → arrive at leads_to state
+
+**Checkpoint**: Full end-to-end working. API docs render state machine.
 
 ---
 
@@ -504,30 +544,23 @@ Update `runPlanner`:
 | File | Action |
 |------|--------|
 | `core/manifest/` | ✅ New module: schemas, validation, builder class |
-| `electron/capture/dom-capture.js` | Inject rrweb recorder, filter to interaction events |
-| `electron/capture/settle-cycle.js` | Drain rrweb events on capture, attach to snapshot payload |
-| `core/discovery/tools/testing.js` | Remove workflow schema, update to use `core/manifest` |
-| `core/discovery/tools/index.js` | Add state step tools, remove merge tools |
-| `core/discovery/session.js` | Serial processing, state machine accumulation |
-| `core/discovery/agent.js` | State-machine-aware graph, new annotations |
-| `core/discovery/planner.js` | New system prompt, semantic state deduction |
-| `core/discovery/assembler.js` | State step assembly (no workflows) |
-| `core/discovery/merge-agent.js` | **DELETE** |
-| `core/session-manager.js` | New manifest shape, updated logging |
-| `core/manifest-store.js` | Updated meta fields |
-| `core/api/openapi.js` | State-machine-based API generation |
-| `core/workflow-resolver.js` | Action-based resolution |
-| `core/api/router.js` | Updated routes and counts |
-
-## Unchanged Files
-
-| File | Reason |
-|------|--------|
-| `electron/capture/session-bridge.js` | Orchestration unchanged — just passes snapshot payloads |
-| `electron/capture/screenshot.js` | Screenshot annotation unchanged |
-| `core/discovery/sub-agents/item-agent.js` | Agnostic to source — still grounds individual items |
-| `core/discovery/graphs/react-agent.js` | Generic ReAct framework |
-| `core/discovery/snapshot/*` | Index/browser unchanged |
+| `core/recording/` | ✅ New module: session recording schemas, validation |
+| `electron/capture/dom-capture.js` | ✅ rrweb recorder with source filter |
+| `electron/capture/settle-cycle.js` | ✅ Screenshot + snapshot marker only |
+| `electron/capture/session-bridge.js` | ✅ Assembles session recording on stop |
+| `core/session-manager.js` | ✅ saveRecording() with validation |
+| `electron/ui/src/shell/panels/HistoryPanel.tsx` | ✅ Session history + rrweb replay |
+| `core/discovery/tools/` | Rewrite with new tools (Phase 5) |
+| `core/discovery/agent.js` | Single ReAct agent per snapshot (Phase 5) |
+| `core/discovery/session.js` | Serial processing with rrweb replay (Phase 6) |
+| `core/discovery/planner.js` | **DELETE** (Phase 5) |
+| `core/discovery/sub-agents/` | **DELETE** (Phase 5) |
+| `core/discovery/assembler.js` | **DELETE** (Phase 5) |
+| `core/discovery/merge-agent.js` | **DELETE** (Phase 5) |
+| `core/api/openapi.js` | State-machine-based API generation (Phase 7) |
+| `core/workflow-resolver.js` | Action-based resolution (Phase 7) |
+| `core/api/router.js` | Updated routes and counts (Phase 7) |
+| `core/manifest-store.js` | Updated meta fields (Phase 7) |
 
 ---
 
@@ -535,14 +568,11 @@ Update `runPlanner`:
 
 1. **Phase 1**: ✅ Manifest module: schemas, validation, builder — all tested
 2. **Phase 2**: ✅ Session recording: rrweb event stream + snapshot markers, typed with Zod, validated, saved via core/session-manager
-3. **Phase 3**: History UI shows session list, rrweb-player replays recordings with snapshot annotations
-4. **Phase 4**: Snapshots process serially, StateMachineManifest accumulates correctly
-5. **Phase 5**: Agent graph passes state machine context through, returns step results
-6. **Phase 6**: Planner deduces semantic states, only extracts trigger-relevant actions
-7. **Phase 7**: Assembler produces valid state step results
-8. **Phase 8**: No merge agent references remain
-9. **Phase 9**: Session logs show states/actions instead of pages
-10. **Phase 10**: `http://127.0.0.1:8787/api/docs` renders state machine manifest
+3. **Phase 3**: ✅ History UI: session list, rrweb-player replays with snapshot seeking
+4. **Phase 4**: Tool inventory defined (above)
+5. **Phase 5**: Agent processes a single snapshot, produces state step with views/actions containing Playwright code
+6. **Phase 6**: Serial processing: recording → agent per snapshot → StateMachineManifest
+7. **Phase 7**: API docs render state machine, action execution works
 
 ## End-to-End Test
 1. Run Electron app, navigate to a site
@@ -557,5 +587,6 @@ Update `runPlanner`:
 ## Risks
 
 - **LLM state deduction quality**: Mitigated by providing compact state machine summary with signatures as context
-- **Serial latency**: Accepted tradeoff. Grounding sub-agents within each step still run in parallel via LangGraph Send
+- **Serial latency**: Accepted tradeoff per requirements
 - **Context growth**: Mitigated by compact summaries (state names + signatures only)
+- **Code generation quality**: Mitigated by test_code and test_action_against_recording tools — agent iterates until code passes
