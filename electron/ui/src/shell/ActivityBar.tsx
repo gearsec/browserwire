@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Compass, Play, Settings } from "lucide-react";
+import { Compass, Play, History, Settings } from "lucide-react";
 import { cn } from "../lib/utils";
 import type { Mode } from "./hooks/useLayout";
 
@@ -12,6 +12,7 @@ interface ActivityBarProps {
 const TOP_ITEMS: { mode: Mode; icon: typeof Compass; label: string }[] = [
   { mode: "discovery", icon: Compass, label: "Discovery" },
   { mode: "execution", icon: Play, label: "API Explorer" },
+  { mode: "history", icon: History, label: "History" },
 ];
 
 export function ActivityBar({ activeMode, rightPanelOpen, onSwitchMode }: ActivityBarProps) {

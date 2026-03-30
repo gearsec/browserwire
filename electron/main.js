@@ -9,30 +9,27 @@ import { app, BrowserWindow, BrowserView, ipcMain, session, Menu, safeStorage, d
 import { createServer } from "node:http";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 
 import { loadConfig, readConfigFile, writeConfigFile, reloadConfig, getConfig, PROVIDER_DEFAULTS } from "../core/config.js";
 import { SessionManager } from "../core/session-manager.js";
 import { ManifestStore } from "../core/manifest-store.js";
-import { collectReadViews } from "../core/api/openapi.js";
 import { createHttpHandler } from "../core/api/router.js";
 import { createSessionBridge } from "./capture/session-bridge.js";
-import { createPlaywrightBridge, executeWorkflowSteps } from "./capture/workflow-executor.js";
-import { buildLookups, resolveWorkflowSteps, sanitize } from "../core/workflow-resolver.js";
+import { executeViaElectron, setCDPPort } from "./capture/execution-bridge.js";
 import { initUpdater } from "./updater.js";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-
-// ─── CDP for Playwright ──────────────────────────────────────────────────────
 
 const CDP_PORT = 9223;
 app.commandLine.appendSwitch("remote-debugging-port", String(CDP_PORT));
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ─── Global State ────────────────────────────────────────────────────────────
 
 let mainWindow = null;
 let browserView = null;
+let overlayWindow = null;
 let sessionManager = null;
 let sessionBridge = null;
 let httpServer = null;
@@ -172,14 +169,14 @@ const startApp = async () => {
   sessionManager = new SessionManager(new ManifestStore(), { host, port });
   await sessionManager.loadManifests();
 
-  // Start HTTP server (REST API only, no WS)
-  // Use Electron bridge that executes workflows directly via hidden BrowserWindow
-  const bridge = createPlaywrightBridge({ cdpPort: CDP_PORT });
+  // Configure CDP port for execution bridge
+  setCDPPort(CDP_PORT);
 
+  // Start HTTP server (REST API)
   const httpHandler = createHttpHandler({
     getManifestBySlug: (slug) => sessionManager.getManifestBySlug(slug),
-    listSites: () => sessionManager.listSites({ collectReadViews }),
-    bridge,
+    listSites: () => sessionManager.listSites(),
+    execute: (opts) => executeViaElectron({ ...opts, parentWindow: mainWindow }),
     host,
     port,
   });
@@ -280,6 +277,8 @@ const startApp = async () => {
         mainWindow.webContents.send(channel, data);
       }
     },
+    showOverlay: showSnapshotOverlay,
+    hideOverlay: hideSnapshotOverlay,
   });
 
   // Wire IPC handlers
@@ -323,6 +322,58 @@ const layoutBrowserView = () => {
     browserView.setBounds({ x, y, width, height });
     browserView.setAutoResize({ width: true, height: true });
   }
+};
+
+// ─── Snapshot Overlay ─────────────────────────────────────────────────────────
+
+const OVERLAY_HTML = `data:text/html;charset=utf-8,${encodeURIComponent(`<!DOCTYPE html>
+<html><head><style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; }
+  body { display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.3); }
+  .label { background: rgba(0,0,0,0.7); color: white; padding: 12px 24px; border-radius: 8px; font: 500 14px system-ui, sans-serif; }
+</style></head><body><div class="label">Taking snapshot\u2026</div></body></html>`)}`;
+
+const showSnapshotOverlay = () => {
+  if (overlayWindow || !mainWindow || !browserView) return;
+
+  const bounds = browserView.getBounds();
+  const winBounds = mainWindow.getBounds();
+  const contentBounds = mainWindow.getContentBounds();
+  // Offset from window frame to content area
+  const frameOffsetX = contentBounds.x - winBounds.x;
+  const frameOffsetY = contentBounds.y - winBounds.y;
+
+  overlayWindow = new BrowserWindow({
+    parent: mainWindow,
+    x: winBounds.x + frameOffsetX + bounds.x,
+    y: winBounds.y + frameOffsetY + bounds.y,
+    width: bounds.width,
+    height: bounds.height,
+    frame: false,
+    transparent: true,
+    hasShadow: false,
+    focusable: false,
+    skipTaskbar: true,
+    resizable: false,
+    movable: false,
+    show: false,
+    webPreferences: { contextIsolation: true, nodeIntegration: false },
+  });
+
+  overlayWindow.loadURL(OVERLAY_HTML);
+  overlayWindow.once("ready-to-show", () => {
+    if (overlayWindow && !overlayWindow.isDestroyed()) {
+      overlayWindow.showInactive();
+    }
+  });
+};
+
+const hideSnapshotOverlay = () => {
+  if (!overlayWindow) return;
+  try {
+    if (!overlayWindow.isDestroyed()) overlayWindow.destroy();
+  } catch { /* ignore */ }
+  overlayWindow = null;
 };
 
 // ─── Navigation Helpers ──────────────────────────────────────────────────────
@@ -401,6 +452,79 @@ const wireIPC = () => {
     if (!sessionBridge) return { ok: false, error: "Not initialized" };
     try {
       await sessionBridge.stopExploring(note);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Session history
+  ipcMain.handle("browserwire:list-sessions", () => {
+    const logsDir = resolve(homedir(), ".browserwire", "logs");
+    if (!existsSync(logsDir)) return [];
+
+    const sessions = [];
+    for (const entry of readdirSync(logsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith("session-")) continue;
+      const sessionDir = resolve(logsDir, entry.name);
+      const metaPath = resolve(sessionDir, "session-recording.json");
+      if (!existsSync(metaPath)) continue;
+      try {
+        const meta = JSON.parse(readFileSync(metaPath, "utf8"));
+        sessions.push(meta);
+      } catch { /* skip corrupt files */ }
+    }
+    // Sort by startedAt descending (most recent first)
+    sessions.sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || ""));
+    return sessions;
+  });
+
+  ipcMain.handle("browserwire:load-session-events", async (_event, sessionId) => {
+    const eventsPath = resolve(homedir(), ".browserwire", "logs", `session-${sessionId}`, "events.json");
+    if (!existsSync(eventsPath)) return { ok: false, error: "Events file not found" };
+    try {
+      const events = JSON.parse(readFileSync(eventsPath, "utf8"));
+      return { ok: true, events };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle("browserwire:load-session-screenshot", async (_event, sessionId, snapshotId) => {
+    const screenshotPath = resolve(homedir(), ".browserwire", "logs", `session-${sessionId}`, `${snapshotId}.jpg`);
+    if (!existsSync(screenshotPath)) return { ok: false, error: "Screenshot not found" };
+    try {
+      const data = readFileSync(screenshotPath);
+      return { ok: true, screenshot: data.toString("base64") };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle("browserwire:retrain-session", async (_event, sessionId) => {
+    const send = (channel, data) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(channel, data);
+      }
+    };
+    try {
+      await sessionManager.reprocessSession(sessionId, {
+        onStatus: (status) => {
+          send("browserwire:session-status", { sessionId, ...status });
+          if (status.tool) {
+            send("browserwire:log", `${status.tool}`);
+          }
+          if (status.status === "complete") {
+            send("browserwire:session-status", { sessionId, status: "finalized" });
+            send("browserwire:log",
+              `Retrain ${sessionId}: complete (${status.totalToolCalls || 0} tool calls)`
+            );
+          }
+          if (status.status === "error") {
+            send("browserwire:log", `Retrain error: ${status.error}`);
+          }
+        },
+      });
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -514,72 +638,6 @@ const wireIPC = () => {
       return { ok: true, llmConfigured: !!newConfig._llmConfigured };
     } catch (err) {
       return { ok: false, error: err.message };
-    }
-  });
-
-  // Workflow execution (from Execution tab — opens a visible window)
-  ipcMain.handle("browserwire:execute-workflow", async (_event, { slug, workflowName, inputs }) => {
-    if (!sessionManager) {
-      return { ok: false, error: "Not initialized" };
-    }
-
-    const lookup = sessionManager.getManifestBySlug(slug);
-    if (!lookup) return { ok: false, error: `Site '${slug}' not found` };
-    const { manifest, origin } = lookup;
-
-    // Resolve workflow
-    const lookups = buildLookups(manifest);
-    const workflow = lookups.workflowMap.get(sanitize(workflowName));
-    if (!workflow) return { ok: false, error: `Workflow '${workflowName}' not found` };
-
-    const resolved = resolveWorkflowSteps(workflow, lookups.viewMap, lookups.endpointMap);
-    if (resolved.error) return { ok: false, error: resolved.error };
-
-    // Notify renderer: execution starting
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("browserwire:execution-state", { running: true });
-    }
-
-    // Open a visible Electron BrowserWindow controlled via Playwright CDP
-    const { chromium } = await import("playwright");
-    const execWin = new BrowserWindow({
-      width: 1280,
-      height: 800,
-      title: `Running: ${workflowName.replace(/_/g, " ")}`,
-      parent: mainWindow,
-      webPreferences: {
-        contextIsolation: false,
-        nodeIntegration: false,
-        sandbox: false,
-      },
-    });
-
-    try {
-      // Navigate the Electron window to the origin
-      await execWin.loadURL(origin);
-
-      // Connect Playwright to Electron via CDP and find this page
-      const browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
-      const allPages = browser.contexts().flatMap((c) => c.pages());
-      const page = allPages.find((p) => p.url().startsWith(origin)) || allPages[allPages.length - 1];
-
-      if (!page) {
-        return { ok: false, error: "Could not find execution page via CDP" };
-      }
-
-      const result = await executeWorkflowSteps(page, {
-        steps: resolved.steps, pagination: resolved.pagination,
-        outcomes: workflow.outcomes || {}, inputs: inputs || {}, origin,
-      });
-      return result;
-    } catch (err) {
-      return { ok: false, error: err.message || "Workflow execution failed" };
-    } finally {
-      execWin.destroy();
-
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("browserwire:execution-state", { running: false });
-      }
     }
   });
 };

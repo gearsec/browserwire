@@ -1,16 +1,24 @@
-import React, { useState, useEffect } from "react";
-import { Loader2, Monitor, ChevronRight, ArrowLeft, Globe } from "lucide-react";
+import React, { useState, useEffect, useCallback } from "react";
+import {
+  Loader2,
+  ChevronRight,
+  ChevronDown,
+  ArrowLeft,
+  Globe,
+  Play,
+  Copy,
+  Check,
+} from "lucide-react";
 import { Alert, AlertTitle, AlertDescription } from "../../components/ui/alert";
 import { ScrollArea } from "../../components/ui/scroll-area";
 import { Separator } from "../../components/ui/separator";
 import { Button } from "../../components/ui/button";
-import { WorkflowCard } from "../execution/WorkflowCard";
+import { Badge } from "../../components/ui/badge";
+import { Input } from "../../components/ui/input";
+import { Label } from "../../components/ui/label";
+import { Card, CardContent } from "../../components/ui/card";
 import { useExecution } from "../hooks/useExecution";
-import type { SiteInfo, Manifest, Page, WorkflowResult } from "../hooks/useExecution";
-
-function humanize(name: string): string {
-  return name.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-}
+import type { SiteInfo, Endpoint } from "../hooks/useExecution";
 
 function SiteCard({ site, onClick }: { site: SiteInfo; onClick: () => void }) {
   return (
@@ -24,9 +32,11 @@ function SiteCard({ site, onClick }: { site: SiteInfo; onClick: () => void }) {
           {site.slug.replace(/_/g, ".")}
         </p>
         <p className="text-xs text-muted-foreground">
-          {site.pageCount ?? 0} {(site.pageCount ?? 0) === 1 ? "page" : "pages"}
+          {site.stateCount ?? 0} {(site.stateCount ?? 0) === 1 ? "state" : "states"}
           {" · "}
-          {site.workflowCount ?? 0} {(site.workflowCount ?? 0) === 1 ? "workflow" : "workflows"}
+          {site.viewCount ?? 0} {(site.viewCount ?? 0) === 1 ? "view" : "views"}
+          {" · "}
+          {site.actionCount ?? 0} {(site.actionCount ?? 0) === 1 ? "action" : "actions"}
         </p>
       </div>
       <ChevronRight className="size-4 text-muted-foreground shrink-0" />
@@ -34,36 +44,179 @@ function SiteCard({ site, onClick }: { site: SiteInfo; onClick: () => void }) {
   );
 }
 
-function PageSection({ page, children }: { page: Page; children: React.ReactNode }) {
+function EndpointCard({
+  endpoint,
+  onExecute,
+}: {
+  endpoint: Endpoint;
+  onExecute: (method: string, path: string, params: Record<string, string>) => Promise<any>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [params, setParams] = useState<Record<string, string>>({});
+  const [running, setRunning] = useState(false);
+  const [response, setResponse] = useState<any>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const handleRun = async () => {
+    setRunning(true);
+    setResponse(null);
+    setError(null);
+    try {
+      const result = await onExecute(endpoint.method, endpoint.path, params);
+      setResponse(result);
+    } catch (err: any) {
+      setError(err.message || "Request failed");
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const handleCopy = () => {
+    if (response) {
+      navigator.clipboard.writeText(JSON.stringify(response, null, 2));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  const isGet = endpoint.method === "GET";
+
+  // Extract short name from path (last segment)
+  const shortName = endpoint.path.split("/").pop() || endpoint.operationId;
+
   return (
-    <div className="flex flex-col gap-3">
-      <div className="flex items-baseline gap-2">
-        <h3 className="text-sm font-medium">{humanize(page.name)}</h3>
-        <span className="text-xs text-muted-foreground">{page.routePattern}</span>
-      </div>
-      {children}
-    </div>
+    <Card>
+      <button
+        className="w-full text-left p-3 flex items-center gap-2 hover:bg-accent/30 transition-colors cursor-pointer"
+        onClick={() => setExpanded(!expanded)}
+      >
+        <Badge
+          variant={isGet ? "secondary" : "default"}
+          className={`text-[10px] font-mono shrink-0 ${
+            isGet ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200" : "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200"
+          }`}
+        >
+          {endpoint.method}
+        </Badge>
+        <span className="text-sm font-medium truncate flex-1">{shortName}</span>
+        {endpoint.summary && (
+          <span className="text-xs text-muted-foreground truncate max-w-[200px]">
+            {endpoint.summary}
+          </span>
+        )}
+        {expanded ? (
+          <ChevronDown className="size-4 text-muted-foreground shrink-0" />
+        ) : (
+          <ChevronRight className="size-4 text-muted-foreground shrink-0" />
+        )}
+      </button>
+
+      {expanded && (
+        <CardContent className="px-3 pb-3 pt-0 flex flex-col gap-3">
+          <p className="text-xs text-muted-foreground font-mono">{endpoint.path}</p>
+
+          {endpoint.parameters.length > 0 && (
+            <div className="flex flex-col gap-2">
+              {endpoint.parameters.map((p) => (
+                <div key={p.name} className="flex flex-col gap-1">
+                  <Label className="text-xs">
+                    {p.name}
+                    {p.required && <span className="text-destructive ml-0.5">*</span>}
+                    {p.description && (
+                      <span className="text-muted-foreground font-normal ml-1">
+                        — {p.description}
+                      </span>
+                    )}
+                  </Label>
+                  <Input
+                    className="h-7 text-xs font-mono"
+                    placeholder={p.type}
+                    value={params[p.name] || ""}
+                    onChange={(e) =>
+                      setParams((prev) => ({ ...prev, [p.name]: e.target.value }))
+                    }
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+
+          <Button
+            size="sm"
+            className="self-start gap-1.5"
+            onClick={handleRun}
+            disabled={running}
+          >
+            {running ? (
+              <Loader2 className="size-3 animate-spin" />
+            ) : (
+              <Play className="size-3" />
+            )}
+            {running ? "Running…" : "Run"}
+          </Button>
+
+          {error && (
+            <Alert variant="destructive" className="py-2">
+              <AlertDescription className="text-xs">{error}</AlertDescription>
+            </Alert>
+          )}
+
+          {response && (
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-medium text-muted-foreground">Response</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 gap-1 text-xs"
+                  onClick={handleCopy}
+                >
+                  {copied ? (
+                    <Check className="size-3 text-emerald-500" />
+                  ) : (
+                    <Copy className="size-3" />
+                  )}
+                  {copied ? "Copied" : "Copy JSON"}
+                </Button>
+              </div>
+              <pre className="text-xs font-mono bg-muted rounded-md p-3 overflow-auto max-h-[400px] whitespace-pre-wrap break-all">
+                {JSON.stringify(response, null, 2)}
+              </pre>
+            </div>
+          )}
+        </CardContent>
+      )}
+    </Card>
   );
 }
 
 function SiteDetailView({
   site,
-  manifest,
-  results,
+  siteEndpoints,
   onBack,
-  onEnsureManifest,
-  onExecuteWorkflow,
+  onEnsure,
+  onExecute,
 }: {
   site: SiteInfo;
-  manifest: Manifest | undefined;
-  results: Map<string, WorkflowResult>;
+  siteEndpoints: Endpoint[] | undefined;
   onBack: () => void;
-  onEnsureManifest: (slug: string) => void;
-  onExecuteWorkflow: (slug: string, name: string, inputs: Record<string, any>) => void;
+  onEnsure: (slug: string) => void;
+  onExecute: (method: string, path: string, params: Record<string, string>) => Promise<any>;
 }) {
   useEffect(() => {
-    onEnsureManifest(site.slug);
-  }, [site.slug, onEnsureManifest]);
+    onEnsure(site.slug);
+  }, [site.slug, onEnsure]);
+
+  // Group endpoints by tag
+  const grouped = new Map<string, Endpoint[]>();
+  if (siteEndpoints) {
+    for (const ep of siteEndpoints) {
+      const tag = ep.tags[0] || "Other";
+      if (!grouped.has(tag)) grouped.set(tag, []);
+      grouped.get(tag)!.push(ep);
+    }
+  }
 
   return (
     <div className="max-w-2xl mx-auto p-6 flex flex-col gap-6">
@@ -78,56 +231,50 @@ function SiteDetailView({
         </h2>
       </div>
 
-      {!manifest ? (
+      {!siteEndpoints ? (
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 className="size-4 animate-spin" />
-          Loading manifest…
+          Loading endpoints…
         </div>
+      ) : siteEndpoints.length === 0 ? (
+        <Alert>
+          <AlertDescription>No endpoints discovered for this site.</AlertDescription>
+        </Alert>
       ) : (
-        (() => {
-          const pagesWithWorkflows = (manifest.pages || []).filter(
-            (p) => p.workflows && p.workflows.length > 0
-          );
-
-          if (pagesWithWorkflows.length === 0) {
-            return (
-              <Alert>
-                <AlertDescription>No workflows discovered for this site.</AlertDescription>
-              </Alert>
-            );
-          }
-
-          return (
-            <div className="flex flex-col gap-4">
-              {pagesWithWorkflows.map((page) => (
-                <PageSection key={page.name} page={page}>
-                  {page.workflows!.map((wf) => (
-                    <WorkflowCard
-                      key={wf.name}
-                      workflow={wf}
-                      result={results.get(`${site.slug}/${wf.name}`)}
-                      onExecute={(inputs) => onExecuteWorkflow(site.slug, wf.name, inputs)}
-                    />
-                  ))}
-                </PageSection>
+        <div className="flex flex-col gap-5">
+          {Array.from(grouped.entries()).map(([tag, eps]) => (
+            <div key={tag} className="flex flex-col gap-2">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                {tag.replace(/_/g, " ")}
+              </h3>
+              {eps.map((ep) => (
+                <EndpointCard
+                  key={`${ep.method}-${ep.path}`}
+                  endpoint={ep}
+                  onExecute={onExecute}
+                />
               ))}
             </div>
-          );
-        })()
+          ))}
+        </div>
       )}
     </div>
   );
 }
 
 export function ExecutionPanel() {
-  const { sites, manifests, results, loadingSites, executing, ensureManifest, executeWorkflow } =
-    useExecution();
+  const {
+    sites,
+    endpoints,
+    loadingSites,
+    ensureOpenApiSpec,
+    executeEndpoint,
+  } = useExecution();
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
 
-  // Eagerly load manifests for all sites (for workflow counts in list view)
   useEffect(() => {
-    sites.forEach((s) => ensureManifest(s.slug));
-  }, [sites, ensureManifest]);
+    sites.forEach((s) => ensureOpenApiSpec(s.slug));
+  }, [sites, ensureOpenApiSpec]);
 
   if (loadingSites) {
     return (
@@ -148,18 +295,6 @@ export function ExecutionPanel() {
     );
   }
 
-  if (executing) {
-    return (
-      <div className="flex-1 flex items-center justify-center p-6">
-        <Alert className="max-w-sm">
-          <Monitor className="size-4" />
-          <AlertTitle>Workflow running…</AlertTitle>
-          <AlertDescription>Watch the browser window to see the workflow execute.</AlertDescription>
-        </Alert>
-      </div>
-    );
-  }
-
   const selectedSite = selectedSlug ? sites.find((s) => s.slug === selectedSlug) : null;
 
   if (selectedSite) {
@@ -167,11 +302,10 @@ export function ExecutionPanel() {
       <ScrollArea className="flex-1">
         <SiteDetailView
           site={selectedSite}
-          manifest={manifests.get(selectedSite.slug)}
-          results={results}
+          siteEndpoints={endpoints.get(selectedSite.slug)}
           onBack={() => setSelectedSlug(null)}
-          onEnsureManifest={ensureManifest}
-          onExecuteWorkflow={executeWorkflow}
+          onEnsure={ensureOpenApiSpec}
+          onExecute={executeEndpoint}
         />
       </ScrollArea>
     );

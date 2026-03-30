@@ -20,6 +20,7 @@ const RRWEB_SNAPSHOT_UMD_PATH = resolve(
   "../../../node_modules/rrweb-snapshot/dist/rrweb-snapshot.umd.cjs"
 );
 
+
 export class PlaywrightBrowser {
   constructor() {
     /** @type {import('playwright').Browser|null} */
@@ -72,51 +73,50 @@ export class PlaywrightBrowser {
     // Inject rrweb-snapshot UMD
     await page.addScriptTag({ content: this._rrwebScript });
 
-    // Rebuild the rrweb snapshot into the real DOM
+    // Rebuild the full rrweb snapshot (including <head> for stylesheets) into the real DOM
     await page.evaluate((snapshotJson) => {
       /* global rrwebSnapshot */
       const mirror = rrwebSnapshot.createMirror();
       const cache = rrwebSnapshot.createCache();
 
-      // Find the body node in the rrweb tree
-      function findBodyNode(node) {
+      // Find the <html> node in the rrweb tree
+      function findHtmlNode(node) {
         if (!node) return null;
-        if (node.type === 2 && (node.tagName || "").toLowerCase() === "body") {
+        if (node.type === 2 && (node.tagName || "").toLowerCase() === "html") {
           return node;
         }
         for (const child of node.childNodes || []) {
-          const found = findBodyNode(child);
+          const found = findHtmlNode(child);
           if (found) return found;
         }
         return null;
       }
 
-      const bodyNode = findBodyNode(snapshotJson);
-      if (!bodyNode) {
-        throw new Error("No body node found in rrweb snapshot");
+      const htmlNode = findHtmlNode(snapshotJson);
+      if (!htmlNode) {
+        throw new Error("No html node found in rrweb snapshot");
       }
 
-      const domBody = rrwebSnapshot.buildNodeWithSN(bodyNode, {
+      const domHtml = rrwebSnapshot.buildNodeWithSN(htmlNode, {
         doc: document,
         mirror,
         hackCss: false,
         cache,
       });
 
-      if (!domBody) {
-        throw new Error("buildNodeWithSN returned null");
+      if (!domHtml) {
+        throw new Error("buildNodeWithSN returned null for html node");
       }
 
-      // Replace the document body with the reconstructed one
-      if (document.body) {
-        document.documentElement.replaceChild(domBody, document.body);
-      } else {
-        document.documentElement.appendChild(domBody);
-      }
+      // Replace the entire document element (includes <head> with stylesheets + <body>)
+      document.replaceChild(domHtml, document.documentElement);
 
       // Store mirror on window for rrweb ID lookups
       window.__rrwebMirror = mirror;
     }, rrwebSnapshotJson);
+
+    // Wait for external stylesheets to load so CSS layout matches the live page
+    await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
 
     this.page = page;
     return page;
@@ -269,6 +269,79 @@ export class PlaywrightBrowser {
     }
 
     return mapping;
+  }
+
+  /**
+   * Start capturing interaction events via DOM listeners.
+   * Uses window.__rrwebMirror (from snapshot reconstruction) to map
+   * event targets to original recording node IDs.
+   * Call collectRecordedEvents() after executing action code.
+   */
+  async startRecording() {
+    if (!this.page) throw new Error("No page loaded");
+    await this.page.evaluate(() => {
+      window.__bw_test_events = [];
+      const handler = (e) => {
+        // Prevent navigation — link clicks in reconstructed DOM destroy the page context
+        if (e.type === "click") e.preventDefault();
+
+        // Walk up from target to find the nearest node in the reconstruction mirror
+        let node = e.target;
+        let id = 0;
+        while (node && node !== document) {
+          id = window.__rrwebMirror?.getId(node) || 0;
+          if (id > 0) break;
+          node = node.parentElement;
+        }
+        if (id > 0) {
+          window.__bw_test_events.push({ type: e.type, rrweb_node_id: id });
+        }
+      };
+      window.__bw_test_handler = handler;
+      ["mousedown", "mouseup", "click", "input", "change"].forEach((t) =>
+        document.addEventListener(t, handler, { capture: true })
+      );
+    });
+  }
+
+  /**
+   * Collect interaction events captured since startRecording().
+   * Returns deduplicated events with rrweb node IDs from the reconstruction mirror.
+   *
+   * @returns {Promise<Array<{ type: string, rrweb_node_id: number, interaction_type?: number }>>}
+   */
+  async collectRecordedEvents() {
+    if (!this.page) return [];
+    return this.page.evaluate(() => {
+      const handler = window.__bw_test_handler;
+      if (handler) {
+        ["mousedown", "mouseup", "click", "input", "change"].forEach((t) =>
+          document.removeEventListener(t, handler, { capture: true })
+        );
+        window.__bw_test_handler = null;
+      }
+      const events = window.__bw_test_events || [];
+      window.__bw_test_events = [];
+
+      // Map DOM event types to rrweb MouseInteraction types
+      const INTERACTION_TYPE = { mousedown: 1, mouseup: 0, click: 2 };
+      const seen = new Set();
+      return events
+        .map((e) => {
+          const isInput = e.type === "input" || e.type === "change";
+          return {
+            type: isInput ? "input" : "mouse_interaction",
+            interaction_type: isInput ? undefined : INTERACTION_TYPE[e.type],
+            rrweb_node_id: e.rrweb_node_id,
+          };
+        })
+        .filter((e) => {
+          const key = e.type + ":" + e.rrweb_node_id + ":" + e.interaction_type;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+    });
   }
 
   /**

@@ -25,15 +25,12 @@ contextBridge.exposeInMainWorld("browserwire", {
   startExploring: () => ipcRenderer.invoke("browserwire:start-exploring"),
   stopExploring: (note) => ipcRenderer.invoke("browserwire:stop-exploring", note),
 
-  // Workflow execution
-  executeWorkflow: (payload) => ipcRenderer.invoke("browserwire:execute-workflow", payload),
 
-  // Execution state listener
-  onExecutionState: (callback) => {
-    const handler = (_event, state) => callback(state);
-    ipcRenderer.on("browserwire:execution-state", handler);
-    return () => ipcRenderer.removeListener("browserwire:execution-state", handler);
-  },
+  // Session history
+  listSessions: () => ipcRenderer.invoke("browserwire:list-sessions"),
+  loadSessionEvents: (sessionId) => ipcRenderer.invoke("browserwire:load-session-events", sessionId),
+  loadSessionScreenshot: (sessionId, snapshotId) => ipcRenderer.invoke("browserwire:load-session-screenshot", sessionId, snapshotId),
+  retrainSession: (sessionId) => ipcRenderer.invoke("browserwire:retrain-session", sessionId),
 
   // Settings
   getSettings: () => ipcRenderer.invoke("browserwire:get-settings"),

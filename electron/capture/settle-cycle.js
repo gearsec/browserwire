@@ -1,14 +1,20 @@
 /**
  * settle-cycle.js — Main-process settle state machine for Electron.
  *
- * Replaces the injected SETTLE_CYCLE_SCRIPT with native Electron APIs:
+ * Determines WHEN to capture a snapshot marker by monitoring:
  *   - session.webRequest for network idle tracking
- *   - webContents.on('console-message') for page signals (click/input/mutation)
- *   - On settle: captures snapshot via executeJavaScript + capturePage
+ *   - webContents.on('console-message') for page signals (click/mutation/navigation)
+ *
+ * On settle: drains rrweb events from the page into a main-process buffer,
+ * triggers a FullSnapshot checkpoint, captures a screenshot, and emits a
+ * snapshot marker with the eventIndex into the cumulative buffer.
+ *
+ * The event buffer lives in the main process — survives page navigations.
+ * Each capture drains all new events from window.__bw_events, so the page
+ * array is always emptied and navigation can't lose events.
  */
 
 import { session } from "electron";
-import { annotateScreenshot } from "./screenshot.js";
 
 const SETTLE_DEBOUNCE_MS = 500;
 const SETTLE_HARD_TIMEOUT_MS = 4000;
@@ -22,21 +28,25 @@ const NON_BLOCKING_URL_RE =
   /google-analytics|segment\.io|sentry\.io|hotjar|intercom|doubleclick|fonts\.(googleapis|gstatic)|\.woff2?(\?|$)|\.ttf(\?|$)|\.css(\?|$)|\.png(\?|$)|\.jpg(\?|$)|\.jpeg(\?|$)|\.svg(\?|$)|\.gif(\?|$)/i;
 
 /**
- * @param {{ webContents: Electron.WebContents, onSnapshot: (snap: object) => void }} opts
+ * @param {{ webContents: Electron.WebContents, onSnapshot: (snap: object) => void, onCaptureStart?: () => void, onCaptureEnd?: () => void }} opts
  */
 export class SettleCycleManager {
-  constructor({ webContents, onSnapshot }) {
+  constructor({ webContents, onSnapshot, onCaptureStart, onCaptureEnd }) {
     this._wc = webContents;
     this._onSnapshot = onSnapshot;
+    this._onCaptureStart = onCaptureStart || (() => {});
+    this._onCaptureEnd = onCaptureEnd || (() => {});
     this._wcId = webContents.id;
 
     // State machine
     this._phase = "idle"; // "idle" | "settling"
-    this._pendingTrigger = null;
     this._settleTimer = null;
     this._hardTimer = null;
     this._capturing = false;
     this._snapshotCount = 0;
+
+    // Cumulative event buffer (main process — survives navigations)
+    this._eventBuffer = [];
 
     // Network tracking
     this._pendingRequests = new Map();
@@ -55,20 +65,26 @@ export class SettleCycleManager {
   }
 
   /**
+   * Get the cumulative event buffer (all events across all page navigations).
+   * Called by session-bridge on stop to build the session recording.
+   */
+  get events() {
+    return this._eventBuffer;
+  }
+
+  /**
    * Attach listeners and start receiving signals.
    */
   start() {
     if (this._started) return;
     this._started = true;
 
-    // Listen for page signals via console-message
     this._wc.on("console-message", this._onConsoleMessage);
 
-    // Network tracking via session.webRequest
     const ses = this._wc.session || session.defaultSession;
 
     this._onBeforeRequest = (details, callback) => {
-      callback({}); // always proceed — we're observing, not blocking
+      callback({});
       if (details.webContentsId !== this._wcId) return;
       if (!BLOCKING_RESOURCE_TYPES.has(details.resourceType)) return;
       if (NON_BLOCKING_URL_RE.test(details.url)) return;
@@ -78,7 +94,6 @@ export class SettleCycleManager {
         startedAt: Date.now(),
       });
 
-      // Network activity during settling resets the debounce
       if (this._phase === "settling") {
         this._resetDebounce();
       }
@@ -110,13 +125,10 @@ export class SettleCycleManager {
 
     this._clearTimers();
     this._phase = "idle";
-    this._pendingTrigger = null;
     this._pendingRequests.clear();
-    this._hideOverlay();
 
     this._wc.removeListener("console-message", this._onConsoleMessage);
 
-    // Remove webRequest listeners by setting to null
     const ses = this._wc.session || session.defaultSession;
     ses.webRequest.onBeforeRequest(null);
     ses.webRequest.onCompleted(null);
@@ -125,6 +137,30 @@ export class SettleCycleManager {
     this._onBeforeRequest = null;
     this._onRequestCompleted = null;
     this._onRequestFailed = null;
+  }
+
+  /**
+   * Drain all rrweb events from the page into the main-process buffer.
+   * Clears the page array so events aren't double-counted.
+   * Returns the number of events drained.
+   */
+  async drainEvents() {
+    try {
+      const eventsJson = await this._wc.executeJavaScript(`
+        (function() {
+          var events = window.__bw_events || [];
+          window.__bw_events = [];
+          return JSON.stringify(events);
+        })()
+      `);
+      const events = JSON.parse(eventsJson);
+      if (events.length > 0) {
+        this._eventBuffer.push(...events);
+      }
+      return events.length;
+    } catch {
+      return 0;
+    }
   }
 
   // ─── Internal ──────────────────────────────────────────────────────
@@ -139,30 +175,30 @@ export class SettleCycleManager {
       return;
     }
 
+    // Drain events eagerly to prevent loss if the page navigates away.
+    // Skip during snapshot capture — _captureSnapshot manages its own drain.
+    if (!this._capturing) {
+      this.drainEvents().catch(() => {});
+    }
+
     if (signal.type === "interaction") {
-      this._beginSettleCycle(signal.trigger || { kind: "unknown" });
+      this._beginSettleCycle();
     } else if (signal.type === "mutation") {
-      // DOM mutations during settling reset the debounce
       if (this._phase === "settling") {
         this._resetDebounce();
       }
     }
   }
 
-  _beginSettleCycle(trigger) {
+  _beginSettleCycle() {
     if (this._phase === "settling") {
-      // Already settling — update trigger, reset debounce, keep hard cap
-      this._pendingTrigger = trigger;
-      this._pendingRequests.clear(); // reset network tracking for this interaction
+      this._pendingRequests.clear();
       this._resetDebounce();
       return;
     }
 
     this._phase = "settling";
-    this._pendingTrigger = trigger;
     this._pendingRequests.clear();
-
-    this._showOverlay();
 
     this._settleTimer = setTimeout(() => this._onSettle(), SETTLE_DEBOUNCE_MS);
     this._hardTimer = setTimeout(() => this._forceScan(), SETTLE_HARD_TIMEOUT_MS);
@@ -180,7 +216,6 @@ export class SettleCycleManager {
     if (this._isNetworkIdle()) {
       this._executeScan();
     }
-    // else: network still active — wait for _checkNetworkIdle or hard timeout
   }
 
   _forceScan() {
@@ -193,7 +228,6 @@ export class SettleCycleManager {
     if (this._phase !== "settling") return;
     if (!this._isNetworkIdle()) return;
 
-    // Network just drained — short debounce then settle
     if (!this._settleTimer) {
       this._settleTimer = setTimeout(() => this._onSettle(), 100);
     }
@@ -205,66 +239,79 @@ export class SettleCycleManager {
 
   _executeScan() {
     this._clearTimers();
-    const trigger = this._pendingTrigger;
     this._phase = "idle";
-    this._pendingTrigger = null;
 
-    // Avoid concurrent captures
     if (this._capturing) return;
-    this._captureSnapshot(trigger).catch((err) => {
+    this._captureSnapshot().catch((err) => {
       console.warn("[browserwire-electron] snapshot capture failed:", err.message);
-      this._hideOverlay();
     });
   }
 
-  async _captureSnapshot(trigger) {
+  /**
+   * Capture a snapshot marker.
+   *
+   * 1. Trigger a FullSnapshot checkpoint in rrweb (adds Meta + FullSnapshot to page array)
+   * 2. Drain ALL events from the page into the main-process buffer
+   * 3. The eventIndex is the position of the FullSnapshot in the cumulative buffer
+   * 4. Take a screenshot
+   */
+  async _captureSnapshot() {
     this._capturing = true;
+    this._onCaptureStart();
     try {
       const wc = this._wc;
 
-      // Remove overlay before capturing so it doesn't appear in screenshot/DOM
-      await this._hideOverlay();
-      await new Promise((r) => setTimeout(r, 50)); // wait one frame for repaint
+      await new Promise((r) => setTimeout(r, 50));
 
-      // 1. Capture DOM + skeleton as JSON string (avoids IPC serialization issues)
-      let json;
+      // 1. Trigger rrweb FullSnapshot checkpoint
       try {
-        json = await wc.executeJavaScript(`
-          (function() {
-            var domHtml = null;
-            try { domHtml = typeof serializeDom === 'function' ? serializeDom() : null; } catch(e) {}
-            var pageText = '';
-            try { pageText = typeof collectPageText === 'function' ? collectPageText() : ''; } catch(e) {}
-            var pageState = {};
-            try { pageState = typeof capturePageState === 'function' ? capturePageState() : {}; } catch(e) {}
-            var skeletonData = { skeleton: [] };
-            try { skeletonData = typeof runSkeletonScan === 'function' ? runSkeletonScan() : { skeleton: [] }; } catch(e) {}
-            return JSON.stringify({
-              domHtml: domHtml,
-              pageText: pageText,
-              pageState: pageState,
-              skeleton: skeletonData.skeleton || [],
-              url: location.href,
-              title: document.title,
-              devicePixelRatio: window.devicePixelRatio || 1,
-              capturedAt: new Date().toISOString()
-            });
-          })()
+        await wc.executeJavaScript(`
+          if (typeof rrweb !== 'undefined' && rrweb.record) {
+            rrweb.record.takeFullSnapshot();
+          }
+          void 0;
         `);
       } catch (err) {
-        console.warn("[browserwire-electron] DOM capture failed:", err.message);
+        console.warn("[browserwire-electron] rrweb checkout failed:", err.message);
         return;
       }
 
-      let snapshot;
+      // 2. Drain all events from page into main-process buffer
+      const drained = await this.drainEvents();
+
+      // Find the FullSnapshot (type=2) in the drained batch.
+      // It may not be the last event — rrweb can emit IncrementalSnapshot
+      // events for mutations triggered by the snapshot process itself.
+      let eventIndex = -1;
+      for (let i = this._eventBuffer.length - 1; i >= this._eventBuffer.length - drained && i >= 0; i--) {
+        if (this._eventBuffer[i]?.type === 2) {
+          eventIndex = i;
+          break;
+        }
+      }
+
+      if (eventIndex === -1) {
+        console.warn(
+          `[browserwire-electron] no FullSnapshot found in drained ${drained} events, buffer size ${this._eventBuffer.length}`
+        );
+        return;
+      }
+
+      // 3. Get page metadata
+      let url, title;
       try {
-        snapshot = JSON.parse(json);
+        const meta = await wc.executeJavaScript(`
+          JSON.stringify({ url: location.href, title: document.title })
+        `);
+        const parsed = JSON.parse(meta);
+        url = parsed.url;
+        title = parsed.title;
       } catch {
-        console.warn("[browserwire-electron] Failed to parse snapshot JSON");
-        return;
+        url = "unknown";
+        title = "unknown";
       }
 
-      // 2. Screenshot (native Electron API)
+      // 4. Screenshot
       let screenshotBase64 = null;
       try {
         const image = await wc.capturePage();
@@ -273,73 +320,23 @@ export class SettleCycleManager {
         console.warn("[browserwire-electron] screenshot failed:", err.message);
       }
 
-      // 3. Annotate screenshot with skeleton boxes
-      let annotated = screenshotBase64;
-      if (screenshotBase64 && snapshot.skeleton && snapshot.skeleton.length > 0) {
-        try {
-          annotated = await annotateScreenshot(
-            screenshotBase64,
-            snapshot.skeleton,
-            snapshot.devicePixelRatio || 1
-          );
-        } catch (err) {
-          console.warn("[browserwire-electron] annotation failed:", err.message);
-        }
-      }
-
       this._snapshotCount++;
 
+      console.log(
+        `[browserwire-electron] snapshot #${this._snapshotCount}: eventIndex=${eventIndex}, ` +
+        `buffer=${this._eventBuffer.length} events, drained=${drained}`
+      );
+
       this._onSnapshot({
-        snapshotId: `snap_electron_${this._snapshotCount}`,
-        trigger,
-        domHtml: snapshot.domHtml,
-        pageText: snapshot.pageText,
-        pageState: { ...snapshot.pageState, skeleton: snapshot.skeleton },
-        skeleton: snapshot.skeleton,
-        url: snapshot.url,
-        title: snapshot.title,
-        devicePixelRatio: snapshot.devicePixelRatio,
-        capturedAt: snapshot.capturedAt,
-        networkLog: [],
-        screenshot: annotated,
+        snapshotId: `snap_${this._snapshotCount}`,
+        eventIndex,
+        screenshot: screenshotBase64,
+        url,
+        title,
       });
     } finally {
+      this._onCaptureEnd();
       this._capturing = false;
-    }
-  }
-
-  // ─── Overlay ─────────────────────────────────────────────────────
-
-  _showOverlay() {
-    this._wc.executeJavaScript(`
-      (function() {
-        if (document.getElementById('__bw_overlay')) return;
-        var d = document.createElement('div');
-        d.id = '__bw_overlay';
-        d.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.45);z-index:2147483647;display:flex;align-items:center;justify-content:center;';
-        d.innerHTML = '<div style="background:#fff;padding:12px 20px;border-radius:8px;font:500 13px/1.4 system-ui,-apple-system,sans-serif;color:#333;display:flex;align-items:center;gap:10px;box-shadow:0 2px 12px rgba(0,0,0,0.15)">'
-          + '<svg width="18" height="18" viewBox="0 0 24 24" style="animation:__bw_spin 0.8s linear infinite;flex-shrink:0"><circle cx="12" cy="12" r="10" stroke="#888" stroke-width="2.5" fill="none" stroke-dasharray="31.4 31.4" stroke-linecap="round"/></svg>'
-          + 'Taking snapshot\\u2026</div>';
-        var s = document.createElement('style');
-        s.id = '__bw_overlay_style';
-        s.textContent = '@keyframes __bw_spin{to{transform:rotate(360deg)}}';
-        document.head.appendChild(s);
-        document.body.appendChild(d);
-      })()
-    `).catch(() => {});
-  }
-
-  async _hideOverlay() {
-    try {
-      await this._wc.executeJavaScript(`
-        var el = document.getElementById('__bw_overlay');
-        if (el) el.remove();
-        var st = document.getElementById('__bw_overlay_style');
-        if (st) st.remove();
-        void 0;
-      `);
-    } catch {
-      // Page may have navigated
     }
   }
 

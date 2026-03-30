@@ -11,7 +11,7 @@ const buildOpts = {
   jsx: "automatic",
   target: "esnext",
   sourcemap: true,
-  loader: { ".tsx": "tsx", ".ts": "ts" },
+  loader: { ".tsx": "tsx", ".ts": "ts", ".css": "css" },
 };
 
 if (watch) {

@@ -1,70 +1,122 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 
 interface SiteInfo {
   slug: string;
   origin: string;
   domain?: string;
-  pageCount?: number;
-  workflowCount?: number;
+  stateCount?: number;
+  viewCount?: number;
+  actionCount?: number;
   updatedAt?: string;
 }
 
-interface WorkflowInput {
-  name: string;
-  type: string;
-  required: boolean;
-  description?: string;
-}
-
-interface WorkflowStep {
-  type: string;
-  url?: string;
-  endpoint_name?: string;
-  input_param?: string;
-  view_name?: string;
-}
-
-interface Workflow {
-  name: string;
-  kind: string;
-  description: string;
-  inputs: WorkflowInput[];
-  steps: WorkflowStep[];
-  outcomes?: object;
-}
-
-interface Page {
-  name: string;
-  routePattern: string;
-  description?: string;
-  workflows?: Workflow[];
-  views?: object[];
-  endpoints?: object[];
-}
-
-interface Manifest {
+interface StateManifest {
   domain?: string;
   domainDescription?: string;
-  pages: Page[];
+  initial_state?: string;
+  states: {
+    id: string;
+    name: string;
+    description: string;
+    url_pattern: string;
+    views: { name: string; description: string; isList: boolean; returns: { name: string; type: string }[] }[];
+    actions: { name: string; kind: string; description: string; leads_to: string | null; inputs?: { name: string; type: string; required: boolean }[] }[];
+  }[];
 }
 
-interface WorkflowResult {
-  loading: boolean;
-  ok?: boolean;
-  data?: any;
-  outcome?: string;
-  error?: string;
-  message?: string;
+interface OpenApiParam {
+  name: string;
+  in: "query" | "path";
+  required?: boolean;
+  description?: string;
+  schema?: { type: string };
+}
+
+interface OpenApiSpec {
+  paths: Record<string, Record<string, {
+    operationId: string;
+    summary?: string;
+    tags?: string[];
+    parameters?: OpenApiParam[];
+    requestBody?: {
+      required?: boolean;
+      content?: {
+        "application/json"?: {
+          schema?: {
+            type: string;
+            properties?: Record<string, { type: string; description?: string }>;
+            required?: string[];
+          };
+        };
+      };
+    };
+    responses?: Record<string, any>;
+  }>>;
+  info?: { title?: string; description?: string };
+}
+
+export interface Endpoint {
+  method: "GET" | "POST";
+  path: string;
+  operationId: string;
+  summary: string;
+  tags: string[];
+  parameters: { name: string; required: boolean; description: string; type: string }[];
 }
 
 const API = window.browserwire.apiBaseUrl;
 
+function parseEndpoints(spec: OpenApiSpec): Endpoint[] {
+  const endpoints: Endpoint[] = [];
+  for (const [path, methods] of Object.entries(spec.paths || {})) {
+    for (const [method, op] of Object.entries(methods)) {
+      const m = method.toUpperCase() as "GET" | "POST";
+      const params: Endpoint["parameters"] = [];
+
+      if (op.parameters) {
+        for (const p of op.parameters) {
+          params.push({
+            name: p.name,
+            required: !!p.required,
+            description: p.description || "",
+            type: p.schema?.type || "string",
+          });
+        }
+      }
+
+      if (op.requestBody?.content?.["application/json"]?.schema) {
+        const schema = op.requestBody.content["application/json"].schema;
+        const requiredFields = schema.required || [];
+        for (const [name, prop] of Object.entries(schema.properties || {})) {
+          params.push({
+            name,
+            required: requiredFields.includes(name),
+            description: prop.description || "",
+            type: prop.type || "string",
+          });
+        }
+      }
+
+      endpoints.push({
+        method: m,
+        path,
+        operationId: op.operationId || "",
+        summary: op.summary || "",
+        tags: op.tags || [],
+        parameters: params,
+      });
+    }
+  }
+  return endpoints;
+}
+
 export function useExecution() {
   const [sites, setSites] = useState<SiteInfo[]>([]);
-  const [manifests, setManifests] = useState<Map<string, Manifest>>(new Map());
-  const [results, setResults] = useState<Map<string, WorkflowResult>>(new Map());
+  const [manifests, setManifests] = useState<Map<string, StateManifest>>(new Map());
+  const [openApiSpecs, setOpenApiSpecs] = useState<Map<string, OpenApiSpec>>(new Map());
+  const [endpoints, setEndpoints] = useState<Map<string, Endpoint[]>>(new Map());
   const [loadingSites, setLoadingSites] = useState(true);
-  const [executing, setExecuting] = useState(false);
+  const fetchedSpecs = useRef<Set<string>>(new Set());
 
   // Fetch sites on mount
   useEffect(() => {
@@ -79,15 +131,7 @@ export function useExecution() {
       .finally(() => setLoadingSites(false));
   }, []);
 
-  // Listen for execution state changes from main process
-  useEffect(() => {
-    const cleanup = window.browserwire.onExecutionState((state) => {
-      setExecuting(state.running);
-    });
-    return cleanup;
-  }, []);
-
-  // Fetch manifest for a site (idempotent)
+  // Fetch manifest for a site
   const ensureManifest = useCallback(
     async (slug: string) => {
       if (manifests.has(slug)) return;
@@ -106,34 +150,47 @@ export function useExecution() {
     [manifests]
   );
 
-  // Execute a workflow via IPC (uses main BrowserView)
-  const executeWorkflow = useCallback(
-    async (slug: string, workflowName: string, inputs: Record<string, any>) => {
-      const key = `${slug}/${workflowName}`;
-      setResults((prev) => {
-        const next = new Map(prev);
-        next.set(key, { loading: true });
-        return next;
-      });
-
+  // Fetch OpenAPI spec for a site
+  const ensureOpenApiSpec = useCallback(
+    async (slug: string) => {
+      if (fetchedSpecs.current.has(slug)) return;
+      fetchedSpecs.current.add(slug);
       try {
-        const result = await window.browserwire.executeWorkflow({
-          slug,
-          workflowName,
-          inputs,
-        });
-        setResults((prev) => {
+        const r = await fetch(`${API}/api/sites/${slug}/openapi.json`);
+        const spec: OpenApiSpec = await r.json();
+        setOpenApiSpecs((prev) => {
           const next = new Map(prev);
-          next.set(key, { loading: false, ...result });
+          next.set(slug, spec);
           return next;
         });
-      } catch (err: any) {
-        setResults((prev) => {
+        setEndpoints((prev) => {
           const next = new Map(prev);
-          next.set(key, { loading: false, ok: false, error: err.message });
+          next.set(slug, parseEndpoints(spec));
           return next;
         });
+      } catch {
+        // ignore
       }
+    },
+    []
+  );
+
+  // Execute an endpoint
+  const executeEndpoint = useCallback(
+    async (method: string, path: string, params: Record<string, string>): Promise<any> => {
+      const url = new URL(`${API}${path}`);
+      if (method === "GET") {
+        for (const [k, v] of Object.entries(params)) {
+          if (v) url.searchParams.set(k, v);
+        }
+      }
+      const resp = await fetch(url.toString(), {
+        method,
+        ...(method === "POST"
+          ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(params) }
+          : {}),
+      });
+      return resp.json();
     },
     []
   );
@@ -154,13 +211,13 @@ export function useExecution() {
   return {
     sites,
     manifests,
-    results,
+    endpoints,
     loadingSites,
-    executing,
     ensureManifest,
-    executeWorkflow,
+    ensureOpenApiSpec,
+    executeEndpoint,
     refreshSites,
   };
 }
 
-export type { SiteInfo, Manifest, Page, Workflow, WorkflowInput, WorkflowResult };
+export type { SiteInfo, StateManifest, OpenApiSpec };

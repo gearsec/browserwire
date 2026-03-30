@@ -1,279 +1,187 @@
 /**
- * openapi.js — OpenAPI 3.0.3 spec generator from BrowserWire manifests
+ * openapi.js — Generate OpenAPI 3.0 spec from the flat route table.
+ *
+ * Takes a manifest, builds the route table, and produces a complete
+ * OpenAPI spec with paths for each view (GET) and action (POST).
  */
 
-const sanitizeName = (name) =>
-  (name || "unknown")
-    .toLowerCase()
-    .replace(/[^a-z0-9_]+/g, "_")
-    .replace(/^_+|_+$/g, "");
+import { buildRouteTable } from "./route-builder.js";
 
-const inputsToSchema = (inputs) => {
+/**
+ * Map manifest field types to OpenAPI types.
+ */
+function toOpenApiType(type) {
+  switch (type) {
+    case "number": return { type: "number" };
+    case "boolean": return { type: "boolean" };
+    case "date": return { type: "string", format: "date-time" };
+    default: return { type: "string" };
+  }
+}
+
+/**
+ * Build an OpenAPI request body schema from route inputs.
+ */
+function buildInputSchema(inputs) {
   if (!inputs || inputs.length === 0) return null;
+
   const properties = {};
+  const required = [];
+
   for (const input of inputs) {
     properties[input.name] = {
-      type: input.type || "string",
-      description: input.description || ""
+      ...toOpenApiType(input.type),
+      description: input.description || `From ${input.from}`,
     };
-  }
-  return { type: "object", properties };
-};
-
-/**
- * Build an OpenAPI response schema from a readContract's field mappings.
- * List views get wrapped in { type: "array", items: ... }.
- */
-const fieldMappingsToSchema = (fieldMappings, isList) => {
-  const properties = {};
-  for (const fm of fieldMappings) {
-    properties[fm.viewField] = {
-      type: fm.type || "string",
-      ...(fm.nullable ? { nullable: true } : {})
-    };
-  }
-  const itemSchema = { type: "object", properties };
-  return isList ? { type: "array", items: itemSchema } : itemSchema;
-};
-
-/**
- * Collect views with readContracts from manifest pages.
- */
-export const collectReadViews = (manifest) => {
-  const views = [];
-  for (const page of manifest.pages || []) {
-    for (const view of page.views || []) {
-      if ((view.readContract && view.readContract.dataSources?.length > 0)
-          || view.container_selector
-          || view.fields?.some(f => f.selector)) {
-        views.push({ view, pageName: page.name || page.routePattern, routePattern: page.routePattern });
-      }
+    if (input.required) {
+      required.push(input.name);
     }
   }
-  return views;
-};
 
-export const generateOpenApiSpec = (manifest, { host = "127.0.0.1", port = 8787, pathPrefix = "" } = {}) => {
-  const workflows = [];
-  for (const page of manifest.pages || []) {
-    for (const wf of page.workflows || []) {
-      workflows.push(wf);
-    }
+  return {
+    type: "object",
+    properties,
+    ...(required.length > 0 ? { required } : {}),
+  };
+}
+
+/**
+ * Build an OpenAPI response schema from view returns.
+ */
+function buildResponseSchema(route) {
+  if (!route.returns || route.returns.length === 0) {
+    return { type: "object" };
   }
+
+  const itemProperties = {};
+  for (const field of route.returns) {
+    itemProperties[field.name] = {
+      ...toOpenApiType(field.type),
+      ...(field.description ? { description: field.description } : {}),
+    };
+  }
+
+  const itemSchema = { type: "object", properties: itemProperties };
+
+  if (route.isList) {
+    return { type: "array", items: itemSchema };
+  }
+  return itemSchema;
+}
+
+/**
+ * Generate an OpenAPI 3.0.3 spec from a state machine manifest.
+ *
+ * @param {object} manifest — state machine manifest
+ * @param {{ origin?: string, host?: string, port?: number }} [opts]
+ * @returns {object} OpenAPI spec
+ */
+export function generateOpenApiSpec(manifest, opts = {}) {
+  const { origin, host = "127.0.0.1", port = 8787 } = opts;
+  const { views, actions } = buildRouteTable(manifest);
+
+  const slug = origin
+    ? origin.replace(/^https?:\/\//, "").replace(/[^a-zA-Z0-9]/g, "_")
+    : "site";
 
   const paths = {};
 
-  // Manifest endpoint
-  paths[`${pathPrefix}/manifest`] = {
-    get: {
-      summary: "Raw manifest JSON",
-      operationId: "getManifest",
-      tags: ["System"],
-      responses: {
-        200: { description: "Full manifest", content: { "application/json": { schema: { type: "object" } } } }
-      }
-    }
-  };
-
-  // Workflows
-  for (const workflow of workflows) {
-    const name = sanitizeName(workflow.name);
-    const path = `${pathPrefix}/workflows/${name}`;
-    const bodySchema = inputsToSchema(workflow.inputs);
+  // View endpoints (GET)
+  for (const route of views) {
+    const path = `/api/sites/${slug}/views/${route.name}`;
 
     paths[path] = {
-      post: {
-        summary: workflow.description || workflow.name,
-        operationId: `workflow_${name}`,
-        tags: ["Workflows"],
-        ...(bodySchema ? {
-          requestBody: {
-            required: true,
-            content: { "application/json": { schema: bodySchema } }
-          }
+      get: {
+        operationId: `read_${route.name}`,
+        summary: route.description,
+        tags: [route.stateName],
+        ...(route.inputs.length > 0 ? {
+          parameters: route.inputs.map((input) => ({
+            name: input.name,
+            in: "query",
+            required: input.required,
+            description: input.description || `From ${input.from}`,
+            schema: toOpenApiType(input.type),
+          })),
         } : {}),
         responses: {
           200: {
-            description: "Workflow result",
-            content: { "application/json": { schema: {
-              type: "object",
-              properties: {
-                ok: { type: "boolean" },
-                data: { type: "object" },
-                outcome: { type: "string" },
-                error: { type: "string" }
-              }
-            }}}
-          }
-        }
-      }
+            description: "Success",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    data: buildResponseSchema(route),
+                    state: { type: "string", description: "Current state after navigation" },
+                  },
+                },
+              },
+            },
+          },
+          500: { description: "Execution error" },
+        },
+      },
     };
   }
 
-  // Read APIs — from views with readContracts
-  const readViews = collectReadViews(manifest);
-  const usedReadNames = new Set();
+  // Action endpoints (POST)
+  for (const route of actions) {
+    const path = `/api/sites/${slug}/actions/${route.name}`;
+    const inputSchema = buildInputSchema(route.inputs);
 
-  for (const { view, routePattern } of readViews) {
-    let name = sanitizeName(view.name);
-    // Deduplicate if multiple views have the same sanitized name
-    if (usedReadNames.has(name)) {
-      let i = 2;
-      while (usedReadNames.has(`${name}_${i}`)) i++;
-      name = `${name}_${i}`;
-    }
-    usedReadNames.add(name);
-
-    const path = `${pathPrefix}/reads/${name}`;
-    const rc = view.readContract;
-
-    if (rc && rc.dataSources?.length > 0) {
-      // ── Network-based read (existing logic) ──
-      const primary = rc.dataSources.find((ds) => ds.role === "primary") || rc.dataSources[0];
-
-      // Build query parameters from primary data source
-      const parameters = [];
-
-      // Extract :param placeholders from urlPattern as query parameters
-      const pathParams = (primary.urlPattern || "").match(/:[a-zA-Z_][a-zA-Z0-9_]*/g) || [];
-      for (const param of pathParams) {
-        const paramName = param.slice(1); // strip leading ':'
-        parameters.push({
-          name: paramName,
-          in: "query",
-          required: true,
-          description: `Path parameter from upstream URL pattern (${primary.urlPattern})`,
-          schema: { type: "string" }
-        });
-      }
-
-      // Extract :param placeholders from page routePattern as query parameters
-      const pageRouteParams = (routePattern || "").match(/:[a-zA-Z_][a-zA-Z0-9_]*/g) || [];
-      for (const param of pageRouteParams) {
-        const paramName = param.slice(1);
-        if (!parameters.some(p => p.name === paramName)) {
-          parameters.push({
-            name: paramName,
-            in: "query",
+    paths[path] = {
+      post: {
+        operationId: `execute_${route.name}`,
+        summary: route.description,
+        tags: [route.stateName],
+        ...(inputSchema ? {
+          requestBody: {
             required: true,
-            description: `Page route parameter (${routePattern})`,
-            schema: { type: "string" }
-          });
-        }
-      }
-
-      if (primary.queryParams) {
-        for (const qp of primary.queryParams) {
-          parameters.push({
-            name: qp.name,
-            in: "query",
-            required: qp.required,
-            description: qp.description || "",
-            schema: { type: "string" },
-            ...(qp.exampleValue ? { example: qp.exampleValue } : {})
-          });
-        }
-      }
-
-      // Add pagination parameters if present
-      if (primary.pagination && primary.pagination.style !== "none") {
-        const pag = primary.pagination;
-        if (pag.pageParam && !parameters.some((p) => p.name === pag.pageParam)) {
-          parameters.push({ name: pag.pageParam, in: "query", required: false, description: "Page parameter", schema: { type: "string" } });
-        }
-        if (pag.limitParam && !parameters.some((p) => p.name === pag.limitParam)) {
-          parameters.push({ name: pag.limitParam, in: "query", required: false, description: "Limit / page size", schema: { type: "string" } });
-        }
-        if (pag.cursorParam && !parameters.some((p) => p.name === pag.cursorParam)) {
-          parameters.push({ name: pag.cursorParam, in: "query", required: false, description: "Cursor for pagination", schema: { type: "string" } });
-        }
-      }
-
-      // Build response schema from field mappings
-      const responseSchema = primary.fieldMappings?.length > 0
-        ? fieldMappingsToSchema(primary.fieldMappings, !!view.isList)
-        : { type: "object" };
-
-      const description = view.description || "Read API discovered from browser network traffic";
-
-      paths[path] = {
-        get: {
-          summary: view.description || view.name,
-          operationId: `read_${name}`,
-          tags: ["Read APIs"],
-          description,
-          ...(parameters.length > 0 ? { parameters } : {}),
-          responses: {
-            200: {
-              description: "Read response",
-              content: { "application/json": { schema: responseSchema } }
-            }
+            content: {
+              "application/json": {
+                schema: inputSchema,
+              },
+            },
           },
-          "x-browserwire-source": {
-            urlPattern: primary.urlPattern,
-            kind: primary.kind,
-            method: primary.method
-          }
-        }
-      };
-    } else if (view.container_selector || view.fields?.some(f => f.selector)) {
-      // ── DOM-based read (raw selectors from agent) ──
-      const fields = (view.fields || []).filter(f => f.selector);
-      const isList = view.isList || false;
-
-      // Only route :params from the page routePattern
-      const parameters = [];
-      const pageRouteParams = (routePattern || "").match(/:[a-zA-Z_][a-zA-Z0-9_]*/g) || [];
-      for (const param of pageRouteParams) {
-        const paramName = param.slice(1);
-        parameters.push({
-          name: paramName,
-          in: "query",
-          required: true,
-          description: `Page route parameter (${routePattern})`,
-          schema: { type: "string" }
-        });
-      }
-
-      // Build response schema from raw fields
-      const properties = {};
-      for (const f of fields) {
-        properties[f.name] = { type: "string" };
-      }
-      const itemSchema = { type: "object", properties };
-      const responseSchema = isList ? { type: "array", items: itemSchema } : itemSchema;
-
-      const description = view.description || "Read API discovered from DOM structure";
-
-      paths[path] = {
-        get: {
-          summary: view.description || view.name,
-          operationId: `read_${name}`,
-          tags: ["Read APIs"],
-          description,
-          ...(parameters.length > 0 ? { parameters } : {}),
-          responses: {
-            200: {
-              description: "Read response",
-              content: { "application/json": { schema: responseSchema } }
-            }
+        } : {}),
+        responses: {
+          200: {
+            description: "Action executed",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    success: { type: "boolean" },
+                    state: { type: "string", description: "State after action execution" },
+                  },
+                },
+              },
+            },
           },
-          "x-browserwire-source": {
-            kind: "dom"
-          }
-        }
-      };
-    }
+          500: { description: "Execution error" },
+        },
+      },
+    };
   }
 
   return {
     openapi: "3.0.3",
     info: {
-      title: `BrowserWire API — ${manifest.domain || "Unknown"}`,
-      description: manifest.domainDescription || "Auto-discovered browser API",
-      version: manifest.manifestVersion || "1.0.0"
+      title: `${manifest.domain || "Site"} API`,
+      description: manifest.domainDescription || `Auto-generated API for ${origin || "site"}`,
+      version: "1.0.0",
     },
     servers: [{ url: `http://${host}:${port}` }],
-    paths
+    paths,
   };
-};
+}
+
+/**
+ * Collect all views from the manifest route table.
+ */
+export function collectReadViews(manifest) {
+  const { views } = buildRouteTable(manifest);
+  return views;
+}
