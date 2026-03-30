@@ -1,20 +1,22 @@
 /**
- * router.js — Lightweight HTTP router for the BrowserWire REST API
+ * router.js — HTTP router for the BrowserWire REST API.
  *
- * All operational routes live under /api/sites/:slug/...
- * No implicit "active site" concept.
+ * Flat API generated from the state machine manifest:
+ *   GET  /api/sites/:slug/views/:name     → navigate path, read view data
+ *   POST /api/sites/:slug/actions/:name   → navigate path, execute action
+ *   GET  /api/sites/:slug/manifest        → raw state machine manifest
+ *   GET  /api/sites/:slug/openapi.json    → OpenAPI spec
+ *   GET  /api/sites/:slug/docs            → Swagger UI
  */
 
-import { generateOpenApiSpec, collectReadViews } from "./openapi.js";
+import { generateOpenApiSpec } from "./openapi.js";
+import { buildRouteTable } from "./route-builder.js";
 import { swaggerUiHtml } from "./swagger-ui.js";
-import { buildLookups, resolveWorkflowSteps, resolvePagination, sanitize, toViewConfig } from "../workflow-resolver.js";
-
-const EXECUTE_WORKFLOW = "execute_workflow";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type"
+  "Access-Control-Allow-Headers": "Content-Type",
 };
 
 const json = (res, status, body) => {
@@ -43,20 +45,18 @@ const readBody = (req) =>
     req.on("error", reject);
   });
 
-// buildLookups, resolveWorkflowSteps, sanitize, toViewConfig imported from core/workflow-resolver.js
-
 /**
- * Render an HTML landing page listing all known sites with links to their docs.
+ * Render an HTML landing page listing all known sites.
  */
-const landingPageHtml = (sites, host, port) => {
+const landingPageHtml = (sites) => {
   const rows = sites.map((s) => {
     const docsUrl = `/api/sites/${s.slug}/docs`;
     return `<tr>
       <td><a href="${docsUrl}">${s.slug}</a></td>
       <td>${s.origin}</td>
-      <td>${s.entityCount || 0}</td>
-      <td>${s.actionCount || 0}</td>
+      <td>${s.stateCount || 0}</td>
       <td>${s.viewCount || 0}</td>
+      <td>${s.actionCount || 0}</td>
     </tr>`;
   }).join("\n");
 
@@ -73,19 +73,18 @@ const landingPageHtml = (sites, host, port) => {
 <body>
   <h1>BrowserWire API</h1>
   ${sites.length > 0 ? `<table>
-    <thead><tr><th>Site</th><th>Origin</th><th>Entities</th><th>Actions</th><th>Views</th></tr></thead>
+    <thead><tr><th>Site</th><th>Origin</th><th>States</th><th>Views</th><th>Actions</th></tr></thead>
     <tbody>${rows}</tbody>
-  </table>` : `<p class="empty">No sites discovered yet. Run discovery from the browser extension to get started.</p>`}
+  </table>` : `<p class="empty">No sites discovered yet. Start exploring to get started.</p>`}
 </body></html>`;
 };
 
 /**
  * Create the HTTP request handler.
  *
- * @param {{ getManifestBySlug: (slug: string) => object|null, listSites: () => Array, bridge: object, host: string, port: number }} deps
- * @returns {(req: import("http").IncomingMessage, res: import("http").ServerResponse) => void}
+ * @param {{ getManifestBySlug: (slug: string) => object|null, listSites: () => Array, execute: (opts: object) => Promise<object>, host: string, port: number }} deps
  */
-export const createHttpHandler = ({ getManifestBySlug, listSites, bridge, host, port }) => {
+export const createHttpHandler = ({ getManifestBySlug, listSites, execute, host, port }) => {
   return async (req, res) => {
     // CORS preflight
     if (req.method === "OPTIONS") {
@@ -108,11 +107,9 @@ export const createHttpHandler = ({ getManifestBySlug, listSites, bridge, host, 
       return json(res, 200, { ok: true, sites });
     }
 
-    // ── Landing page listing all sites ──
-
     if (path === "/api/docs" && req.method === "GET") {
       const sites = listSites();
-      return html(res, 200, landingPageHtml(sites, host, port));
+      return html(res, 200, landingPageHtml(sites));
     }
 
     // ── Site-scoped routes: /api/sites/:slug/... ──
@@ -135,7 +132,7 @@ export const createHttpHandler = ({ getManifestBySlug, listSites, bridge, host, 
 
       // GET /api/sites/:slug/openapi.json
       if (subPath === "/openapi.json" && req.method === "GET") {
-        return json(res, 200, generateOpenApiSpec(manifest, { host, port, pathPrefix: `/api/sites/${slug}` }));
+        return json(res, 200, generateOpenApiSpec(manifest, { origin, host, port }));
       }
 
       // GET /api/sites/:slug/docs
@@ -143,110 +140,52 @@ export const createHttpHandler = ({ getManifestBySlug, listSites, bridge, host, 
         return html(res, 200, swaggerUiHtml(`/api/sites/${slug}/openapi.json`));
       }
 
-      const lookups = buildLookups(manifest);
+      // Build route table for views/actions
+      const { views, actions } = buildRouteTable(manifest);
 
-      // POST /api/sites/:slug/workflows/:name
-      const workflowMatch = subPath.match(/^\/workflows\/([^/]+)$/);
-      if (workflowMatch && req.method === "POST") {
-        const workflow = lookups.workflowMap.get(workflowMatch[1]);
-        if (!workflow) return json(res, 404, { ok: false, error: `Workflow '${workflowMatch[1]}' not found` });
+      // GET /api/sites/:slug/views/:name
+      const viewMatch = subPath.match(/^\/views\/([^/]+)$/);
+      if (viewMatch && req.method === "GET") {
+        const viewName = viewMatch[1];
+        const route = views.find((v) => v.name === viewName);
+        if (!route) {
+          return json(res, 404, { ok: false, error: `View '${viewName}' not found` });
+        }
+
+        // Collect inputs from query params
+        const inputs = {};
+        for (const [key, val] of url.searchParams.entries()) {
+          inputs[key] = val;
+        }
+
+        try {
+          const result = await execute({ manifest, route, inputs, origin });
+          return json(res, result.ok ? 200 : 500, result);
+        } catch (err) {
+          return json(res, 500, { ok: false, error: err.message });
+        }
+      }
+
+      // POST /api/sites/:slug/actions/:name
+      const actionMatch = subPath.match(/^\/actions\/([^/]+)$/);
+      if (actionMatch && req.method === "POST") {
+        const actionName = actionMatch[1];
+        const route = actions.find((a) => a.name === actionName);
+        if (!route) {
+          return json(res, 404, { ok: false, error: `Action '${actionName}' not found` });
+        }
 
         let body = {};
         try { body = await readBody(req); } catch { return json(res, 400, { ok: false, error: "Invalid JSON body" }); }
 
-        const resolved = resolveWorkflowSteps(workflow, lookups.viewMap, lookups.endpointMap);
-        if (resolved.error) return json(res, 400, { ok: false, error: resolved.error });
-
         try {
-          const result = await bridge.sendAndAwait(null, EXECUTE_WORKFLOW, {
-            steps: resolved.steps, pagination: resolved.pagination,
-            outcomes: workflow.outcomes || {}, inputs: body, origin
-          }, 60000);
-          return json(res, 200, result);
+          const result = await execute({ manifest, route, inputs: body, origin });
+          return json(res, result.ok ? 200 : 500, result);
         } catch (err) {
           return json(res, 500, { ok: false, error: err.message });
         }
       }
 
-      // GET /api/sites/:slug/reads/:name — execute as navigate+read_view workflow
-      const readMatch = subPath.match(/^\/reads\/([^/]+)$/);
-      if (readMatch && req.method === "GET") {
-        const readName = readMatch[1];
-        const readViews = collectReadViews(manifest);
-        const match = readViews.find(({ view }) => sanitize(view.name) === readName);
-        if (!match) return json(res, 404, { ok: false, error: `Read API '${readName}' not found in manifest` });
-
-        const page = (manifest.pages || []).find((p) =>
-          (p.views || []).some((v) => v.name === match.view.name)
-        );
-        const pageUrl = page?.routePattern || "/";
-
-        const params = {};
-        for (const [key, val] of url.searchParams.entries()) {
-          params[key] = val;
-        }
-
-        // Resolve navigation URL with param substitution
-        let navUrl = (pageUrl || "/").replace(/:([a-zA-Z_][a-zA-Z0-9_]*)/g, (m, param) => {
-          const value = params[param];
-          return value != null ? encodeURIComponent(value) : m;
-        });
-        if (!navUrl || navUrl === "/") navUrl = origin;
-
-        // Build viewConfig, enriching with network info if available
-        const rc = match.view.readContract;
-        let viewConfig;
-
-        if (rc && rc.dataSources?.length > 0) {
-          const primary = rc.dataSources.find((ds) => ds.role === "primary") || rc.dataSources[0];
-          const apiRequest = {
-            method: primary.method,
-            pathPattern: primary.urlPattern,
-            responsePath: primary.responsePath || null,
-            ...(primary.operationName || primary.queryParams?.length ? {
-              matchOn: {
-                ...(primary.operationName ? { operationName: primary.operationName } : {}),
-                ...(primary.queryParams?.length ? { queryParams: primary.queryParams.map((q) => q.name) } : {})
-              }
-            } : {})
-          };
-          const apiFields = {};
-          for (const fm of primary.fieldMappings || []) {
-            apiFields[fm.viewField] = fm.jsonPath;
-          }
-          const domConfig = toViewConfig(match.view);
-          viewConfig = { apiRequest, apiFields, ...(domConfig || {}) };
-        } else {
-          viewConfig = toViewConfig(match.view);
-          if (!viewConfig) {
-            return json(res, 500, { ok: false, error: "View has neither readContract nor selectors" });
-          }
-        }
-
-        const steps = [
-          { type: "navigate", url: navUrl },
-          { type: "read_view", viewConfig }
-        ];
-
-        // Find the read workflow for this view and resolve its pagination
-        const readWorkflow = (page.workflows || []).find((w) =>
-          w.kind === "read" && w.steps?.some((s) => s.view_name === match.view.name)
-        );
-        const pagination = readWorkflow?.pagination
-          ? resolvePagination(readWorkflow.pagination, lookups.endpointMap)
-          : undefined;
-
-        try {
-          const result = await bridge.sendAndAwait(null, EXECUTE_WORKFLOW, {
-            steps, pagination, outcomes: {}, inputs: params, origin
-          }, 30000);
-          return json(res, 200, result);
-        } catch (err) {
-          return json(res, 500, { ok: false, error: err.message });
-        }
-      }
-
-      // Unknown sub-path under a valid site
       return json(res, 404, { ok: false, error: "Not found" });
     }
 

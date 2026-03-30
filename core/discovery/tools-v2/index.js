@@ -51,7 +51,9 @@ const toLangChainTool = (def, ctx) =>
   tool(
     async (params) => {
       const result = await def.execute(ctx, params);
-      return typeof result === "string" ? result : JSON.stringify(result);
+      if (typeof result === "string") return result;
+      if (result?._multimodal) return result.content; // pass content blocks through
+      return JSON.stringify(result);
     },
     { name: def.name, description: def.description, schema: def.parameters }
   );

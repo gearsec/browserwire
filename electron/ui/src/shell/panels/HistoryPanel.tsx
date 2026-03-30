@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { ArrowLeft, Globe, Clock, Layers, Radio } from "lucide-react";
+import { ArrowLeft, Globe, Clock, Layers, Radio, RotateCcw } from "lucide-react";
 import rrwebPlayer from "rrweb-player";
 import "rrweb-player/dist/style.css";
 import { Button } from "../../components/ui/button";
@@ -112,12 +112,16 @@ function ReplayView({
   session,
   events,
   eventsLoading,
+  retraining,
   onBack,
+  onRetrain,
 }: {
   session: SessionSummary;
   events: any[] | null;
   eventsLoading: boolean;
+  retraining: boolean;
   onBack: () => void;
+  onRetrain: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<any>(null);
@@ -194,6 +198,15 @@ function ReplayView({
             {formatDate(session.startedAt)} · {session.snapshotCount} snapshots · {session.eventCount} events
           </div>
         </div>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={retraining}
+          onClick={onRetrain}
+        >
+          <RotateCcw className={`size-4 mr-1.5 ${retraining ? "animate-spin" : ""}`} />
+          {retraining ? "Retraining..." : "Retrain"}
+        </Button>
       </div>
 
       {/* Snapshot markers — clickable to seek */}
@@ -243,7 +256,9 @@ export function HistoryPanel() {
         session={history.selectedSession}
         events={history.events}
         eventsLoading={history.eventsLoading}
+        retraining={history.retraining}
         onBack={history.clearSelection}
+        onRetrain={() => history.retrainSession(history.selectedSessionId!)}
       />
     );
   }

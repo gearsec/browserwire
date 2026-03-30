@@ -30,6 +30,7 @@ export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI }
   let pendingSnapshots = [];
   let settleCycle = null;
   let navListener = null;
+  let willNavListener = null;
 
   /**
    * Start exploring the current page.
@@ -98,7 +99,18 @@ export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI }
     // The settle cycle listener is already active, so the initial signal will be caught.
     await injectCapture(webContents);
 
-    // Re-inject scripts on full navigation (new page context)
+    // Before navigation: drain events from the page before the context is destroyed
+    if (willNavListener) {
+      webContents.removeListener("will-navigate", willNavListener);
+    }
+    willNavListener = () => {
+      if (!activeSessionId || !settleCycle) return;
+      // Drain synchronously — will-navigate fires before context destruction
+      settleCycle.drainEvents().catch(() => {});
+    };
+    webContents.on("will-navigate", willNavListener);
+
+    // After navigation: re-inject scripts into the new page context
     if (navListener) {
       webContents.removeListener("did-navigate", navListener);
     }
@@ -133,30 +145,30 @@ export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI }
     const browserView = getBrowserView();
     const webContents = browserView?.webContents;
 
+    // Drain any remaining events from the current page into the settle cycle buffer
+    // (events that arrived after the last snapshot capture)
+    if (settleCycle) {
+      await settleCycle.drainEvents();
+    }
+
+    // Get the cumulative event buffer from the settle cycle manager
+    const events = settleCycle ? [...settleCycle.events] : [];
+
     // Stop the settle cycle manager
     if (settleCycle) {
       settleCycle.stop();
       settleCycle = null;
     }
 
-    // Remove navigation listener
+    // Remove navigation listeners
+    if (willNavListener && browserView) {
+      webContents.removeListener("will-navigate", willNavListener);
+    }
+    willNavListener = null;
     if (navListener && browserView) {
       webContents.removeListener("did-navigate", navListener);
     }
     navListener = null;
-
-    // Drain rrweb events from the page
-    let events = [];
-    if (webContents) {
-      try {
-        const eventsJson = await webContents.executeJavaScript(`
-          JSON.stringify(window.__bw_events || []);
-        `);
-        events = JSON.parse(eventsJson);
-      } catch (err) {
-        console.warn("[browserwire-electron] failed to drain rrweb events:", err.message);
-      }
-    }
 
     // Remove injected page scripts
     if (browserView) {
@@ -173,6 +185,10 @@ export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI }
       snapshots: pendingSnapshots,
     };
 
+    console.log(
+      `[browserwire-electron] session recording: ${events.length} events, ${pendingSnapshots.length} snapshots`
+    );
+
     activeSessionId = null;
     activeOrigin = null;
     activeStartedAt = null;
@@ -184,20 +200,27 @@ export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI }
       snapshotCount: sessionRecording.snapshots.length,
     });
 
-    // Save session recording via core session manager
-    try {
-      const sessionDir = await sessionManager.saveRecording(sessionRecording);
-      sendToUI("browserwire:log",
-        `Session ${sessionId}: ${events.length} events, ${sessionRecording.snapshots.length} snapshots → ${sessionDir}`
-      );
-    } catch (err) {
-      console.error("[browserwire-electron] failed to save session recording:", err.message);
+    // Save session recording and process through discovery pipeline (async, don't await)
+    sessionManager.saveRecording(sessionRecording, {
+      onStatus: (status) => {
+        sendToUI("browserwire:session-status", { sessionId, ...status });
+        if (status.tool) {
+          sendToUI("browserwire:log", `${status.tool}`);
+        }
+        if (status.status === "complete") {
+          sendToUI("browserwire:session-status", { sessionId, status: "finalized" });
+          sendToUI("browserwire:log",
+            `Session ${sessionId}: processing complete (${status.totalToolCalls || 0} tool calls)`
+          );
+        }
+        if (status.status === "error") {
+          sendToUI("browserwire:log", `Session error: ${status.error}`);
+        }
+      },
+    }).catch((err) => {
+      console.error("[browserwire-electron] session processing failed:", err.message);
       sendToUI("browserwire:log", `Session error: ${err.message}`);
-    }
-
-    sendToUI("browserwire:session-status", {
-      sessionId,
-      status: "finalized",
+      sendToUI("browserwire:session-status", { sessionId, status: "finalized" });
     });
   };
 

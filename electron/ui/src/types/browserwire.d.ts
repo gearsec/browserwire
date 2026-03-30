@@ -65,29 +65,18 @@ interface StartResult {
   error?: string;
 }
 
-interface ExecutionState {
-  running: boolean;
-}
-
-interface ExecuteWorkflowPayload {
-  slug: string;
-  workflowName: string;
-  inputs: Record<string, any>;
-}
-
 interface BrowserWireAPI {
   apiBaseUrl: string;
   navigate: (url: string) => void;
   goBack: () => void;
   goForward: () => void;
   reload: () => void;
-  executeWorkflow: (payload: ExecuteWorkflowPayload) => Promise<any>;
-  onExecutionState: (callback: (state: ExecutionState) => void) => () => void;
   startExploring: () => Promise<StartResult>;
   stopExploring: (note?: string) => Promise<{ ok: boolean; error?: string }>;
   listSessions: () => Promise<SessionRecordingMeta[]>;
   loadSessionEvents: (sessionId: string) => Promise<{ ok: boolean; events?: any[]; error?: string }>;
   loadSessionScreenshot: (sessionId: string, snapshotId: string) => Promise<{ ok: boolean; screenshot?: string; error?: string }>;
+  retrainSession: (sessionId: string) => Promise<{ ok: boolean; error?: string }>;
   getSettings: () => Promise<Settings>;
   saveSettings: (settings: SaveSettingsPayload) => Promise<{ ok: boolean; llmConfigured?: boolean; error?: string }>;
   reportLayout: (state: LayoutState) => void;

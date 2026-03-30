@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from "react";
-import { Loader2, Monitor, ChevronRight, ArrowLeft, Globe } from "lucide-react";
+import { Loader2, ChevronRight, ArrowLeft, Globe, Eye, Zap } from "lucide-react";
 import { Alert, AlertTitle, AlertDescription } from "../../components/ui/alert";
 import { ScrollArea } from "../../components/ui/scroll-area";
 import { Separator } from "../../components/ui/separator";
 import { Button } from "../../components/ui/button";
-import { WorkflowCard } from "../execution/WorkflowCard";
+import { Badge } from "../../components/ui/badge";
+import { Card, CardContent } from "../../components/ui/card";
 import { useExecution } from "../hooks/useExecution";
-import type { SiteInfo, Manifest, Page, WorkflowResult } from "../hooks/useExecution";
+import type { SiteInfo, StateManifest } from "../hooks/useExecution";
 
 function humanize(name: string): string {
   return name.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
@@ -24,9 +25,11 @@ function SiteCard({ site, onClick }: { site: SiteInfo; onClick: () => void }) {
           {site.slug.replace(/_/g, ".")}
         </p>
         <p className="text-xs text-muted-foreground">
-          {site.pageCount ?? 0} {(site.pageCount ?? 0) === 1 ? "page" : "pages"}
+          {site.stateCount ?? 0} {(site.stateCount ?? 0) === 1 ? "state" : "states"}
           {" · "}
-          {site.workflowCount ?? 0} {(site.workflowCount ?? 0) === 1 ? "workflow" : "workflows"}
+          {site.viewCount ?? 0} {(site.viewCount ?? 0) === 1 ? "view" : "views"}
+          {" · "}
+          {site.actionCount ?? 0} {(site.actionCount ?? 0) === 1 ? "action" : "actions"}
         </p>
       </div>
       <ChevronRight className="size-4 text-muted-foreground shrink-0" />
@@ -34,32 +37,16 @@ function SiteCard({ site, onClick }: { site: SiteInfo; onClick: () => void }) {
   );
 }
 
-function PageSection({ page, children }: { page: Page; children: React.ReactNode }) {
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="flex items-baseline gap-2">
-        <h3 className="text-sm font-medium">{humanize(page.name)}</h3>
-        <span className="text-xs text-muted-foreground">{page.routePattern}</span>
-      </div>
-      {children}
-    </div>
-  );
-}
-
 function SiteDetailView({
   site,
   manifest,
-  results,
   onBack,
   onEnsureManifest,
-  onExecuteWorkflow,
 }: {
   site: SiteInfo;
-  manifest: Manifest | undefined;
-  results: Map<string, WorkflowResult>;
+  manifest: StateManifest | undefined;
   onBack: () => void;
   onEnsureManifest: (slug: string) => void;
-  onExecuteWorkflow: (slug: string, name: string, inputs: Record<string, any>) => void;
 }) {
   useEffect(() => {
     onEnsureManifest(site.slug);
@@ -83,48 +70,70 @@ function SiteDetailView({
           <Loader2 className="size-4 animate-spin" />
           Loading manifest…
         </div>
+      ) : manifest.states?.length === 0 ? (
+        <Alert>
+          <AlertDescription>No states discovered for this site.</AlertDescription>
+        </Alert>
       ) : (
-        (() => {
-          const pagesWithWorkflows = (manifest.pages || []).filter(
-            (p) => p.workflows && p.workflows.length > 0
-          );
+        <div className="flex flex-col gap-4">
+          {manifest.states.map((state) => (
+            <Card key={state.id}>
+              <CardContent className="p-4 flex flex-col gap-3">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium">{humanize(state.name)}</span>
+                    <Badge variant="outline" className="text-[10px]">{state.id}</Badge>
+                  </div>
+                  <p className="text-xs text-muted-foreground">{state.url_pattern}</p>
+                  {state.description && (
+                    <p className="text-xs text-muted-foreground mt-1">{state.description}</p>
+                  )}
+                </div>
 
-          if (pagesWithWorkflows.length === 0) {
-            return (
-              <Alert>
-                <AlertDescription>No workflows discovered for this site.</AlertDescription>
-              </Alert>
-            );
-          }
+                {state.views.length > 0 && (
+                  <div>
+                    <p className="text-xs font-medium text-muted-foreground mb-1">Views</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {state.views.map((view) => (
+                        <Badge key={view.name} variant="secondary" className="text-xs gap-1">
+                          <Eye className="size-3" />
+                          {view.name}
+                          {view.isList && <span className="text-muted-foreground">[]</span>}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
-          return (
-            <div className="flex flex-col gap-4">
-              {pagesWithWorkflows.map((page) => (
-                <PageSection key={page.name} page={page}>
-                  {page.workflows!.map((wf) => (
-                    <WorkflowCard
-                      key={wf.name}
-                      workflow={wf}
-                      result={results.get(`${site.slug}/${wf.name}`)}
-                      onExecute={(inputs) => onExecuteWorkflow(site.slug, wf.name, inputs)}
-                    />
-                  ))}
-                </PageSection>
-              ))}
-            </div>
-          );
-        })()
+                {state.actions.length > 0 && (
+                  <div>
+                    <p className="text-xs font-medium text-muted-foreground mb-1">Actions</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {state.actions.map((action) => (
+                        <Badge key={action.name} variant="outline" className="text-xs gap-1">
+                          <Zap className="size-3" />
+                          {action.name}
+                          {action.leads_to && (
+                            <span className="text-muted-foreground">→ {action.leads_to}</span>
+                          )}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          ))}
+        </div>
       )}
     </div>
   );
 }
 
 export function ExecutionPanel() {
-  const { sites, manifests, results, loadingSites, executing, ensureManifest, executeWorkflow } =
-    useExecution();
+  const { sites, manifests, loadingSites, ensureManifest } = useExecution();
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
 
-  // Eagerly load manifests for all sites (for workflow counts in list view)
   useEffect(() => {
     sites.forEach((s) => ensureManifest(s.slug));
   }, [sites, ensureManifest]);
@@ -148,18 +157,6 @@ export function ExecutionPanel() {
     );
   }
 
-  if (executing) {
-    return (
-      <div className="flex-1 flex items-center justify-center p-6">
-        <Alert className="max-w-sm">
-          <Monitor className="size-4" />
-          <AlertTitle>Workflow running…</AlertTitle>
-          <AlertDescription>Watch the browser window to see the workflow execute.</AlertDescription>
-        </Alert>
-      </div>
-    );
-  }
-
   const selectedSite = selectedSlug ? sites.find((s) => s.slug === selectedSlug) : null;
 
   if (selectedSite) {
@@ -168,10 +165,8 @@ export function ExecutionPanel() {
         <SiteDetailView
           site={selectedSite}
           manifest={manifests.get(selectedSite.slug)}
-          results={results}
           onBack={() => setSelectedSlug(null)}
           onEnsureManifest={ensureManifest}
-          onExecuteWorkflow={executeWorkflow}
         />
       </ScrollArea>
     );

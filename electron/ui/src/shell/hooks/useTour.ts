@@ -37,7 +37,7 @@ const TOUR_STEPS: TourStep[] = [
     target: "[data-tour='execution-mode']",
     title: "API Explorer",
     content:
-      "After discovery, switch here to view discovered pages, workflows, and API endpoints.",
+      "After discovery, switch here to view discovered states, views, and actions.",
   },
   {
     target: "[data-tour='settings-mode']",

@@ -46,7 +46,7 @@ export const actionSchema = z.object({
   kind: z.enum(["click", "form_submit", "navigation", "input", "toggle", "select"]),
   description: z.string(),
   inputs: z.array(actionInputSchema).optional(),
-  leads_to: z.string().nullable().optional(),
+  leads_to: z.string().optional(),
   code: z.string().describe("Playwright async function body: (page, inputs) => { ... }"),
 });
 

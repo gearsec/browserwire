@@ -42,21 +42,15 @@ export const done = {
 // submit_state — register the state for this snapshot
 // ---------------------------------------------------------------------------
 
-const newStateSchema = z.object({
-  existing_state_id: z.undefined().optional(),
-  name: z.string().describe("snake_case semantic state name, e.g. product_list"),
-  description: z.string().describe("What this state represents"),
-  url_pattern: z.string().describe("URL pattern at this state, e.g. /products/:id"),
-  page_purpose: z.string().describe("Short purpose for dedup, e.g. 'browse products'"),
+const stateParamSchema = z.object({
+  existing_state_id: z.string().optional().describe("For existing states: the state id, e.g. 's2'. If provided, all other fields are ignored."),
+  name: z.string().optional().describe("For new states: snake_case semantic state name, e.g. product_list"),
+  description: z.string().optional().describe("For new states: what this state represents"),
+  url_pattern: z.string().optional().describe("For new states: URL pattern, e.g. /products/:id"),
+  page_purpose: z.string().optional().describe("For new states: short purpose for dedup, e.g. 'browse products'"),
   domain: z.string().optional().describe("Site domain, e.g. ecommerce (first snapshot only)"),
   domainDescription: z.string().optional().describe("1-2 sentences about the site (first snapshot only)"),
 });
-
-const existingStateSchema = z.object({
-  existing_state_id: z.string().describe("The id of the existing state, e.g. 's2'"),
-});
-
-const submitStateParams = z.union([newStateSchema, existingStateSchema]);
 
 export const submit_state = {
   name: "submit_state",
@@ -67,7 +61,7 @@ export const submit_state = {
     "For existing states, skip view discovery (views already in manifest). " +
     "For new states, proceed to submit_view and submit_action.",
   parameters: z.object({
-    state: submitStateParams,
+    state: stateParamSchema,
   }),
   execute: (ctx, { state }) => {
     if (state.existing_state_id) {
@@ -86,7 +80,11 @@ export const submit_state = {
       return { submitted: true, state_id: state.existing_state_id };
     }
 
-    // New state
+    // New state — validate required fields
+    if (!state.name || !state.description || !state.url_pattern || !state.page_purpose) {
+      return { error: "New state requires: name, description, url_pattern, page_purpose" };
+    }
+
     if (state.domain && ctx.manifest && !ctx.manifest.domain) {
       ctx.manifest.domain = state.domain;
       ctx.manifest.domainDescription = state.domainDescription || null;

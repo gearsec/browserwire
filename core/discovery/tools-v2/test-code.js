@@ -2,35 +2,28 @@
  * test-code.js — Code execution and testing tool.
  *
  * Executes a Playwright code snippet against the replayed DOM.
+ * The code is a self-contained async function: async (page) => { ... }
+ * For testing actions, the agent writes self-contained test code with
+ * hardcoded sample values rather than parameterized inputs.
+ *
  * Three modes:
  *   1. Just run: execute code, return result or error
- *   2. Compare output: execute code, compare actual vs expected
- *   3. Verify against recording: inject rrweb.record(), execute code,
- *      capture generated events, compare target node IDs against
- *      the recorded forward transition events.
- *
- * The code is an async function body: async (page, inputs) => { ... }
- * It receives the real Playwright Page object and can use any Playwright API.
+ *   2. Compare output (expected): execute and compare actual vs expected JSON
+ *   3. Verify against recording: inject rrweb.record(), execute, compare
+ *      generated event target IDs against recorded transition events
  */
 
 import { z } from "zod";
 import { EventType, IncrementalSource } from "../../recording/rrweb-constants.js";
 
 /**
- * Execute a code string as an async function against a Playwright page.
- *
- * The code string is expected to be a full async function expression:
- *   "async (page, inputs) => { ... }"
- *
- * We eval it to get the function reference, then invoke it with the
- * real Playwright page object and inputs.
+ * Execute a code string as a self-contained async function against a Playwright page.
+ * The code receives only the Playwright page — no external inputs.
  */
-async function executeCode(page, code, inputs) {
+async function executeCode(page, code) {
   try {
-    const fn = new Function("page", "inputs", `
-      return (${code})(page, inputs);
-    `);
-    const result = await fn(page, inputs || {});
+    const fn = new Function("page", `return (${code})(page);`);
+    const result = await fn(page);
     return { success: true, result };
   } catch (err) {
     return { success: false, error: err.message };
@@ -38,11 +31,14 @@ async function executeCode(page, code, inputs) {
 }
 
 /**
- * Compare actual result against expected, producing a structured diff.
+ * Compare actual result against expected JSON string, producing a structured diff.
  */
-function compareResults(actual, expected) {
-  if (expected === undefined || expected === null) {
-    return { matched: true };
+function compareResults(actual, expectedJson) {
+  let expected;
+  try {
+    expected = JSON.parse(expectedJson);
+  } catch {
+    return { matched: false, error: `expected is not valid JSON: ${expectedJson}` };
   }
 
   const actualStr = JSON.stringify(actual);
@@ -87,7 +83,6 @@ function compareResults(actual, expected) {
 
 /**
  * Get recorded forward transition interaction events for comparison.
- * These are the events the user actually performed to leave this state.
  */
 function getRecordedTransitionEvents(ctx) {
   const { events, currentSnapshotIndex, snapshots, index } = ctx;
@@ -125,26 +120,21 @@ function getRecordedTransitionEvents(ctx) {
 
 /**
  * Compare generated events from action code against recorded transition events.
- * Matches by rrweb node ID — the action must target the same elements
- * the user actually interacted with.
  */
 function compareEvents(generatedEvents, recordedEvents) {
   if (recordedEvents.length === 0) {
     return {
       matched: generatedEvents.length === 0,
       note: generatedEvents.length > 0
-        ? "No recorded transition events to compare against (terminal state or no forward transition)"
+        ? "No recorded transition events (terminal state or no forward transition)"
         : undefined,
     };
   }
 
-  // Build a set of recorded target node IDs for quick lookup
   const recordedNodeIds = new Set(recordedEvents.map((e) => e.rrweb_node_id));
   const generatedNodeIds = new Set(generatedEvents.map((e) => e.rrweb_node_id));
-
   const mismatches = [];
 
-  // Check each generated event has a matching recorded target
   for (const gen of generatedEvents) {
     if (!recordedNodeIds.has(gen.rrweb_node_id)) {
       mismatches.push({
@@ -155,7 +145,6 @@ function compareEvents(generatedEvents, recordedEvents) {
     }
   }
 
-  // Check each recorded event was targeted by the generated code
   for (const rec of recordedEvents) {
     if (!generatedNodeIds.has(rec.rrweb_node_id)) {
       mismatches.push({
@@ -177,31 +166,35 @@ function compareEvents(generatedEvents, recordedEvents) {
 export const test_code = {
   name: "test_code",
   description:
-    "Execute a Playwright code snippet against the replayed DOM at this snapshot. " +
-    "The code must be an async function: async (page, inputs) => { ... }. " +
-    "Use 'expected' to compare the output against expected values (returns actual vs expected diff). " +
-    "Use 'verify_against_recording' to check that the code targets the same elements " +
-    "the user actually interacted with in the recorded session — the tool injects rrweb " +
-    "recording, runs the code, captures the generated events, and compares target node IDs " +
-    "against the recorded forward transition events.",
+    "Execute a self-contained Playwright code snippet against the replayed DOM. " +
+    "The code must be: async (page) => { ... } — it receives only the Playwright page. " +
+    "For testing actions with inputs, hardcode sample values directly in the code. " +
+    "Use 'expected' (JSON string) to verify structure — e.g. check field names exist and are non-empty. Do NOT use expected to match specific dynamic content (post titles, IDs, timestamps) as these change. " +
+    "Use 'verify_against_recording' to verify the code targets the same elements the user interacted with.",
   parameters: z.object({
-    code: z.string().describe("Playwright async function: async (page, inputs) => { ... }"),
-    inputs: z.record(z.any()).optional().describe("Input values passed to the function"),
-    expected: z.any().optional().describe("Expected return value. When provided, compares actual vs expected."),
+    code: z.string().describe(
+      "Self-contained Playwright async function: async (page) => { ... }. " +
+      "Hardcode any test values directly — e.g. async (page) => { await page.locator('input').fill('test query'); }"
+    ),
+    expected: z.string().optional().describe(
+      "Expected return value as a JSON string. When provided, compares actual vs expected."
+    ),
     verify_against_recording: z.boolean().optional().describe(
-      "When true, injects rrweb recording, executes code, captures generated interaction events, " +
-      "and compares target element IDs against the recorded forward transition events."
+      "When true, injects rrweb recording, executes code, and compares generated interaction events " +
+      "against the recorded forward transition events to verify correct element targeting."
     ),
   }),
   execute: async (ctx, params) => {
-    const { code, inputs, expected, verify_against_recording } = params;
+    const { code, expected, verify_against_recording } = params;
     const { browser } = ctx;
 
     if (!browser?.page) {
       return { success: false, error: "No Playwright page available" };
     }
 
-    // If verifying against recording, start rrweb recording before executing code
+    // Short timeout — the DOM is static, missing elements should fail fast
+    browser.page.setDefaultTimeout(500);
+
     if (verify_against_recording) {
       try {
         await browser.startRecording();
@@ -210,30 +203,26 @@ export const test_code = {
       }
     }
 
-    // Execute the code
-    const execResult = await executeCode(browser.page, code, inputs);
+    const execResult = await executeCode(browser.page, code);
 
     const response = { success: execResult.success };
-
     if (execResult.success) {
       response.result = execResult.result;
     } else {
       response.error = execResult.error;
     }
 
-    // Compare against expected if provided
     if (expected !== undefined && execResult.success) {
       response.comparison = compareResults(execResult.result, expected);
     }
 
-    // Verify against recorded events if requested
     if (verify_against_recording) {
       try {
         const generatedEvents = await browser.collectRecordedEvents();
         const recordedEvents = getRecordedTransitionEvents(ctx);
         response.event_verification = compareEvents(generatedEvents, recordedEvents);
       } catch (err) {
-        response.event_verification = { error: `Failed to collect/compare events: ${err.message}` };
+        response.event_verification = { error: `Failed to compare events: ${err.message}` };
       }
     }
 

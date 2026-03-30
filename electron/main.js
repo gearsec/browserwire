@@ -15,19 +15,15 @@ import { homedir } from "node:os";
 import { loadConfig, readConfigFile, writeConfigFile, reloadConfig, getConfig, PROVIDER_DEFAULTS } from "../core/config.js";
 import { SessionManager } from "../core/session-manager.js";
 import { ManifestStore } from "../core/manifest-store.js";
-import { collectReadViews } from "../core/api/openapi.js";
 import { createHttpHandler } from "../core/api/router.js";
 import { createSessionBridge } from "./capture/session-bridge.js";
-import { createPlaywrightBridge, executeWorkflowSteps } from "./capture/workflow-executor.js";
-import { buildLookups, resolveWorkflowSteps, sanitize } from "../core/workflow-resolver.js";
+import { executeViaElectron, setCDPPort } from "./capture/execution-bridge.js";
 import { initUpdater } from "./updater.js";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-
-// ─── CDP for Playwright ──────────────────────────────────────────────────────
 
 const CDP_PORT = 9223;
 app.commandLine.appendSwitch("remote-debugging-port", String(CDP_PORT));
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ─── Global State ────────────────────────────────────────────────────────────
 
@@ -172,14 +168,14 @@ const startApp = async () => {
   sessionManager = new SessionManager(new ManifestStore(), { host, port });
   await sessionManager.loadManifests();
 
-  // Start HTTP server (REST API only, no WS)
-  // Use Electron bridge that executes workflows directly via hidden BrowserWindow
-  const bridge = createPlaywrightBridge({ cdpPort: CDP_PORT });
+  // Configure CDP port for execution bridge
+  setCDPPort(CDP_PORT);
 
+  // Start HTTP server (REST API)
   const httpHandler = createHttpHandler({
     getManifestBySlug: (slug) => sessionManager.getManifestBySlug(slug),
-    listSites: () => sessionManager.listSites({ collectReadViews }),
-    bridge,
+    listSites: () => sessionManager.listSites(),
+    execute: (opts) => executeViaElectron({ ...opts, parentWindow: mainWindow }),
     host,
     port,
   });
@@ -450,6 +446,36 @@ const wireIPC = () => {
     }
   });
 
+  ipcMain.handle("browserwire:retrain-session", async (_event, sessionId) => {
+    const send = (channel, data) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(channel, data);
+      }
+    };
+    try {
+      await sessionManager.reprocessSession(sessionId, {
+        onStatus: (status) => {
+          send("browserwire:session-status", { sessionId, ...status });
+          if (status.tool) {
+            send("browserwire:log", `${status.tool}`);
+          }
+          if (status.status === "complete") {
+            send("browserwire:session-status", { sessionId, status: "finalized" });
+            send("browserwire:log",
+              `Retrain ${sessionId}: complete (${status.totalToolCalls || 0} tool calls)`
+            );
+          }
+          if (status.status === "error") {
+            send("browserwire:log", `Retrain error: ${status.error}`);
+          }
+        },
+      });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
   // Settings
   ipcMain.handle("browserwire:get-settings", () => {
     const cfg = getConfig();
@@ -557,72 +583,6 @@ const wireIPC = () => {
       return { ok: true, llmConfigured: !!newConfig._llmConfigured };
     } catch (err) {
       return { ok: false, error: err.message };
-    }
-  });
-
-  // Workflow execution (from Execution tab — opens a visible window)
-  ipcMain.handle("browserwire:execute-workflow", async (_event, { slug, workflowName, inputs }) => {
-    if (!sessionManager) {
-      return { ok: false, error: "Not initialized" };
-    }
-
-    const lookup = sessionManager.getManifestBySlug(slug);
-    if (!lookup) return { ok: false, error: `Site '${slug}' not found` };
-    const { manifest, origin } = lookup;
-
-    // Resolve workflow
-    const lookups = buildLookups(manifest);
-    const workflow = lookups.workflowMap.get(sanitize(workflowName));
-    if (!workflow) return { ok: false, error: `Workflow '${workflowName}' not found` };
-
-    const resolved = resolveWorkflowSteps(workflow, lookups.viewMap, lookups.endpointMap);
-    if (resolved.error) return { ok: false, error: resolved.error };
-
-    // Notify renderer: execution starting
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("browserwire:execution-state", { running: true });
-    }
-
-    // Open a visible Electron BrowserWindow controlled via Playwright CDP
-    const { chromium } = await import("playwright");
-    const execWin = new BrowserWindow({
-      width: 1280,
-      height: 800,
-      title: `Running: ${workflowName.replace(/_/g, " ")}`,
-      parent: mainWindow,
-      webPreferences: {
-        contextIsolation: false,
-        nodeIntegration: false,
-        sandbox: false,
-      },
-    });
-
-    try {
-      // Navigate the Electron window to the origin
-      await execWin.loadURL(origin);
-
-      // Connect Playwright to Electron via CDP and find this page
-      const browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
-      const allPages = browser.contexts().flatMap((c) => c.pages());
-      const page = allPages.find((p) => p.url().startsWith(origin)) || allPages[allPages.length - 1];
-
-      if (!page) {
-        return { ok: false, error: "Could not find execution page via CDP" };
-      }
-
-      const result = await executeWorkflowSteps(page, {
-        steps: resolved.steps, pagination: resolved.pagination,
-        outcomes: workflow.outcomes || {}, inputs: inputs || {}, origin,
-      });
-      return result;
-    } catch (err) {
-      return { ok: false, error: err.message || "Workflow execution failed" };
-    } finally {
-      execWin.destroy();
-
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("browserwire:execution-state", { running: false });
-      }
     }
   });
 };

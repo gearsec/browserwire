@@ -38,7 +38,7 @@ const SYSTEM_PROMPT = `You are building a state machine from a recorded browsing
 
 2. **Submit state**: If you recognize an existing state, submit its id. Skip view extraction — views are already known. If it's new, submit the state identity (name, description, url_pattern, page_purpose). For the first snapshot also include domain and domainDescription.
 
-3. **Submit views** (new states only): For each data region, inspect the structure, write extraction code, test it with expected values, then submit. Submit one view at a time — you can forget each view after submitting it.
+3. **Submit views** (new states only): For each data region, use inspect_element on a representative element ref from the accessibility tree to discover the actual tag names, CSS classes, and attributes. Then write extraction code based on what you found, test it, and submit. Submit one view at a time — you can forget each view after submitting it. When testing, verify the code runs without errors and returns the correct structure (non-empty array for lists, non-empty object for single records). Do NOT compare against specific content values — page content is dynamic and will differ between the recorded session and the live page.
 
 4. **Submit actions**: Check the transition events to see what the user did after this state. For each interaction, inspect the target element, write interaction code, test it against the recording to confirm it targets the correct elements, then submit. Terminal states (last snapshot) have no transition events — skip this step.
 
@@ -48,13 +48,18 @@ const SYSTEM_PROMPT = `You are building a state machine from a recorded browsing
 
 - View code: \`async (page) => { ... }\` — returns an object (single) or array of objects (list) with named fields
 - Action code: \`async (page, inputs) => { ... }\` — inputs is an object with named parameters, may be empty for simple clicks
+- When testing with test_code, write self-contained code with hardcoded sample values: \`async (page) => { await page.locator('input').fill('sample query'); }\`
+- Submit the final parameterized version via submit_action: \`async (page, inputs) => { await page.locator('input').fill(inputs.query); }\`
 - Use \`page.locator()\` with CSS selectors. Keep code simple and direct.
+- When extracting fields from elements, wrap each field read in try/catch so missing elements return null instead of crashing: \`let text; try { text = await loc.innerText(); } catch { text = null; }\`. Playwright locators are always truthy even when no element matches — never use \`if (locator)\` to check existence.
 - Use snake_case for all names.
 
 ## Rules
 
 - NEVER submit views for an existing state.
+- NEVER submit a view or action whose code hasn't been verified to return non-empty data via test_code. The submit tools will reject code that returns empty results.
 - ONLY submit actions that match actual recorded transition events. Do not invent actions for elements the user didn't interact with.
+- If your selectors don't work on the first try, STOP guessing and use inspect_element on the target element's ref to see the actual DOM structure (tag names, classes, attributes). Write selectors based on what inspect_element shows, not assumptions.
 - ALWAYS call done when finished. If you stop without calling done, your work is lost.
 - After each tool call, briefly note what you found before the next call.`;
 
@@ -119,6 +124,7 @@ export async function runStateAgent({
     recursionLimit: 80,
     onProgress: ({ tool }) => {
       toolCallCount++;
+      console.log(`[browserwire]   → ${tool.replace("state-agent:", "")}`);
       if (onProgress) onProgress({ tool });
     },
     agentRole: "state-agent",

@@ -49,6 +49,14 @@ const compactMessages = (messages) => {
   return messages.map((m, i) => {
     if (i >= cutoff) return m;
     if (!(m instanceof ToolMessage || m._getType?.() === "tool")) return m;
+    // Multimodal content (images) is always large — compact it
+    if (Array.isArray(m.content)) {
+      return new ToolMessage({
+        content: "[Truncated: multimodal content. Re-call tool if needed.]",
+        tool_call_id: m.tool_call_id,
+        name: m.name,
+      });
+    }
     const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
     if (content.length <= COMPACT_THRESHOLD) return m;
     return new ToolMessage({
@@ -118,7 +126,24 @@ export function createReactAgent({
     let messages = ensureMessageInstances(state.messages);
     messages = compactMessages(messages);
 
-    const response = await modelWithTools.invoke(messages);
+    let response = await modelWithTools.invoke(messages);
+
+    // Gemini sometimes produces malformed function calls for complex args.
+    // Detect and retry immediately within the agent node so shouldContinue
+    // sees the retried AIMessage, not a HumanMessage.
+    const meta = response.response_metadata || {};
+    if (meta.finishReason === "MALFORMED_FUNCTION_CALL") {
+      const hint = meta.finishMessage || "Your last function call had invalid JSON.";
+      messages = [
+        ...messages,
+        response,
+        new HumanMessage(
+          `Your tool call was malformed: ${hint}\n\nPlease retry the tool call with valid JSON arguments.`
+        ),
+      ];
+      response = await modelWithTools.invoke(messages);
+    }
+
     return { messages: [response] };
   };
 
@@ -151,8 +176,14 @@ export function createReactAgent({
         onProgress({ tool: `${agentRole}:${toolCall.name}` });
       }
 
+      const content = typeof output === "string"
+        ? output
+        : Array.isArray(output)
+          ? output           // multimodal content blocks — pass through
+          : JSON.stringify(output);
+
       toolMessages.push(new ToolMessage({
-        content: typeof output === "string" ? output : JSON.stringify(output),
+        content,
         tool_call_id: toolCall.id,
         name: toolCall.name,
       }));

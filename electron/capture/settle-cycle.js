@@ -5,14 +5,13 @@
  *   - session.webRequest for network idle tracking
  *   - webContents.on('console-message') for page signals (click/mutation/navigation)
  *
- * On settle: captures a screenshot + records a snapshot marker.
- * The rrweb event stream (recorded in-page by dom-capture.js) is the source of
- * truth for DOM state — this module only captures the screenshot and marks
- * the boundary in the event stream.
+ * On settle: drains rrweb events from the page into a main-process buffer,
+ * triggers a FullSnapshot checkpoint, captures a screenshot, and emits a
+ * snapshot marker with the eventIndex into the cumulative buffer.
  *
- * The snapshot marker is: { snapshotId, eventIndex, screenshot, url, title }
- * where eventIndex points to the FullSnapshot event in the rrweb stream
- * that corresponds to this settled state.
+ * The event buffer lives in the main process — survives page navigations.
+ * Each capture drains all new events from window.__bw_events, so the page
+ * array is always emptied and navigation can't lose events.
  */
 
 import { session } from "electron";
@@ -44,6 +43,9 @@ export class SettleCycleManager {
     this._capturing = false;
     this._snapshotCount = 0;
 
+    // Cumulative event buffer (main process — survives navigations)
+    this._eventBuffer = [];
+
     // Network tracking
     this._pendingRequests = new Map();
 
@@ -61,20 +63,26 @@ export class SettleCycleManager {
   }
 
   /**
+   * Get the cumulative event buffer (all events across all page navigations).
+   * Called by session-bridge on stop to build the session recording.
+   */
+  get events() {
+    return this._eventBuffer;
+  }
+
+  /**
    * Attach listeners and start receiving signals.
    */
   start() {
     if (this._started) return;
     this._started = true;
 
-    // Listen for page signals via console-message
     this._wc.on("console-message", this._onConsoleMessage);
 
-    // Network tracking via session.webRequest
     const ses = this._wc.session || session.defaultSession;
 
     this._onBeforeRequest = (details, callback) => {
-      callback({}); // always proceed — we're observing, not blocking
+      callback({});
       if (details.webContentsId !== this._wcId) return;
       if (!BLOCKING_RESOURCE_TYPES.has(details.resourceType)) return;
       if (NON_BLOCKING_URL_RE.test(details.url)) return;
@@ -84,7 +92,6 @@ export class SettleCycleManager {
         startedAt: Date.now(),
       });
 
-      // Network activity during settling resets the debounce
       if (this._phase === "settling") {
         this._resetDebounce();
       }
@@ -120,7 +127,6 @@ export class SettleCycleManager {
 
     this._wc.removeListener("console-message", this._onConsoleMessage);
 
-    // Remove webRequest listeners by setting to null
     const ses = this._wc.session || session.defaultSession;
     ses.webRequest.onBeforeRequest(null);
     ses.webRequest.onCompleted(null);
@@ -129,6 +135,30 @@ export class SettleCycleManager {
     this._onBeforeRequest = null;
     this._onRequestCompleted = null;
     this._onRequestFailed = null;
+  }
+
+  /**
+   * Drain all rrweb events from the page into the main-process buffer.
+   * Clears the page array so events aren't double-counted.
+   * Returns the number of events drained.
+   */
+  async drainEvents() {
+    try {
+      const eventsJson = await this._wc.executeJavaScript(`
+        (function() {
+          var events = window.__bw_events || [];
+          window.__bw_events = [];
+          return JSON.stringify(events);
+        })()
+      `);
+      const events = JSON.parse(eventsJson);
+      if (events.length > 0) {
+        this._eventBuffer.push(...events);
+      }
+      return events.length;
+    } catch {
+      return 0;
+    }
   }
 
   // ─── Internal ──────────────────────────────────────────────────────
@@ -143,10 +173,15 @@ export class SettleCycleManager {
       return;
     }
 
+    // Drain events eagerly to prevent loss if the page navigates away.
+    // Skip during snapshot capture — _captureSnapshot manages its own drain.
+    if (!this._capturing) {
+      this.drainEvents().catch(() => {});
+    }
+
     if (signal.type === "interaction") {
       this._beginSettleCycle();
     } else if (signal.type === "mutation") {
-      // DOM mutations during settling reset the debounce
       if (this._phase === "settling") {
         this._resetDebounce();
       }
@@ -155,7 +190,6 @@ export class SettleCycleManager {
 
   _beginSettleCycle() {
     if (this._phase === "settling") {
-      // Already settling — reset debounce, keep hard cap
       this._pendingRequests.clear();
       this._resetDebounce();
       return;
@@ -180,7 +214,6 @@ export class SettleCycleManager {
     if (this._isNetworkIdle()) {
       this._executeScan();
     }
-    // else: network still active — wait for _checkNetworkIdle or hard timeout
   }
 
   _forceScan() {
@@ -193,7 +226,6 @@ export class SettleCycleManager {
     if (this._phase !== "settling") return;
     if (!this._isNetworkIdle()) return;
 
-    // Network just drained — short debounce then settle
     if (!this._settleTimer) {
       this._settleTimer = setTimeout(() => this._onSettle(), 100);
     }
@@ -207,7 +239,6 @@ export class SettleCycleManager {
     this._clearTimers();
     this._phase = "idle";
 
-    // Avoid concurrent captures
     if (this._capturing) return;
     this._captureSnapshot().catch((err) => {
       console.warn("[browserwire-electron] snapshot capture failed:", err.message);
@@ -215,51 +246,69 @@ export class SettleCycleManager {
   }
 
   /**
-   * Capture a snapshot marker: screenshot + eventIndex into the rrweb stream.
+   * Capture a snapshot marker.
    *
-   * The rrweb event stream is recorded in-page (window.__bw_events).
-   * We ask the page for the current event count to get the eventIndex,
-   * then trigger a FullSnapshot checkpoint so the index points to a
-   * FullSnapshot event.
+   * 1. Trigger a FullSnapshot checkpoint in rrweb (adds Meta + FullSnapshot to page array)
+   * 2. Drain ALL events from the page into the main-process buffer
+   * 3. The eventIndex is the position of the FullSnapshot in the cumulative buffer
+   * 4. Take a screenshot
    */
   async _captureSnapshot() {
     this._capturing = true;
     try {
       const wc = this._wc;
 
-      // Wait one frame for repaint
       await new Promise((r) => setTimeout(r, 50));
 
-      // 1. Trigger an rrweb checkout (emits a new FullSnapshot into the stream)
-      //    and get the eventIndex pointing to that FullSnapshot + page metadata
-      let meta;
+      // 1. Trigger rrweb FullSnapshot checkpoint
       try {
-        meta = await wc.executeJavaScript(`
-          (function() {
-            if (typeof rrweb !== 'undefined' && rrweb.record) {
-              rrweb.record.takeFullSnapshot();
-            }
-            return JSON.stringify({
-              eventIndex: (window.__bw_events || []).length - 1,
-              url: location.href,
-              title: document.title,
-            });
-          })()
+        await wc.executeJavaScript(`
+          if (typeof rrweb !== 'undefined' && rrweb.record) {
+            rrweb.record.takeFullSnapshot();
+          }
+          void 0;
         `);
       } catch (err) {
         console.warn("[browserwire-electron] rrweb checkout failed:", err.message);
         return;
       }
 
-      let parsed;
-      try {
-        parsed = JSON.parse(meta);
-      } catch {
-        console.warn("[browserwire-electron] Failed to parse snapshot meta");
+      // 2. Drain all events from page into main-process buffer
+      const drained = await this.drainEvents();
+
+      // Find the FullSnapshot (type=2) in the drained batch.
+      // It may not be the last event — rrweb can emit IncrementalSnapshot
+      // events for mutations triggered by the snapshot process itself.
+      let eventIndex = -1;
+      for (let i = this._eventBuffer.length - 1; i >= this._eventBuffer.length - drained && i >= 0; i--) {
+        if (this._eventBuffer[i]?.type === 2) {
+          eventIndex = i;
+          break;
+        }
+      }
+
+      if (eventIndex === -1) {
+        console.warn(
+          `[browserwire-electron] no FullSnapshot found in drained ${drained} events, buffer size ${this._eventBuffer.length}`
+        );
         return;
       }
 
-      // 2. Screenshot (native Electron API)
+      // 3. Get page metadata
+      let url, title;
+      try {
+        const meta = await wc.executeJavaScript(`
+          JSON.stringify({ url: location.href, title: document.title })
+        `);
+        const parsed = JSON.parse(meta);
+        url = parsed.url;
+        title = parsed.title;
+      } catch {
+        url = "unknown";
+        title = "unknown";
+      }
+
+      // 4. Screenshot
       let screenshotBase64 = null;
       try {
         const image = await wc.capturePage();
@@ -270,12 +319,17 @@ export class SettleCycleManager {
 
       this._snapshotCount++;
 
+      console.log(
+        `[browserwire-electron] snapshot #${this._snapshotCount}: eventIndex=${eventIndex}, ` +
+        `buffer=${this._eventBuffer.length} events, drained=${drained}`
+      );
+
       this._onSnapshot({
         snapshotId: `snap_${this._snapshotCount}`,
-        eventIndex: parsed.eventIndex,
+        eventIndex,
         screenshot: screenshotBase64,
-        url: parsed.url,
-        title: parsed.title,
+        url,
+        title,
       });
     } finally {
       this._capturing = false;

@@ -41,7 +41,7 @@ export class StateMachineManifest {
       url_pattern,
       signature,
       views: [...views],
-      actions: actions.map((a) => ({ ...a, leads_to: a.leads_to ?? null })),
+      actions: actions.map((a) => ({ ...a, leads_to: a.leads_to || undefined })),
     };
     this._states.set(id, state);
     return id;
@@ -128,7 +128,7 @@ export class StateMachineManifest {
     const existing = new Set(state.actions.map((a) => a.name));
     for (const action of actions) {
       if (!existing.has(action.name)) {
-        state.actions.push({ ...action, leads_to: action.leads_to ?? null });
+        state.actions.push({ ...action, leads_to: action.leads_to || undefined });
         existing.add(action.name);
       }
     }
@@ -245,7 +245,7 @@ export class StateMachineManifest {
         url_pattern: state.url_pattern,
         signature: state.signature,
         views: state.views || [],
-        actions: (state.actions || []).map((a) => ({ ...a, leads_to: a.leads_to ?? null })),
+        actions: (state.actions || []).map((a) => ({ ...a, leads_to: a.leads_to || undefined })),
       });
 
       // Keep counter ahead of any existing numeric ids

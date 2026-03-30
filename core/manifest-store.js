@@ -33,7 +33,7 @@ export class ManifestStore {
 
   /**
    * List all known sites with summary metadata (no full manifest load).
-   * @returns {Promise<Array<{ origin: string, slug: string, updatedAt: string|null, entityCount: number, actionCount: number }>>}
+   * @returns {Promise<Array<{ origin: string, slug: string, updatedAt: string|null, stateCount: number, viewCount: number, actionCount: number }>>}
    */
   async listSites() {
     let entries;
@@ -55,8 +55,9 @@ export class ManifestStore {
           origin: meta.origin,
           slug,
           updatedAt: meta.updatedAt || meta.createdAt || null,
-          entityCount: meta.entityCount || 0,
-          actionCount: meta.actionCount || 0
+          stateCount: meta.stateCount || 0,
+          viewCount: meta.viewCount || 0,
+          actionCount: meta.actionCount || 0,
         });
       } catch {
         // Skip directories without valid meta.json
@@ -128,8 +129,10 @@ export class ManifestStore {
     }
 
     meta.updatedAt = new Date().toISOString();
-    meta.entityCount = manifest.entities?.length || 0;
-    meta.actionCount = manifest.actions?.length || 0;
+    const states = manifest.states || [];
+    meta.stateCount = states.length;
+    meta.viewCount = states.reduce((n, s) => n + (s.views?.length || 0), 0);
+    meta.actionCount = states.reduce((n, s) => n + (s.actions?.length || 0), 0);
     if (sessionId) {
       meta.sessionHistory.push({ sessionId, timestamp: meta.updatedAt });
     }

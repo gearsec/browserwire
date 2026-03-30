@@ -22,6 +22,7 @@ export function useHistory() {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [events, setEvents] = useState<any[] | null>(null);
   const [eventsLoading, setEventsLoading] = useState(false);
+  const [retraining, setRetraining] = useState(false);
 
   const loadSessions = useCallback(async () => {
     setLoading(true);
@@ -53,6 +54,17 @@ export function useHistory() {
     }
   }, []);
 
+  const retrainSession = useCallback(async (sessionId: string) => {
+    setRetraining(true);
+    try {
+      await window.browserwire.retrainSession(sessionId);
+    } catch (err) {
+      console.error("Retrain failed:", err);
+    } finally {
+      setRetraining(false);
+    }
+  }, []);
+
   const clearSelection = useCallback(() => {
     setSelectedSessionId(null);
     setEvents(null);
@@ -67,6 +79,8 @@ export function useHistory() {
     selectedSessionId,
     events,
     eventsLoading,
+    retraining,
+    retrainSession,
     loadSessions,
     selectSession,
     clearSelection,

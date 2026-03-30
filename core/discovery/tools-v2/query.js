@@ -19,13 +19,18 @@ import {
 
 export const view_screenshot = {
   name: "view_screenshot",
-  description: "View the page screenshot at this snapshot. Returns a base64-encoded JPEG image for visual understanding of the page layout.",
+  description: "View the page screenshot at this snapshot. Returns the screenshot image for visual understanding of the page layout.",
   parameters: z.object({}),
   execute: (ctx) => {
     if (!ctx.index.screenshot) {
       return { error: "No screenshot available for this snapshot" };
     }
-    return { screenshot: ctx.index.screenshot, format: "base64/jpeg" };
+    return {
+      _multimodal: true,
+      content: [
+        { type: "image_url", image_url: { url: `data:image/jpeg;base64,${ctx.index.screenshot}` } },
+      ],
+    };
   },
 };
 

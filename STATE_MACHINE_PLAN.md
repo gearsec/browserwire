@@ -521,21 +521,76 @@ The agent never touches the manifest directly. It only produces state step resul
 
 ---
 
-### Phase 7: API & Manifest Store Updates
+### Phase 7: Flat API Generation
 
-**`core/manifest-store.js`**:
-- Update meta fields for state machine shape
+The API is flat — every view and action is a direct endpoint. The state machine path is computed and executed internally.
 
-**`core/api/openapi.js`**:
-- Generate API spec from `manifest.states[].views` (read) and `manifest.states[].actions` (execute)
+**Strategy:**
 
-**`core/api/router.js`**:
-- Update routes and counts for state machine manifest
+1. Collect all views and actions across all states
+2. For each, compute the shortest path from `initial_state` via BFS through `leads_to`
+3. Collect ALL inputs along the path (intermediate action inputs + target inputs) into one flat input schema
+4. At execution time: navigate to initial state URL → execute each action along the path → read view or execute final action
 
-**`core/workflow-resolver.js`**:
-- Rewrite for action-based resolution: navigate to state URL → execute action code → arrive at leads_to state
+**Generated API surface:**
 
-**Checkpoint**: Full end-to-end working. API docs render state machine.
+```
+GET  /api/sites/:slug/views/:view_name      → navigate path, read view data
+POST /api/sites/:slug/actions/:action_name   → navigate path, execute action
+GET  /api/sites/:slug/manifest               → raw state machine manifest
+GET  /api/sites/:slug/docs                   → Swagger/OpenAPI docs
+```
+
+**Example:** `GET /views/cart_items` with `{ product_name: "Widget A" }`:
+- Path: s0 → view_details(product_name) → s1 → add_to_cart() → s2
+- Inputs: `{ product_name }` (from intermediate action `view_details`)
+- Execute: navigate to s0 URL → run view_details code → run add_to_cart code → run cart_items view code → return data
+
+**Files:**
+
+- `core/api/route-builder.js` — NEW: compute paths + build flat route table from manifest
+- `core/api/executor.js` — NEW: execute a path (navigate + run actions + read view) via Playwright
+- `core/api/openapi.js` — rewrite: generate OpenAPI spec from flat route table
+- `core/api/router.js` — rewrite: use flat route table for request handling
+- `core/workflow-resolver.js` — DELETE (replaced by route-builder + executor)
+- `core/manifest-store.js` — update meta fields for state machine shape
+
+**Checkpoint**: Flat API endpoints generated from state machine. Swagger docs render correctly. Execution stubbed.
+
+---
+
+### Phase 8: Execution Engine
+
+Executes view reads and action runs against the live site by traversing the state machine path.
+
+**Flow for a request (e.g., `GET /views/cart_items?product_name=Widget`):**
+
+1. Look up the route in the route table → get the path + target view/action
+2. Launch a headless Playwright browser, navigate to `initial_state.url_pattern`
+3. For each step in the path:
+   - Find the action on the current state
+   - Execute the action's `code` function against the live page, passing the relevant inputs
+   - Wait for navigation/network settle
+4. At the target state:
+   - For views: execute the view's `code` function, return the extracted data
+   - For actions: execute the action's `code` function, return success
+5. Close browser, return response
+
+**Key implementation details:**
+
+- **Browser lifecycle**: One headless Playwright browser per request. Launch → navigate → execute path → read/act → close. Stateless.
+- **Input routing**: The flat API collects all inputs (path + target). The executor splits them back: each action along the path gets its own inputs by matching input names to the action's declared inputs.
+- **Navigation settle**: After each action, wait for network idle + DOM settle before proceeding. Similar to the capture pipeline's settle logic, but simpler (no rrweb needed).
+- **Code execution**: The manifest stores code as strings (`async (page, inputs) => { ... }`). Execute via `new Function("page", "inputs", "return (code)(page, inputs)")` with the Playwright page.
+- **Timeout**: Per-action timeout (30s default). Overall request timeout (60s default).
+- **Error handling**: If any step in the path fails, return the error with context (which step, which action, what happened).
+
+**Files:**
+
+- `core/api/executor.js` — NEW: execute a route path against a live site via Playwright
+- `core/api/router.js` — wire executor into view/action handlers (replace stubs)
+
+**Checkpoint**: Full end-to-end working. API requests navigate the state machine and return real data from the live site.
 
 ---
 
@@ -570,9 +625,9 @@ The agent never touches the manifest directly. It only produces state step resul
 2. **Phase 2**: ✅ Session recording: rrweb event stream + snapshot markers, typed with Zod, validated, saved via core/session-manager
 3. **Phase 3**: ✅ History UI: session list, rrweb-player replays with snapshot seeking
 4. **Phase 4**: Tool inventory defined (above)
-5. **Phase 5**: Agent processes a single snapshot, produces state step with views/actions containing Playwright code
-6. **Phase 6**: Serial processing: recording → agent per snapshot → StateMachineManifest
-7. **Phase 7**: API docs render state machine, action execution works
+5. **Phase 5**: ✅ Agent + tools: `state-agent.js` (ReAct agent per snapshot), `tools-v2/` (12 tools). Old pipeline deleted.
+6. **Phase 6**: ✅ Serial processing: `session-processor.js` (orchestrator), `session-manager.js` (save + process + manifest store)
+7. **Phase 7**: ✅ Flat API: route-builder (BFS pathfinding), openapi.js (spec from route table), router.js (views/actions endpoints), manifest-store updated, workflow-resolver deleted
 
 ## End-to-End Test
 1. Run Electron app, navigate to a site

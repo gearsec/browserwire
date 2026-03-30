@@ -4,67 +4,32 @@ interface SiteInfo {
   slug: string;
   origin: string;
   domain?: string;
-  pageCount?: number;
-  workflowCount?: number;
+  stateCount?: number;
+  viewCount?: number;
+  actionCount?: number;
   updatedAt?: string;
 }
 
-interface WorkflowInput {
-  name: string;
-  type: string;
-  required: boolean;
-  description?: string;
-}
-
-interface WorkflowStep {
-  type: string;
-  url?: string;
-  endpoint_name?: string;
-  input_param?: string;
-  view_name?: string;
-}
-
-interface Workflow {
-  name: string;
-  kind: string;
-  description: string;
-  inputs: WorkflowInput[];
-  steps: WorkflowStep[];
-  outcomes?: object;
-}
-
-interface Page {
-  name: string;
-  routePattern: string;
-  description?: string;
-  workflows?: Workflow[];
-  views?: object[];
-  endpoints?: object[];
-}
-
-interface Manifest {
+interface StateManifest {
   domain?: string;
   domainDescription?: string;
-  pages: Page[];
-}
-
-interface WorkflowResult {
-  loading: boolean;
-  ok?: boolean;
-  data?: any;
-  outcome?: string;
-  error?: string;
-  message?: string;
+  initial_state?: string;
+  states: {
+    id: string;
+    name: string;
+    description: string;
+    url_pattern: string;
+    views: { name: string; description: string; isList: boolean; returns: { name: string; type: string }[] }[];
+    actions: { name: string; kind: string; description: string; leads_to: string | null; inputs?: { name: string; type: string; required: boolean }[] }[];
+  }[];
 }
 
 const API = window.browserwire.apiBaseUrl;
 
 export function useExecution() {
   const [sites, setSites] = useState<SiteInfo[]>([]);
-  const [manifests, setManifests] = useState<Map<string, Manifest>>(new Map());
-  const [results, setResults] = useState<Map<string, WorkflowResult>>(new Map());
+  const [manifests, setManifests] = useState<Map<string, StateManifest>>(new Map());
   const [loadingSites, setLoadingSites] = useState(true);
-  const [executing, setExecuting] = useState(false);
 
   // Fetch sites on mount
   useEffect(() => {
@@ -79,15 +44,7 @@ export function useExecution() {
       .finally(() => setLoadingSites(false));
   }, []);
 
-  // Listen for execution state changes from main process
-  useEffect(() => {
-    const cleanup = window.browserwire.onExecutionState((state) => {
-      setExecuting(state.running);
-    });
-    return cleanup;
-  }, []);
-
-  // Fetch manifest for a site (idempotent)
+  // Fetch manifest for a site
   const ensureManifest = useCallback(
     async (slug: string) => {
       if (manifests.has(slug)) return;
@@ -106,38 +63,6 @@ export function useExecution() {
     [manifests]
   );
 
-  // Execute a workflow via IPC (uses main BrowserView)
-  const executeWorkflow = useCallback(
-    async (slug: string, workflowName: string, inputs: Record<string, any>) => {
-      const key = `${slug}/${workflowName}`;
-      setResults((prev) => {
-        const next = new Map(prev);
-        next.set(key, { loading: true });
-        return next;
-      });
-
-      try {
-        const result = await window.browserwire.executeWorkflow({
-          slug,
-          workflowName,
-          inputs,
-        });
-        setResults((prev) => {
-          const next = new Map(prev);
-          next.set(key, { loading: false, ...result });
-          return next;
-        });
-      } catch (err: any) {
-        setResults((prev) => {
-          const next = new Map(prev);
-          next.set(key, { loading: false, ok: false, error: err.message });
-          return next;
-        });
-      }
-    },
-    []
-  );
-
   // Refresh sites list
   const refreshSites = useCallback(async () => {
     try {
@@ -154,13 +79,10 @@ export function useExecution() {
   return {
     sites,
     manifests,
-    results,
     loadingSites,
-    executing,
     ensureManifest,
-    executeWorkflow,
     refreshSites,
   };
 }
 
-export type { SiteInfo, Manifest, Page, Workflow, WorkflowInput, WorkflowResult };
+export type { SiteInfo, StateManifest };
