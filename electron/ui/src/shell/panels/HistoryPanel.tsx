@@ -1,13 +1,36 @@
 import React, { useEffect, useRef, useState } from "react";
-import { ArrowLeft, Globe, Clock, Layers, Radio, RotateCcw } from "lucide-react";
+import { ArrowLeft, Globe, Clock, Layers, Radio, RotateCcw, Check, AlertCircle, Loader2 } from "lucide-react";
 import rrwebPlayer from "rrweb-player";
 import "rrweb-player/dist/style.css";
+import { Alert, AlertDescription } from "../../components/ui/alert";
 import { Button } from "../../components/ui/button";
 import { Card, CardContent } from "../../components/ui/card";
 import { Badge } from "../../components/ui/badge";
+import { Progress } from "../../components/ui/progress";
 import { ScrollArea } from "../../components/ui/scroll-area";
 import { Separator } from "../../components/ui/separator";
-import { useHistory, type SessionSummary } from "../hooks/useHistory";
+import { useHistory, type SessionSummary, type TrainingProgress } from "../hooks/useHistory";
+
+const TOOL_LABELS: Record<string, string> = {
+  "view_screenshot": "Viewing screenshot",
+  "get_accessibility_tree": "Reading accessibility tree",
+  "get_page_regions": "Analyzing page regions",
+  "inspect_element": "Inspecting element",
+  "find_interactive": "Finding interactive elements",
+  "get_transition_events": "Analyzing transitions",
+  "get_state_machine": "Reading state machine",
+  "test_code": "Testing code",
+  "submit_state": "Submitting state",
+  "submit_view": "Submitting view",
+  "submit_action": "Submitting action",
+  "done": "Finishing analysis",
+};
+
+function humanizeTool(tool: string): string {
+  // Strip agent prefix (e.g. "state-agent:view_screenshot" -> "view_screenshot")
+  const name = tool.includes(":") ? tool.split(":").pop()! : tool;
+  return TOOL_LABELS[name] || name.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
 
 function formatDate(iso: string) {
   try {
@@ -31,7 +54,68 @@ function formatDuration(start: string, stop: string) {
   }
 }
 
-function SessionCard({ session, onSelect }: { session: SessionSummary; onSelect: () => void }) {
+function TrainingTimeline({ progress }: { progress: TrainingProgress }) {
+  const { status, currentSnapshot, totalSnapshots, currentTool, error, totalToolCalls } = progress;
+  const total = totalSnapshots || 1;
+  const progressValue = status === "complete" ? 100 : Math.round(((currentSnapshot - 1) / total) * 100);
+
+  if (status === "complete") {
+    return (
+      <Alert className="border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/30">
+        <Check className="size-4 text-emerald-600 dark:text-emerald-400" />
+        <AlertDescription className="text-emerald-700 dark:text-emerald-300">
+          Training complete{totalToolCalls ? ` — ${totalToolCalls} tool calls` : ""}
+        </AlertDescription>
+      </Alert>
+    );
+  }
+
+  if (status === "error") {
+    return (
+      <Alert variant="destructive">
+        <AlertCircle className="size-4" />
+        <AlertDescription>
+          Training failed{error ? `: ${error}` : ""}
+        </AlertDescription>
+      </Alert>
+    );
+  }
+
+  // Processing — show progress bar with snapshot info
+  return (
+    <Card>
+      <CardContent className="p-4 flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Loader2 className="size-4 animate-spin text-primary" />
+            <span className="text-sm font-medium">Training in progress</span>
+          </div>
+          <Badge variant="secondary" className="text-xs">
+            Snapshot {currentSnapshot || 1} of {total}
+          </Badge>
+        </div>
+        <Progress value={progressValue} />
+        {currentTool && (
+          <p className="text-xs text-muted-foreground">
+            {humanizeTool(currentTool)}...
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function SessionCard({
+  session,
+  progress,
+  onSelect,
+}: {
+  session: SessionSummary;
+  progress: TrainingProgress | null;
+  onSelect: () => void;
+}) {
+  const isTraining = progress && (progress.status === "processing");
+
   return (
     <Card
       className="cursor-pointer hover:bg-muted/50 transition-colors"
@@ -53,14 +137,23 @@ function SessionCard({ session, onSelect }: { session: SessionSummary; onSelect:
             </div>
           </div>
           <div className="flex gap-1.5 shrink-0">
-            <Badge variant="secondary" className="text-xs">
-              <Layers className="size-3 mr-1" />
-              {session.snapshotCount}
-            </Badge>
-            <Badge variant="outline" className="text-xs">
-              <Radio className="size-3 mr-1" />
-              {session.eventCount}
-            </Badge>
+            {isTraining ? (
+              <Badge variant="default" className="text-xs gap-1">
+                <span className="size-1.5 rounded-full bg-white animate-pulse" />
+                Training
+              </Badge>
+            ) : (
+              <>
+                <Badge variant="secondary" className="text-xs">
+                  <Layers className="size-3 mr-1" />
+                  {session.snapshotCount}
+                </Badge>
+                <Badge variant="outline" className="text-xs">
+                  <Radio className="size-3 mr-1" />
+                  {session.eventCount}
+                </Badge>
+              </>
+            )}
           </div>
         </div>
       </CardContent>
@@ -71,10 +164,12 @@ function SessionCard({ session, onSelect }: { session: SessionSummary; onSelect:
 function SessionList({
   sessions,
   loading,
+  getProgress,
   onSelect,
 }: {
   sessions: SessionSummary[];
   loading: boolean;
+  getProgress: (sessionId: string) => TrainingProgress | null;
   onSelect: (sessionId: string) => void;
 }) {
   if (loading) {
@@ -101,6 +196,7 @@ function SessionList({
         <SessionCard
           key={session.sessionId}
           session={session}
+          progress={getProgress(session.sessionId)}
           onSelect={() => onSelect(session.sessionId)}
         />
       ))}
@@ -113,6 +209,7 @@ function ReplayView({
   events,
   eventsLoading,
   retraining,
+  progress,
   onBack,
   onRetrain,
 }: {
@@ -120,6 +217,7 @@ function ReplayView({
   events: any[] | null;
   eventsLoading: boolean;
   retraining: boolean;
+  progress: TrainingProgress | null;
   onBack: () => void;
   onRetrain: () => void;
 }) {
@@ -185,6 +283,8 @@ function ReplayView({
     };
   }, [events]);
 
+  const showTimeline = progress && (progress.status === "processing" || progress.status === "complete" || progress.status === "error");
+
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
@@ -201,13 +301,20 @@ function ReplayView({
         <Button
           variant="outline"
           size="sm"
-          disabled={retraining}
+          disabled={retraining || (progress != null && progress.status === "processing")}
           onClick={onRetrain}
         >
           <RotateCcw className={`size-4 mr-1.5 ${retraining ? "animate-spin" : ""}`} />
-          {retraining ? "Retraining..." : "Retrain"}
+          {retraining ? "Retraining..." : progress?.status === "processing" ? "Training..." : "Retrain"}
         </Button>
       </div>
+
+      {/* Training progress timeline */}
+      {showTimeline && (
+        <div className="px-4 py-3 border-b border-border">
+          <TrainingTimeline progress={progress} />
+        </div>
+      )}
 
       {/* Snapshot markers — clickable to seek */}
       {session.snapshots.length > 0 && (
@@ -243,12 +350,32 @@ function ReplayView({
   );
 }
 
-export function HistoryPanel() {
+export function HistoryPanel({
+  autoSelectSessionId,
+  onAutoSelectConsumed,
+}: {
+  autoSelectSessionId?: string | null;
+  onAutoSelectConsumed?: () => void;
+} = {}) {
   const history = useHistory();
+  const autoSelectHandled = useRef(false);
 
+  // Load sessions on mount
   useEffect(() => {
     history.loadSessions();
   }, []);
+
+  // Auto-select session when navigated from Stop Exploring
+  useEffect(() => {
+    if (autoSelectSessionId && !autoSelectHandled.current && !history.loading) {
+      autoSelectHandled.current = true;
+      // Reload sessions to include the just-stopped session, then select it
+      history.loadSessions().then(() => {
+        history.selectSession(autoSelectSessionId);
+      });
+      onAutoSelectConsumed?.();
+    }
+  }, [autoSelectSessionId, history.loading]);
 
   if (history.selectedSession && history.selectedSessionId) {
     return (
@@ -257,6 +384,7 @@ export function HistoryPanel() {
         events={history.events}
         eventsLoading={history.eventsLoading}
         retraining={history.retraining}
+        progress={history.getProgress(history.selectedSessionId)}
         onBack={history.clearSelection}
         onRetrain={() => history.retrainSession(history.selectedSessionId!)}
       />
@@ -276,6 +404,7 @@ export function HistoryPanel() {
           <SessionList
             sessions={history.sessions}
             loading={history.loading}
+            getProgress={history.getProgress}
             onSelect={history.selectSession}
           />
         </div>

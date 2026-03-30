@@ -15,10 +15,11 @@
  *   Submission:         submit_state, submit_view, submit_action, done
  */
 
-import { HumanMessage } from "@langchain/core/messages";
+import { HumanMessage, AIMessage, ToolMessage } from "@langchain/core/messages";
 import { getModel } from "./ai-provider.js";
 import { getAgentTools } from "./tools-v2/index.js";
 import { createReactAgent } from "./graphs/react-agent.js";
+import { view_screenshot } from "./tools-v2/query.js";
 
 // ---------------------------------------------------------------------------
 // System prompt
@@ -34,7 +35,7 @@ const SYSTEM_PROMPT = `You are building a state machine from a recorded browsing
 
 ## Workflow
 
-1. **Orient**: Look at the screenshot, page regions, and accessibility tree. Check the existing state machine for states that might match.
+1. **Orient**: Review the screenshot (already provided via view_screenshot), then use page regions and accessibility tree. Check the existing state machine for states that might match.
 
 2. **Submit state**: If you recognize an existing state, submit its id. Skip view extraction — views are already known. If it's new, submit the state identity (name, description, url_pattern, page_purpose). For the first snapshot also include domain and domainDescription.
 
@@ -52,6 +53,7 @@ const SYSTEM_PROMPT = `You are building a state machine from a recorded browsing
 - Submit the final parameterized version via submit_action: \`async (page, inputs) => { await page.locator('input').fill(inputs.query); }\`
 - Use \`page.locator()\` with CSS selectors. Keep code simple and direct.
 - When extracting fields from elements, wrap each field read in try/catch so missing elements return null instead of crashing: \`let text; try { text = await loc.innerText(); } catch { text = null; }\`. Playwright locators are always truthy even when no element matches — never use \`if (locator)\` to check existence.
+- url_pattern must be an RFC 6570 URI template. Use {param} for path parameters (e.g. /users/{id}). Use {?param} for query parameters (e.g. /item{?id}). Use {?p1,p2} for multiple query params.
 - Use snake_case for all names.
 
 ## Rules
@@ -134,15 +136,33 @@ export async function runStateAgent({
   const isTerminal = currentSnapshotIndex >= snapshots.length - 1;
 
   try {
-    await invoke([
-      new HumanMessage(
-        `Analyze snapshot #${currentSnapshotIndex + 1} of ${snapshots.length}.\n` +
-        `URL: ${snapshot.url}\n` +
-        `Title: ${snapshot.title}\n` +
-        (isTerminal ? "This is the LAST snapshot (terminal state — no forward transition events).\n" : "") +
-        `\nProcess this snapshot: determine state, write views and actions, then call done.`
-      ),
-    ]);
+    const humanText =
+      `Analyze snapshot #${currentSnapshotIndex + 1} of ${snapshots.length}.\n` +
+      `URL: ${snapshot.url}\n` +
+      `Title: ${snapshot.title}\n` +
+      (isTerminal ? "This is the LAST snapshot (terminal state — no forward transition events).\n" : "") +
+      `\nProcess this snapshot: determine state, write views and actions, then call done.`;
+
+    const initialMessages = [new HumanMessage(humanText)];
+
+    // Auto-inject screenshot so the agent always sees it on turn 1
+    const screenshotResult = view_screenshot.execute(ctx);
+    if (!screenshotResult.error) {
+      const syntheticToolCallId = "auto_screenshot";
+      initialMessages.push(
+        new AIMessage({
+          content: "",
+          tool_calls: [{ id: syntheticToolCallId, name: "view_screenshot", args: {} }],
+        }),
+        new ToolMessage({
+          content: screenshotResult.content,
+          tool_call_id: syntheticToolCallId,
+          name: "view_screenshot",
+        }),
+      );
+    }
+
+    await invoke(initialMessages);
   } catch (err) {
     return {
       error: `State agent error: ${err.message}`,

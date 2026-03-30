@@ -28,12 +28,14 @@ const NON_BLOCKING_URL_RE =
   /google-analytics|segment\.io|sentry\.io|hotjar|intercom|doubleclick|fonts\.(googleapis|gstatic)|\.woff2?(\?|$)|\.ttf(\?|$)|\.css(\?|$)|\.png(\?|$)|\.jpg(\?|$)|\.jpeg(\?|$)|\.svg(\?|$)|\.gif(\?|$)/i;
 
 /**
- * @param {{ webContents: Electron.WebContents, onSnapshot: (snap: object) => void }} opts
+ * @param {{ webContents: Electron.WebContents, onSnapshot: (snap: object) => void, onCaptureStart?: () => void, onCaptureEnd?: () => void }} opts
  */
 export class SettleCycleManager {
-  constructor({ webContents, onSnapshot }) {
+  constructor({ webContents, onSnapshot, onCaptureStart, onCaptureEnd }) {
     this._wc = webContents;
     this._onSnapshot = onSnapshot;
+    this._onCaptureStart = onCaptureStart || (() => {});
+    this._onCaptureEnd = onCaptureEnd || (() => {});
     this._wcId = webContents.id;
 
     // State machine
@@ -255,6 +257,7 @@ export class SettleCycleManager {
    */
   async _captureSnapshot() {
     this._capturing = true;
+    this._onCaptureStart();
     try {
       const wc = this._wc;
 
@@ -332,6 +335,7 @@ export class SettleCycleManager {
         title,
       });
     } finally {
+      this._onCaptureEnd();
       this._capturing = false;
     }
   }

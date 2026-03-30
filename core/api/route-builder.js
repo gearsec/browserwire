@@ -117,16 +117,15 @@ function getAction(state, actionName) {
 }
 
 /**
- * Extract :param segments from a url_pattern (e.g. "/r/:subreddit/comments/:id" → ["subreddit", "id"]).
+ * Extract variable names from an RFC 6570 URI template.
+ * Handles {var}, {?var}, {&var}, {+var}, {#var}, {.var}, {;var}, {/var}, and {?a,b} forms.
  */
-function extractUrlParams(urlPattern) {
-  const params = [];
-  for (const segment of urlPattern.split("/")) {
-    if (segment.startsWith(":")) {
-      params.push(segment.slice(1));
-    }
-  }
-  return params;
+function extractUrlParams(urlTemplate) {
+  const matches = urlTemplate.match(/\{[+#./;?&]?([^}]+)\}/g) || [];
+  return matches.flatMap((m) => {
+    const inner = m.slice(1, -1).replace(/^[+#./;?&]/, "");
+    return inner.split(",").map((v) => v.replace(/[*:].*$/, "").trim());
+  });
 }
 
 /**
@@ -220,6 +219,7 @@ export function buildRouteTable(manifest) {
       const name = uniqueName(view.name, state.name);
       views.push({
         name,
+        originalName: view.name,
         type: "view",
         stateId: state.id,
         stateName: state.name,
@@ -237,6 +237,7 @@ export function buildRouteTable(manifest) {
       const name = uniqueName(action.name, state.name);
       actions.push({
         name,
+        originalName: action.name,
         type: "action",
         stateId: state.id,
         stateName: state.name,

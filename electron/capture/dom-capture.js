@@ -129,10 +129,21 @@ const PAGE_SIGNAL_SCRIPT = `
   window.addEventListener('popstate', checkNav);
   window.addEventListener('hashchange', checkNav);
 
+  // Strip target="_blank" from links so clicks navigate in the same frame
+  var stripTargets = function() {
+    document.querySelectorAll('a[target="_blank"]').forEach(function(a) {
+      a.removeAttribute('target');
+    });
+  };
+  stripTargets();
+  var targetObs = new MutationObserver(stripTargets);
+  targetObs.observe(document.documentElement, { childList: true, subtree: true });
+
   // Initial signal — tells the settle cycle to take the first snapshot
   signal({ type: 'interaction', kind: 'initial' });
 
   window.__bw_cleanup = function() {
+    targetObs.disconnect();
     document.removeEventListener('click', onClick, true);
     obs.disconnect();
     window.removeEventListener('popstate', checkNav);

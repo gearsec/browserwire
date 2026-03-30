@@ -6,8 +6,13 @@ interface NavigationState {
 }
 
 interface SessionStatus {
+  sessionId?: string;
   snapshotCount?: number;
   status?: string;
+  snapshot?: number;
+  tool?: string;
+  error?: string;
+  totalToolCalls?: number;
 }
 
 interface BatchStatus {

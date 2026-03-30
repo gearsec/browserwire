@@ -11,6 +11,8 @@
  * wait for network idle AND DOM mutations to stop (debounced).
  */
 
+import { parseTemplate } from "url-template";
+
 const ACTION_TIMEOUT_MS = 30_000;
 const LOCATOR_TIMEOUT_MS = 100;
 
@@ -112,11 +114,9 @@ export async function executeRoute({ page, manifest, route, inputs, origin }) {
       return { ok: false, error: "Entry point state not found in manifest" };
     }
 
-    // Substitute :param segments in the URL pattern with actual input values
-    let urlPath = entryState.url_pattern || "/";
-    urlPath = urlPath.replace(/:([^/]+)/g, (_, param) => {
-      return encodeURIComponent(inputs[param] || "");
-    });
+    // Expand RFC 6570 URI template with input values
+    const template = parseTemplate(entryState.url_pattern || "/");
+    const urlPath = template.expand(inputs);
     const startUrl = origin + urlPath;
 
     console.log(`[browserwire-exec] navigating to ${startUrl}`);
@@ -159,7 +159,7 @@ export async function executeRoute({ page, manifest, route, inputs, origin }) {
     const targetState = getState(manifest, route.stateId);
 
     if (route.type === "view") {
-      const view = getView(targetState, route.name);
+      const view = getView(targetState, route.originalName || route.name);
       if (!view?.code) {
         return { ok: false, error: `View "${route.name}" has no code`, steps: executedSteps };
       }
@@ -177,7 +177,7 @@ export async function executeRoute({ page, manifest, route, inputs, origin }) {
         return { ok: false, error: `View "${route.name}" failed: ${err.message}`, steps: executedSteps };
       }
     } else {
-      const action = getAction(targetState, route.name);
+      const action = getAction(targetState, route.originalName || route.name);
       if (!action?.code) {
         return { ok: false, error: `Action "${route.name}" has no code`, steps: executedSteps };
       }

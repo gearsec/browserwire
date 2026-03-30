@@ -46,7 +46,7 @@ const stateParamSchema = z.object({
   existing_state_id: z.string().optional().describe("For existing states: the state id, e.g. 's2'. If provided, all other fields are ignored."),
   name: z.string().optional().describe("For new states: snake_case semantic state name, e.g. product_list"),
   description: z.string().optional().describe("For new states: what this state represents"),
-  url_pattern: z.string().optional().describe("For new states: URL pattern, e.g. /products/:id"),
+  url_pattern: z.string().optional().describe("For new states: RFC 6570 URI template, e.g. /products/{id} for path params, /search{?q} for query params"),
   page_purpose: z.string().optional().describe("For new states: short purpose for dedup, e.g. 'browse products'"),
   domain: z.string().optional().describe("Site domain, e.g. ecommerce (first snapshot only)"),
   domainDescription: z.string().optional().describe("1-2 sentences about the site (first snapshot only)"),

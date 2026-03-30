@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useCallback, useRef } from "react";
 import { TooltipProvider } from "../components/ui/tooltip";
 import { TourCard } from "../components/TourTooltip";
 import { Titlebar } from "./Titlebar";
@@ -17,8 +17,18 @@ export function ShellApp() {
   const bw = useBrowserWire();
   const layout = useLayout();
   const tour = useTour();
+  const autoSelectRef = useRef<string | null>(null);
 
   const isDiscovery = layout.activeMode === "discovery";
+
+  const handleStopExploring = useCallback(async (note?: string) => {
+    const result = await bw.stopExploring(note);
+    if (result.ok && bw.lastSessionId) {
+      autoSelectRef.current = bw.lastSessionId;
+      layout.switchMode("history");
+    }
+    return result;
+  }, [bw.stopExploring, bw.lastSessionId, layout.switchMode]);
 
   return (
     <TooltipProvider>
@@ -49,7 +59,7 @@ export function ShellApp() {
                 batches={bw.batches}
                 llmConfigured={bw.llmConfigured}
                 onStartExploring={bw.startExploring}
-                onStopExploring={bw.stopExploring}
+                onStopExploring={handleStopExploring}
                 onGoToSettings={() => layout.switchMode("settings")}
               />
             </>
@@ -57,7 +67,12 @@ export function ShellApp() {
             <div className="flex-1 flex flex-col min-w-0 overflow-auto">
               {layout.activeMode === "settings" && <SettingsPanel />}
               {layout.activeMode === "execution" && <ExecutionPanel />}
-              {layout.activeMode === "history" && <HistoryPanel />}
+              {layout.activeMode === "history" && (
+                <HistoryPanel
+                  autoSelectSessionId={autoSelectRef.current}
+                  onAutoSelectConsumed={() => { autoSelectRef.current = null; }}
+                />
+              )}
             </div>
           )}
 

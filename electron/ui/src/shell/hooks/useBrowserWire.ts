@@ -37,6 +37,7 @@ export function useBrowserWire() {
   const [llmProvider, setLlmProvider] = useState("");
   const [port, setPort] = useState(8787);
   const [portOk, setPortOk] = useState(true);
+  const [lastSessionId, setLastSessionId] = useState<string | null>(null);
 
   // IPC subscriptions
   useEffect(() => {
@@ -62,6 +63,9 @@ export function useBrowserWire() {
       window.browserwire.onSessionStatus((status) => {
         if (status.snapshotCount != null) {
           setSnapshotCount(status.snapshotCount);
+        }
+        if (status.sessionId) {
+          setLastSessionId(status.sessionId);
         }
       })
     );
@@ -137,6 +141,7 @@ export function useBrowserWire() {
     llmProvider,
     port,
     portOk,
+    lastSessionId,
     startExploring,
     stopExploring,
   };

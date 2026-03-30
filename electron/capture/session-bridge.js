@@ -23,7 +23,7 @@ import { SettleCycleManager } from "./settle-cycle.js";
  *
  * @param {{ sessionManager: import('../../core/session-manager.js').SessionManager, getBrowserView: () => Electron.BrowserView, sendToUI: (channel: string, data: any) => void }} deps
  */
-export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI }) => {
+export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI, showOverlay, hideOverlay }) => {
   let activeSessionId = null;
   let activeOrigin = null;
   let activeStartedAt = null;
@@ -72,11 +72,19 @@ export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI }
       webContents.reload();
     });
 
+    // Intercept new window/tab creation — force navigation in the same webContents
+    webContents.setWindowOpenHandler(({ url }) => {
+      webContents.loadURL(url);
+      return { action: "deny" };
+    });
+
     // Create and start the settle cycle manager BEFORE injecting page scripts,
     // so the console-message listener is ready when PAGE_SIGNAL_SCRIPT fires
     // its initial signal.
     settleCycle = new SettleCycleManager({
       webContents,
+      onCaptureStart: () => showOverlay(),
+      onCaptureEnd: () => hideOverlay(),
       onSnapshot: (snap) => {
         if (!activeSessionId) return;
 
@@ -170,6 +178,11 @@ export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI }
     }
     navListener = null;
 
+    // Restore default window-open behavior
+    if (webContents && !webContents.isDestroyed()) {
+      webContents.setWindowOpenHandler(() => ({ action: "allow" }));
+    }
+
     // Remove injected page scripts
     if (browserView) {
       await removeCapture(webContents);
@@ -194,14 +207,17 @@ export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI }
     activeStartedAt = null;
     pendingSnapshots = [];
 
+    // Save session recording to disk (awaited — files must exist before we return)
+    await sessionManager.saveRecordingToDisk(sessionRecording);
+
     sendToUI("browserwire:session-status", {
       sessionId,
       status: "processing",
       snapshotCount: sessionRecording.snapshots.length,
     });
 
-    // Save session recording and process through discovery pipeline (async, don't await)
-    sessionManager.saveRecording(sessionRecording, {
+    // Process through discovery pipeline (async, don't await)
+    sessionManager.processSessionRecording(sessionRecording, {
       onStatus: (status) => {
         sendToUI("browserwire:session-status", { sessionId, ...status });
         if (status.tool) {

@@ -55,16 +55,13 @@ export class SessionManager {
   }
 
   /**
-   * Save a session recording to disk, then process it through the
-   * discovery agent pipeline to produce a StateMachineManifest.
+   * Save a session recording to disk (screenshots, metadata, events).
+   * Does NOT run the discovery pipeline — call processSessionRecording() for that.
    *
    * @param {object} recording
-   * @param {{ onStatus?: (status: object) => void }} [opts]
    * @returns {Promise<string>} Path to the session directory
    */
-  async saveRecording(recording, opts = {}) {
-    const { onStatus = () => {} } = opts;
-
+  async saveRecordingToDisk(recording) {
     // Validate
     const validation = validateRecording(recording);
     if (!validation.valid) {
@@ -121,27 +118,39 @@ export class SessionManager {
       `(${events.length} events, ${snapshots.length} snapshots)`
     );
 
-    // Process the recording through the discovery pipeline
-    onStatus({ sessionId, status: "processing" });
+    return sessionDir;
+  }
+
+  /**
+   * Run the discovery agent pipeline on a recording to produce a manifest.
+   *
+   * @param {object} recording
+   * @param {{ onStatus?: (status: object) => void }} [opts]
+   */
+  async processSessionRecording(recording, opts = {}) {
+    const { onStatus = () => {} } = opts;
+    const { sessionId, origin, snapshots } = recording;
+    const sessionDir = resolve(homedir(), ".browserwire", `logs/session-${sessionId}`);
+    const snapshotCount = snapshots.length;
+
+    onStatus({ sessionId, status: "processing", snapshotCount });
 
     try {
       const { manifest, totalToolCalls } = await processRecording({
         recording,
         sessionId,
         onProgress: ({ snapshot, tool }) => {
-          onStatus({ sessionId, status: "processing", snapshot, tool });
+          onStatus({ sessionId, status: "processing", snapshot, tool, snapshotCount });
         },
       });
 
       if (manifest) {
-        // Save manifest to session log
         await writeFile(
           resolve(sessionDir, "manifest.json"),
           JSON.stringify(manifest, null, 2),
           "utf8"
         );
 
-        // Save to site-centric manifest store
         if (origin) {
           this.siteManifests.set(origin, manifest);
           await this.manifestStore.save(origin, manifest, sessionId);
@@ -150,12 +159,24 @@ export class SessionManager {
         }
       }
 
-      onStatus({ sessionId, status: "complete", totalToolCalls });
+      onStatus({ sessionId, status: "complete", totalToolCalls, snapshotCount });
     } catch (err) {
       console.error(`[browserwire] processing failed:`, err.message);
-      onStatus({ sessionId, status: "error", error: err.message });
+      onStatus({ sessionId, status: "error", error: err.message, snapshotCount });
     }
+  }
 
+  /**
+   * Save a session recording to disk, then process it through the
+   * discovery agent pipeline to produce a StateMachineManifest.
+   *
+   * @param {object} recording
+   * @param {{ onStatus?: (status: object) => void }} [opts]
+   * @returns {Promise<string>} Path to the session directory
+   */
+  async saveRecording(recording, opts = {}) {
+    const sessionDir = await this.saveRecordingToDisk(recording);
+    await this.processSessionRecording(recording, opts);
     return sessionDir;
   }
 
@@ -206,15 +227,16 @@ export class SessionManager {
 
     const origin = meta.origin;
 
-    console.log(`[browserwire] reprocessing session ${sessionId} (${snapshots.length} snapshots)`);
-    onStatus({ sessionId, status: "processing" });
+    const snapshotCount = snapshots.length;
+    console.log(`[browserwire] reprocessing session ${sessionId} (${snapshotCount} snapshots)`);
+    onStatus({ sessionId, status: "processing", snapshotCount });
 
     try {
       const { manifest, totalToolCalls } = await processRecording({
         recording,
         sessionId,
         onProgress: ({ snapshot, tool }) => {
-          onStatus({ sessionId, status: "processing", snapshot, tool });
+          onStatus({ sessionId, status: "processing", snapshot, tool, snapshotCount });
         },
       });
 
@@ -233,10 +255,10 @@ export class SessionManager {
         }
       }
 
-      onStatus({ sessionId, status: "complete", totalToolCalls });
+      onStatus({ sessionId, status: "complete", totalToolCalls, snapshotCount });
     } catch (err) {
       console.error(`[browserwire] reprocessing failed:`, err.message);
-      onStatus({ sessionId, status: "error", error: err.message });
+      onStatus({ sessionId, status: "error", error: err.message, snapshotCount });
     }
   }
 
