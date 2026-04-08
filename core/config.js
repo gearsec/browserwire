@@ -11,6 +11,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
+import dotenv from "dotenv";
 
 export const PROVIDER_DEFAULTS = {
   openai: {
@@ -130,6 +131,9 @@ const validateLLM = (cfg) => {
  * @returns {Readonly<object>} Frozen config object
  */
 export const loadConfig = (cliOverrides = {}, { strict = true } = {}) => {
+  // 0. Load .env file (does not override existing env vars)
+  dotenv.config();
+
   // 1. Start with defaults
   const merged = { ...DEFAULTS };
 

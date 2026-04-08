@@ -2,11 +2,12 @@
  * router.js — HTTP router for the BrowserWire REST API.
  *
  * Flat API generated from the state machine manifest:
- *   GET  /api/sites/:slug/views/:name     → navigate path, read view data
- *   POST /api/sites/:slug/actions/:name   → navigate path, execute action
- *   GET  /api/sites/:slug/manifest        → raw state machine manifest
- *   GET  /api/sites/:slug/openapi.json    → OpenAPI spec
- *   GET  /api/sites/:slug/docs            → Swagger UI
+ *   GET  /api/sites/:slug/views/:name       → navigate path, read view data
+ *   POST /api/sites/:slug/actions/:name    → navigate path, execute action
+ *   POST /api/sites/:slug/workflows/:name  → replay form actions in order
+ *   GET  /api/sites/:slug/manifest         → raw state machine manifest
+ *   GET  /api/sites/:slug/openapi.json     → OpenAPI spec
+ *   GET  /api/sites/:slug/docs             → Swagger UI
  */
 
 import { generateOpenApiSpec } from "./openapi.js";
@@ -140,8 +141,8 @@ export const createHttpHandler = ({ getManifestBySlug, listSites, execute, host,
         return html(res, 200, swaggerUiHtml(`/api/sites/${slug}/openapi.json`));
       }
 
-      // Build route table for views/actions
-      const { views, actions } = buildRouteTable(manifest);
+      // Build route table for views/actions/workflows
+      const { views, actions, workflows } = buildRouteTable(manifest);
 
       // GET /api/sites/:slug/views/:name
       const viewMatch = subPath.match(/^\/views\/([^/]+)$/);
@@ -173,6 +174,26 @@ export const createHttpHandler = ({ getManifestBySlug, listSites, execute, host,
         const route = actions.find((a) => a.name === actionName);
         if (!route) {
           return json(res, 404, { ok: false, error: `Action '${actionName}' not found` });
+        }
+
+        let body = {};
+        try { body = await readBody(req); } catch { return json(res, 400, { ok: false, error: "Invalid JSON body" }); }
+
+        try {
+          const result = await execute({ manifest, route, inputs: body, origin });
+          return json(res, result.ok ? 200 : 500, result);
+        } catch (err) {
+          return json(res, 500, { ok: false, error: err.message });
+        }
+      }
+
+      // POST /api/sites/:slug/workflows/:name
+      const workflowMatch = subPath.match(/^\/workflows\/([^/]+)$/);
+      if (workflowMatch && req.method === "POST") {
+        const workflowName = workflowMatch[1];
+        const route = workflows.find((w) => w.name === workflowName);
+        if (!route) {
+          return json(res, 404, { ok: false, error: `Workflow '${workflowName}' not found` });
         }
 
         let body = {};

@@ -1,14 +1,8 @@
 /**
  * submit.js — Incremental submission tools.
  *
- * The agent submits state, views, and actions individually as it
- * discovers them. This keeps each submission small and avoids the
- * agent needing to hold everything in context at once.
- *
- * Flow:
- *   1. submit_state — register the state (existing id OR new identity)
- *   2. submit_view — one view at a time (only for new states)
- *   3. submit_action — one action at a time
+ * The agent submits views and actions individually as it discovers them.
+ * State identity is determined by the classifier before the agent runs.
  *
  * All views and actions auto-attach to the current state.
  * The signature is derived by the orchestrator from submitted views/actions.
@@ -27,81 +21,15 @@ import {
 
 export const done = {
   name: "done",
+  returnDirect: true,
   description:
     "Signal that you have finished processing this snapshot. " +
-    "Call this after you have submitted the state and all views/actions. " +
+    "Call this after you have submitted all views/actions. " +
     "CRITICAL: You MUST call this tool to complete your task.",
   parameters: z.object({}),
   execute: (ctx) => {
     ctx._done = true;
     return { valid: true };
-  },
-};
-
-// ---------------------------------------------------------------------------
-// submit_state — register the state for this snapshot
-// ---------------------------------------------------------------------------
-
-const stateParamSchema = z.object({
-  existing_state_id: z.string().optional().describe("For existing states: the state id, e.g. 's2'. If provided, all other fields are ignored."),
-  name: z.string().optional().describe("For new states: snake_case semantic state name, e.g. product_list"),
-  description: z.string().optional().describe("For new states: what this state represents"),
-  url_pattern: z.string().optional().describe("For new states: RFC 6570 URI template, e.g. /products/{id} for path params, /search{?q} for query params"),
-  page_purpose: z.string().optional().describe("For new states: short purpose for dedup, e.g. 'browse products'"),
-  domain: z.string().optional().describe("Site domain, e.g. ecommerce (first snapshot only)"),
-  domainDescription: z.string().optional().describe("1-2 sentences about the site (first snapshot only)"),
-});
-
-export const submit_state = {
-  name: "submit_state",
-  description:
-    "Register the state for this snapshot. Two cases:\n" +
-    "- Existing state: pass { existing_state_id: 's2' } if you recognized it from get_state_machine.\n" +
-    "- New state: pass { name, description, url_pattern, page_purpose, domain?, domainDescription? }.\n" +
-    "For existing states, skip view discovery (views already in manifest). " +
-    "For new states, proceed to submit_view and submit_action.",
-  parameters: z.object({
-    state: stateParamSchema,
-  }),
-  execute: (ctx, { state }) => {
-    if (state.existing_state_id) {
-      // Existing state
-      const existingState = ctx.manifest?.getState(state.existing_state_id);
-      if (!existingState) {
-        return { error: `State "${state.existing_state_id}" not found in manifest` };
-      }
-
-      ctx._currentStateId = state.existing_state_id;
-      ctx._isExistingState = true;
-      ctx._pendingState = null;
-      ctx._pendingViews = [];
-      ctx._pendingActions = [];
-
-      return { submitted: true, state_id: state.existing_state_id };
-    }
-
-    // New state — validate required fields
-    if (!state.name || !state.description || !state.url_pattern || !state.page_purpose) {
-      return { error: "New state requires: name, description, url_pattern, page_purpose" };
-    }
-
-    if (state.domain && ctx.manifest && !ctx.manifest.domain) {
-      ctx.manifest.domain = state.domain;
-      ctx.manifest.domainDescription = state.domainDescription || null;
-    }
-
-    ctx._currentStateId = null;
-    ctx._isExistingState = false;
-    ctx._pendingState = {
-      name: state.name,
-      description: state.description,
-      url_pattern: state.url_pattern,
-      page_purpose: state.page_purpose,
-    };
-    ctx._pendingViews = [];
-    ctx._pendingActions = [];
-
-    return { submitted: true };
   },
 };
 
@@ -123,10 +51,6 @@ export const submit_view = {
       return { error: "Cannot submit views for an existing state — views are already discovered" };
     }
 
-    if (!ctx._pendingState) {
-      return { error: "Call submit_state first before submitting views" };
-    }
-
     if (ctx._pendingViews.some((v) => v.name === view.name)) {
       return { error: `View "${view.name}" already submitted` };
     }
@@ -135,6 +59,8 @@ export const submit_view = {
       return { error: `View "${view.name}" has empty code` };
     }
 
+    // Tag with snapshot index so assembler can resolve which state this belongs to
+    view._snapshotIndex = ctx.currentSnapshotIndex;
     ctx._pendingViews.push(view);
     return { submitted: true, view_count: ctx._pendingViews.length };
   },
@@ -154,12 +80,14 @@ export const submit_action = {
     action: actionSchema,
   }),
   execute: (ctx, { action }) => {
-    if (!ctx._pendingState && !ctx._isExistingState) {
-      return { error: "Call submit_state first before submitting actions" };
-    }
-
     if (!action.code || action.code.trim().length === 0) {
       return { error: `Action "${action.name}" has empty code` };
+    }
+
+    // Reject [href="..."] selectors — they break at runtime
+    const HREF_SELECTOR_RE = /\[href[\s]*[~|^$*]?=/i;
+    if (HREF_SELECTOR_RE.test(action.code)) {
+      return { error: `Action "${action.name}" contains [href="..."] selector which breaks at runtime. Use page.getByRole('link', { name: '...' }) or page.locator('a', { hasText: '...' })` };
     }
 
     // For existing states, check if action already exists
@@ -175,6 +103,8 @@ export const submit_action = {
       return { error: `Action "${action.name}" already submitted` };
     }
 
+    // Tag with snapshot index so assembler can resolve which state this belongs to
+    action._snapshotIndex = ctx.currentSnapshotIndex;
     ctx._pendingActions.push(action);
     return { submitted: true, action_count: ctx._pendingActions.length };
   },

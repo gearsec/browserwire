@@ -168,11 +168,11 @@ function collectInputs(manifest, path, targetInputs, targetName) {
  * Build a flat route table from a state machine manifest.
  *
  * @param {object} manifest — { domain, initial_state, states[] }
- * @returns {{ views: Route[], actions: Route[], unreachable: string[] }}
+ * @returns {{ views: Route[], actions: Route[], workflows: Route[], unreachable: string[] }}
  */
 export function buildRouteTable(manifest) {
   if (!manifest?.states?.length || !manifest.initial_state) {
-    return { views: [], actions: [], unreachable: [] };
+    return { views: [], actions: [], workflows: [], unreachable: [] };
   }
 
   const views = [];
@@ -232,8 +232,9 @@ export function buildRouteTable(manifest) {
       });
     }
 
-    // Actions
+    // Actions — exclude form-group actions (they go into workflows only)
     for (const action of state.actions || []) {
+      if (action.form_group) continue; // handled by buildWorkflowRoutes below
       const name = uniqueName(action.name, state.name);
       actions.push({
         name,
@@ -250,5 +251,105 @@ export function buildRouteTable(manifest) {
     }
   }
 
-  return { views, actions, unreachable };
+  const workflows = buildWorkflowRoutes(manifest, entryPoints, usedNames);
+
+  return { views, actions, workflows, unreachable };
+}
+
+/**
+ * Build workflow routes from form-group actions.
+ *
+ * Groups actions by state + form_group, sorts by sequence_order,
+ * and creates a single workflow route that replays them in order.
+ *
+ * @param {object} manifest
+ * @param {Set<string>} entryPoints
+ * @param {Set<string>} usedNames — shared name dedup set
+ * @returns {Route[]}
+ */
+function buildWorkflowRoutes(manifest, entryPoints, usedNames) {
+  const workflows = [];
+
+  for (const state of manifest.states) {
+    // Group actions by form_group
+    const formGroups = new Map();
+    for (const action of state.actions || []) {
+      if (!action.form_group) continue;
+      if (!formGroups.has(action.form_group)) {
+        formGroups.set(action.form_group, []);
+      }
+      formGroups.get(action.form_group).push(action);
+    }
+
+    if (formGroups.size === 0) continue;
+
+    const result = findPath(manifest, state.id, entryPoints);
+    if (!result) continue;
+
+    const { path, entryPointStateId } = result;
+    const entryState = getState(manifest, entryPointStateId);
+    const urlParams = entryState ? extractUrlParams(entryState.url_pattern || "") : [];
+    const urlInputs = urlParams.map((p) => ({
+      name: p,
+      type: "string",
+      required: true,
+      from: "url",
+    }));
+
+    for (const [formGroup, formActions] of formGroups) {
+      // Sort by sequence_order
+      formActions.sort((a, b) => (a.sequence_order ?? 0) - (b.sequence_order ?? 0));
+
+      // Collect inputs from all constituent actions
+      const allInputs = [...urlInputs];
+      const seen = new Set(urlInputs.map((i) => i.name));
+
+      // Also collect inputs from path actions
+      for (const step of path) {
+        const pathState = getState(manifest, step.stateId);
+        const pathAction = getAction(pathState, step.actionName);
+        for (const input of pathAction?.inputs || []) {
+          if (!seen.has(input.name)) {
+            seen.add(input.name);
+            allInputs.push({ ...input, from: `${pathState.name}.${step.actionName}` });
+          }
+        }
+      }
+
+      for (const action of formActions) {
+        for (const input of action.inputs || []) {
+          if (!seen.has(input.name)) {
+            seen.add(input.name);
+            allInputs.push({ ...input, from: `${state.name}.${action.name}` });
+          }
+        }
+      }
+
+      // Find the submit action (has leads_to) for the description
+      const submitAction = formActions.find((a) => a.leads_to) || formActions[formActions.length - 1];
+
+      // Deduplicate name
+      let name = formGroup;
+      if (usedNames.has(name)) {
+        name = `${state.name}_${formGroup}`;
+      }
+      usedNames.add(name);
+
+      workflows.push({
+        name,
+        type: "workflow",
+        stateId: state.id,
+        stateName: state.name,
+        description: `Fill and submit: ${formActions.map((a) => a.name).join(" → ")}`,
+        path,
+        entryPointStateId,
+        inputs: allInputs,
+        // Ordered list of actions to replay within the state
+        actions: formActions.map((a) => ({ actionName: a.name, stateId: state.id })),
+        leadsTo: submitAction.leads_to,
+      });
+    }
+  }
+
+  return workflows;
 }

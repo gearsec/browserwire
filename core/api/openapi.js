@@ -29,10 +29,30 @@ function buildInputSchema(inputs) {
   const required = [];
 
   for (const input of inputs) {
-    properties[input.name] = {
+    const prop = {
       ...toOpenApiType(input.type),
       description: input.description || `From ${input.from}`,
     };
+
+    // Enrich from widget metadata
+    if (input.options && input.options.length > 0) {
+      prop.enum = input.options;
+    }
+    if (input.widget) {
+      const formatMap = { email: "email", date: "date", time: "time", url: "uri", tel: "phone" };
+      if (formatMap[input.widget]) prop.format = formatMap[input.widget];
+    }
+    if (input.format) {
+      prop.format = input.format;
+    }
+    if (input.placeholder) {
+      prop.example = input.placeholder;
+    }
+    if (input.default_value !== undefined) {
+      prop.default = input.default_value;
+    }
+
+    properties[input.name] = prop;
     if (input.required) {
       required.push(input.name);
     }
@@ -78,7 +98,7 @@ function buildResponseSchema(route) {
  */
 export function generateOpenApiSpec(manifest, opts = {}) {
   const { origin, host = "127.0.0.1", port = 8787 } = opts;
-  const { views, actions } = buildRouteTable(manifest);
+  const { views, actions, workflows } = buildRouteTable(manifest);
 
   const slug = origin
     ? origin.replace(/^https?:\/\//, "").replace(/[^a-zA-Z0-9]/g, "_")
@@ -155,6 +175,48 @@ export function generateOpenApiSpec(manifest, opts = {}) {
                   properties: {
                     success: { type: "boolean" },
                     state: { type: "string", description: "State after action execution" },
+                  },
+                },
+              },
+            },
+          },
+          500: { description: "Execution error" },
+        },
+      },
+    };
+  }
+
+  // Workflow endpoints (POST) — single endpoint for form filling
+  for (const route of workflows) {
+    const path = `/api/sites/${slug}/workflows/${route.name}`;
+    const inputSchema = buildInputSchema(route.inputs);
+
+    paths[path] = {
+      post: {
+        operationId: `workflow_${route.name}`,
+        summary: route.description,
+        tags: [route.stateName],
+        ...(inputSchema ? {
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: inputSchema,
+              },
+            },
+          },
+        } : {}),
+        responses: {
+          200: {
+            description: "Workflow executed — all form actions replayed in order",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    success: { type: "boolean" },
+                    state: { type: "string", description: "State after workflow execution" },
+                    steps: { type: "array", items: { type: "string" }, description: "Executed steps in order" },
                   },
                 },
               },

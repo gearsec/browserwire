@@ -61,9 +61,9 @@ function TrainingTimeline({ progress }: { progress: TrainingProgress }) {
 
   if (status === "complete") {
     return (
-      <Alert className="border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/30">
-        <Check className="size-4 text-emerald-600 dark:text-emerald-400" />
-        <AlertDescription className="text-emerald-700 dark:text-emerald-300">
+      <Alert variant="success">
+        <Check className="size-4" />
+        <AlertDescription>
           Training complete{totalToolCalls ? ` — ${totalToolCalls} tool calls` : ""}
         </AlertDescription>
       </Alert>
@@ -139,7 +139,7 @@ function SessionCard({
           <div className="flex gap-1.5 shrink-0">
             {isTraining ? (
               <Badge variant="default" className="text-xs gap-1">
-                <span className="size-1.5 rounded-full bg-white animate-pulse" />
+                <span className="size-1.5 rounded-full bg-primary-foreground animate-pulse" />
                 Training
               </Badge>
             ) : (

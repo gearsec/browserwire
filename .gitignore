@@ -8,3 +8,4 @@ generated/
 dist/
 electron/ui/dist/
 .claude/
+.omc/

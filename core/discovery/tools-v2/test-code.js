@@ -119,9 +119,30 @@ function getRecordedTransitionEvents(ctx) {
 }
 
 /**
- * Compare generated events from action code against recorded transition events.
+ * Check if generatedId is a descendant of recordedId in the DOM tree.
+ * One-way only: the generated event must target the same node or a more
+ * specific child of the recorded node. This handles shadow DOM where
+ * rrweb records at the shadow host but Playwright targets the inner element.
  */
-function compareEvents(generatedEvents, recordedEvents) {
+function isDescendantOf(generatedId, recordedId, index) {
+  if (!index?.rrwebIdToRef) return false;
+  const ref = index.rrwebIdToRef.get(generatedId);
+  if (!ref) return false;
+
+  let current = index.getNode(ref);
+  for (let i = 0; i < 10 && current; i++) {
+    if (current.rrwebId === recordedId) return true;
+    current = current.parentRef ? index.getNode(current.parentRef) : null;
+  }
+  return false;
+}
+
+/**
+ * Compare generated events from action code against recorded transition events.
+ * Uses ancestor-aware matching: a generated event on a descendant of a recorded
+ * node is considered a match (handles shadow DOM / web component boundaries).
+ */
+function compareEvents(generatedEvents, recordedEvents, index) {
   if (recordedEvents.length === 0) {
     return {
       matched: generatedEvents.length === 0,
@@ -136,7 +157,11 @@ function compareEvents(generatedEvents, recordedEvents) {
   const mismatches = [];
 
   for (const gen of generatedEvents) {
-    if (!recordedNodeIds.has(gen.rrweb_node_id)) {
+    const exactMatch = recordedNodeIds.has(gen.rrweb_node_id);
+    const descendantMatch = !exactMatch && index && recordedEvents.some(
+      (rec) => isDescendantOf(gen.rrweb_node_id, rec.rrweb_node_id, index)
+    );
+    if (!exactMatch && !descendantMatch) {
       mismatches.push({
         issue: "generated_not_in_recorded",
         generated: gen,
@@ -146,7 +171,11 @@ function compareEvents(generatedEvents, recordedEvents) {
   }
 
   for (const rec of recordedEvents) {
-    if (!generatedNodeIds.has(rec.rrweb_node_id)) {
+    const exactMatch = generatedNodeIds.has(rec.rrweb_node_id);
+    const descendantMatch = !exactMatch && index && generatedEvents.some(
+      (gen) => isDescendantOf(gen.rrweb_node_id, rec.rrweb_node_id, index)
+    );
+    if (!exactMatch && !descendantMatch) {
       mismatches.push({
         issue: "recorded_not_in_generated",
         recorded: rec,
@@ -183,10 +212,25 @@ export const test_code = {
       "When true, injects rrweb recording, executes code, and compares generated interaction events " +
       "against the recorded forward transition events to verify correct element targeting."
     ),
+    target_refs: z.array(z.string()).optional().describe(
+      "When provided with verify_against_recording, filters recorded events to only those matching these element refs. " +
+      "Use this for per-field form actions so each action is verified against its specific rrweb event(s), " +
+      "not all transition events. Get refs from get_transition_events output."
+    ),
   }),
   execute: async (ctx, params) => {
-    const { code, expected, verify_against_recording } = params;
+    const { code, expected, verify_against_recording, target_refs } = params;
     const { browser } = ctx;
+
+    // Reject [href="..."] selectors — they pass on replayed DOM (absolute URLs)
+    // but fail on live sites (relative paths)
+    const HREF_SELECTOR_RE = /\[href[\s]*[~|^$*]?=/i;
+    if (HREF_SELECTOR_RE.test(code)) {
+      return {
+        success: false,
+        error: 'Code contains [href="..."] CSS selector which fails at runtime (replayed DOM resolves absolute URLs, live sites use relative paths). Use role/text selectors instead: page.getByRole(\'link\', { name: \'...\' }) or page.locator(\'a\', { hasText: \'...\' })',
+      };
+    }
 
     if (!browser?.page) {
       return { success: false, error: "No Playwright page available" };
@@ -219,8 +263,14 @@ export const test_code = {
     if (verify_against_recording) {
       try {
         const generatedEvents = await browser.collectRecordedEvents();
-        const recordedEvents = getRecordedTransitionEvents(ctx);
-        response.event_verification = compareEvents(generatedEvents, recordedEvents);
+        let recordedEvents = getRecordedTransitionEvents(ctx);
+        // When target_refs is provided, filter recorded events to only those
+        // matching the specified refs — enables per-field form action verification
+        if (target_refs?.length > 0) {
+          const refSet = new Set(target_refs);
+          recordedEvents = recordedEvents.filter((e) => refSet.has(e.ref));
+        }
+        response.event_verification = compareEvents(generatedEvents, recordedEvents, ctx.index);
       } catch (err) {
         response.event_verification = { error: `Failed to compare events: ${err.message}` };
       }

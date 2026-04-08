@@ -4,27 +4,31 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
-  --color-background: oklch(1 0 0);
-  --color-foreground: oklch(0.145 0 0);
-  --color-card: oklch(1 0 0);
-  --color-card-foreground: oklch(0.145 0 0);
-  --color-popover: oklch(1 0 0);
-  --color-popover-foreground: oklch(0.145 0 0);
-  --color-primary: oklch(0.205 0 0);
-  --color-primary-foreground: oklch(0.985 0 0);
-  --color-secondary: oklch(0.965 0 0);
-  --color-secondary-foreground: oklch(0.205 0 0);
-  --color-muted: oklch(0.965 0 0);
-  --color-muted-foreground: oklch(0.556 0 0);
-  --color-accent: oklch(0.965 0 0);
-  --color-accent-foreground: oklch(0.205 0 0);
-  --color-destructive: oklch(0.577 0.245 27.325);
-  --color-destructive-foreground: oklch(0.985 0 0);
-  --color-success: oklch(0.627 0.194 149.214);
-  --color-success-foreground: oklch(0.985 0 0);
-  --color-border: oklch(0.922 0 0);
-  --color-input: oklch(0.922 0 0);
-  --color-ring: oklch(0.708 0 0);
+  /* Warm stone palette — slight amber warmth throughout */
+  --color-background: oklch(0.985 0.004 85);
+  --color-foreground: oklch(0.17 0.01 75);
+  --color-card: oklch(0.993 0.002 85);
+  --color-card-foreground: oklch(0.17 0.01 75);
+  --color-popover: oklch(0.993 0.002 85);
+  --color-popover-foreground: oklch(0.17 0.01 75);
+  /* Amber primary */
+  --color-primary: oklch(0.72 0.15 70);
+  --color-primary-foreground: oklch(0.17 0.01 75);
+  --color-secondary: oklch(0.96 0.008 85);
+  --color-secondary-foreground: oklch(0.22 0.01 75);
+  --color-muted: oklch(0.96 0.008 85);
+  --color-muted-foreground: oklch(0.52 0.01 75);
+  --color-accent: oklch(0.92 0.04 80);
+  --color-accent-foreground: oklch(0.22 0.01 75);
+  /* Warm destructive & success */
+  --color-destructive: oklch(0.58 0.22 25);
+  --color-destructive-foreground: oklch(0.985 0.004 85);
+  --color-success: oklch(0.64 0.17 155);
+  --color-success-foreground: oklch(0.985 0.004 85);
+  /* Warm borders */
+  --color-border: oklch(0.91 0.01 80);
+  --color-input: oklch(0.91 0.01 80);
+  --color-ring: oklch(0.72 0.15 70);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -41,10 +45,10 @@
   }
 }
 
-/* Product tour highlight ring */
+/* Product tour highlight ring — amber */
 .tour-highlight {
   position: relative;
-  outline: 2px solid oklch(0.623 0.214 259.815);
+  outline: 2px solid oklch(0.72 0.15 70);
   outline-offset: 2px;
   border-radius: var(--radius-md);
   animation: tour-pulse 1.5s ease-in-out infinite;
@@ -52,6 +56,6 @@
 }
 
 @keyframes tour-pulse {
-  0%, 100% { outline-color: oklch(0.623 0.214 259.815); }
-  50% { outline-color: oklch(0.623 0.214 259.815 / 0.4); }
+  0%, 100% { outline-color: oklch(0.72 0.15 70); }
+  50% { outline-color: oklch(0.72 0.15 70 / 0.4); }
 }

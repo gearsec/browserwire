@@ -14,7 +14,6 @@
 import { parseTemplate } from "url-template";
 
 const ACTION_TIMEOUT_MS = 30_000;
-const LOCATOR_TIMEOUT_MS = 100;
 
 /**
  * Wait for the page to settle: network requests complete + DOM stops mutating.
@@ -155,8 +154,40 @@ export async function executeRoute({ page, manifest, route, inputs, origin }) {
       executedSteps.push(`action:${step.actionName}`);
     }
 
-    // At the target state — execute view or action
+    // At the target state — execute view, action, or workflow
     const targetState = getState(manifest, route.stateId);
+
+    if (route.type === "workflow") {
+      // Replay each form action in sequence_order
+      for (const step of route.actions) {
+        const action = getAction(targetState, step.actionName);
+        if (!action?.code) {
+          return {
+            ok: false,
+            error: `Workflow action "${step.actionName}" on state "${targetState?.name}" has no code`,
+            steps: executedSteps,
+          };
+        }
+
+        const actionInputs = pickInputs(inputs, action.inputs);
+        console.log(`[browserwire-exec] workflow step: ${step.actionName} on ${targetState.name}`);
+
+        try {
+          await runCode(page, action.code, actionInputs);
+        } catch (err) {
+          return {
+            ok: false,
+            error: `Workflow action "${step.actionName}" failed: ${err.message}`,
+            steps: executedSteps,
+          };
+        }
+
+        await waitForSettle(page);
+        executedSteps.push(`action:${step.actionName}`);
+      }
+
+      return { ok: true, state: targetState.name, steps: executedSteps };
+    }
 
     if (route.type === "view") {
       const view = getView(targetState, route.originalName || route.name);
@@ -165,8 +196,6 @@ export async function executeRoute({ page, manifest, route, inputs, origin }) {
       }
 
       console.log(`[browserwire-exec] reading view: ${route.name} on ${targetState.name}`);
-      // Use a shorter timeout for locator operations — page is already loaded
-      page.setDefaultTimeout(LOCATOR_TIMEOUT_MS);
       try {
         const data = await runCode(page, view.code);
         console.log(`[browserwire-exec] view result: type=${typeof data}, isArray=${Array.isArray(data)}, length=${Array.isArray(data) ? data.length : 'n/a'}`);
@@ -184,8 +213,6 @@ export async function executeRoute({ page, manifest, route, inputs, origin }) {
 
       const actionInputs = pickInputs(inputs, action.inputs);
       console.log(`[browserwire-exec] executing action: ${route.name} on ${targetState.name}`);
-      // Use a shorter timeout for locator operations — page is already loaded
-      page.setDefaultTimeout(LOCATOR_TIMEOUT_MS);
       try {
         await runCode(page, action.code, actionInputs);
         executedSteps.push(`action:${route.name}`);

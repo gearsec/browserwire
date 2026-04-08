@@ -18,7 +18,7 @@ import { z } from "zod";
 
 export const viewReturnFieldSchema = z.object({
   name: z.string(),
-  type: z.enum(["string", "number", "boolean", "date"]),
+  type: z.enum(["string", "number", "boolean", "date", "array", "object"]),
   description: z.string().optional(),
 });
 
@@ -39,6 +39,17 @@ export const actionInputSchema = z.object({
   type: z.enum(["string", "number", "boolean"]),
   required: z.boolean(),
   description: z.string().optional(),
+  widget: z.enum([
+    "text", "email", "password", "tel", "url", "number",
+    "date", "time", "select", "multiselect",
+    "checkbox", "radio", "file", "combobox", "textarea",
+  ]).optional(),
+  options: z.array(z.string()).optional(),
+  format: z.string().optional(),
+  default_value: z.union([z.string(), z.number(), z.boolean()]).optional(),
+  label: z.string().optional(),
+  placeholder: z.string().optional(),
+  selector: z.string().optional(),
 });
 
 export const actionSchema = z.object({
@@ -47,6 +58,8 @@ export const actionSchema = z.object({
   description: z.string(),
   inputs: z.array(actionInputSchema).optional(),
   leads_to: z.string().optional(),
+  form_group: z.string().optional().describe("Groups actions belonging to the same form (e.g. 'registration_form'). Actions sharing a form_group are replayed in sequence_order by a single workflow endpoint."),
+  sequence_order: z.number().optional().describe("Execution order within the form_group (0, 1, 2, ...). The submit action gets the highest sequence_order."),
   code: z.string().describe("Playwright async function body: (page, inputs) => { ... }"),
 });
 
