@@ -1,2 +1,0 @@
-# Large eval dataset recordings tracked via Git LFS
-eval/dataset/recordings/*.json filter=lfs diff=lfs merge=lfs -text
