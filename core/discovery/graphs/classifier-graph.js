@@ -18,7 +18,7 @@ import { SystemMessage, HumanMessage, AIMessage } from "@langchain/core/messages
 
 const ClassifyResultSchema = z.object({
   existing_state_id: z.string().optional().describe("ID of existing state if this snapshot matches one"),
-  state_id: z.literal("new").optional().describe("Set to 'new' if this is a new state"),
+  state_id: z.enum(["new"]).optional().describe("Set to 'new' if this is a new state"),
   name: z.string().optional().describe("snake_case name for new states"),
   description: z.string().optional().describe("What this state represents"),
   url_pattern: z.string().optional().describe("RFC 6570 URI template"),
