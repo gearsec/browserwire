@@ -127,7 +127,7 @@ export const inspect_element = {
     ancestor_depth: z.number().optional().describe("How many ancestor levels to show (default 3)"),
     descendant_depth: z.number().optional().describe("How many descendant levels to show (default 2)"),
   }),
-  execute: (ctx, { ref, ancestor_depth = 3, descendant_depth = 2 }) => {
+  execute: (ctx, { ref, ancestor_depth = 3, descendant_depth = 3 }) => {
     const { index } = ctx;
     const node = index.getNode(ref);
 

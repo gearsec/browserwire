@@ -183,10 +183,25 @@ export const test_code = {
       "When true, injects rrweb recording, executes code, and compares generated interaction events " +
       "against the recorded forward transition events to verify correct element targeting."
     ),
+    target_refs: z.array(z.string()).optional().describe(
+      "When provided with verify_against_recording, filters recorded events to only those matching these element refs. " +
+      "Use this for per-field form actions so each action is verified against its specific rrweb event(s), " +
+      "not all transition events. Get refs from get_transition_events output."
+    ),
   }),
   execute: async (ctx, params) => {
-    const { code, expected, verify_against_recording } = params;
+    const { code, expected, verify_against_recording, target_refs } = params;
     const { browser } = ctx;
+
+    // Reject [href="..."] selectors — they pass on replayed DOM (absolute URLs)
+    // but fail on live sites (relative paths)
+    const HREF_SELECTOR_RE = /\[href[\s]*[~|^$*]?=/i;
+    if (HREF_SELECTOR_RE.test(code)) {
+      return {
+        success: false,
+        error: 'Code contains [href="..."] CSS selector which fails at runtime (replayed DOM resolves absolute URLs, live sites use relative paths). Use role/text selectors instead: page.getByRole(\'link\', { name: \'...\' }) or page.locator(\'a\', { hasText: \'...\' })',
+      };
+    }
 
     if (!browser?.page) {
       return { success: false, error: "No Playwright page available" };
@@ -219,7 +234,13 @@ export const test_code = {
     if (verify_against_recording) {
       try {
         const generatedEvents = await browser.collectRecordedEvents();
-        const recordedEvents = getRecordedTransitionEvents(ctx);
+        let recordedEvents = getRecordedTransitionEvents(ctx);
+        // When target_refs is provided, filter recorded events to only those
+        // matching the specified refs — enables per-field form action verification
+        if (target_refs?.length > 0) {
+          const refSet = new Set(target_refs);
+          recordedEvents = recordedEvents.filter((e) => refSet.has(e.ref));
+        }
         response.event_verification = compareEvents(generatedEvents, recordedEvents);
       } catch (err) {
         response.event_verification = { error: `Failed to compare events: ${err.message}` };

@@ -12,7 +12,7 @@ export function StatusBar({ port, portOk, onStartTour }: StatusBarProps) {
     <div data-tour="status-bar" className="h-6 bg-background border-t border-border flex items-center px-3 shrink-0 text-xs">
       <span className="inline-flex items-center gap-1.5">
         <span
-          className={`size-1.5 rounded-full ${portOk ? "bg-success" : "bg-destructive"}`}
+          className={`size-1.5 rounded-full ${portOk ? "bg-primary" : "bg-destructive"}`}
         />
         <span className={portOk ? "text-foreground" : "text-muted-foreground"}>
           Port {port}

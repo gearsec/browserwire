@@ -44,8 +44,8 @@ export function ActivityBar({ activeMode, rightPanelOpen, onSwitchMode }: Activi
             className={cn(
               "mx-1 h-10 flex items-center gap-3 rounded-md transition-colors px-2.5",
               isActive(mode)
-                ? "text-foreground bg-muted border-l-2 border-foreground"
-                : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
+                ? "text-foreground bg-accent border-l-2 border-primary"
+                : "text-muted-foreground hover:text-foreground hover:bg-accent/50"
             )}
           >
             <Icon className="size-5 shrink-0" />
@@ -69,8 +69,8 @@ export function ActivityBar({ activeMode, rightPanelOpen, onSwitchMode }: Activi
           className={cn(
             "mx-1 h-10 flex items-center gap-3 rounded-md transition-colors px-2.5",
             isActive("settings")
-              ? "text-foreground bg-muted border-l-2 border-foreground"
-              : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
+              ? "text-foreground bg-accent border-l-2 border-primary"
+              : "text-muted-foreground hover:text-foreground hover:bg-accent/50"
           )}
         >
           <Settings className="size-5 shrink-0" />

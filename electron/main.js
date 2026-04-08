@@ -229,6 +229,7 @@ const startApp = async () => {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      webSecurity: false, // Allow rrweb to read cross-origin stylesheet rules for CSS inlining
     },
   });
   mainWindow.setBrowserView(browserView);

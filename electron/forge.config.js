@@ -10,9 +10,19 @@ export default {
     icon: "./electron/icons/icon",
     asar: true,
     ignore: [/electron\/ui\/src/, /electron\/ui\/build\.js/, /electron\/ui\/tsconfig/],
-    osxSign: {
-      identity: "-",
-    },
+    ...(process.env.APPLE_SIGNING_IDENTITY
+      ? {
+          osxSign: {
+            identity: process.env.APPLE_SIGNING_IDENTITY,
+          },
+          osxNotarize: {
+            tool: "notarytool",
+            appleId: process.env.APPLE_ID,
+            appleIdPassword: process.env.APPLE_ID_PASSWORD,
+            teamId: process.env.APPLE_TEAM_ID,
+          },
+        }
+      : {}),
   },
   makers: [
     {

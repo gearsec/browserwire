@@ -88,13 +88,13 @@ function EndpointCard({
   return (
     <Card>
       <button
-        className="w-full text-left p-3 flex items-center gap-2 hover:bg-accent/30 transition-colors cursor-pointer"
+        className="w-full text-left p-3 flex items-center gap-2 hover:bg-accent/50 transition-colors cursor-pointer"
         onClick={() => setExpanded(!expanded)}
       >
         <Badge
-          variant={isGet ? "secondary" : "default"}
+          variant="secondary"
           className={`text-[10px] font-mono shrink-0 ${
-            isGet ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200" : "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200"
+            isGet ? "bg-success/15 text-success" : "bg-primary/15 text-primary"
           }`}
         >
           {endpoint.method}
@@ -173,7 +173,7 @@ function EndpointCard({
                   onClick={handleCopy}
                 >
                   {copied ? (
-                    <Check className="size-3 text-emerald-500" />
+                    <Check className="size-3 text-success" />
                   ) : (
                     <Copy className="size-3" />
                   )}

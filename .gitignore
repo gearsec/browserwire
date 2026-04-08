@@ -8,3 +8,12 @@ generated/
 dist/
 electron/ui/dist/
 .claude/
+.omc/
+
+# Eval artifacts
+eval/recording/_built_init_script.js
+eval/recording/_built-init-script.js
+eval/reports/latest.json
+eval/.venv/
+__pycache__/
+*.pyc

@@ -88,7 +88,7 @@ export function DiscoveryPanel({
               <div className="flex flex-col gap-2">
                 <div className="flex items-center justify-between">
                   <span className="flex items-center gap-2 text-sm font-medium">
-                    <span className="size-2 rounded-full bg-success animate-pulse" />
+                    <span className="size-2 rounded-full bg-primary animate-pulse" />
                     Recording
                   </span>
                   <span className="text-sm text-muted-foreground">
