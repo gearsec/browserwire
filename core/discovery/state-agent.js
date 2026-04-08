@@ -58,14 +58,21 @@ You have a LIMITED iteration budget (~50 tool calls). You MUST be efficient:
 3. **Submit actions**: Check the transition events to see what the user did after this state. For each interaction, inspect the target element, write interaction code, test it against the recording to confirm it targets the correct elements, then submit. Terminal states (last snapshot) have no transition events — skip this step.
 
    **Form handling**: When transition events show multiple input events followed by a click (a form submission pattern), create **one action per form field** plus **one action for the submit button** — NOT a single composite action.
+   - **Critical**: ONLY create actions for fields that appear in the transition events. If a form field was NOT interacted with during recording (no input event for it), do NOT create an action for it. The transition events are the source of truth for which fields to include.
    - **Critical**: Process fields ONE AT A TIME: inspect_element → write code → test_code → submit_action → next field. Do NOT inspect all fields first and batch-submit later — this wastes iterations and risks running out of budget.
+   - **Type inference**: Each input event in get_transition_events includes a \`field_type\` property with \`{ type, options? }\` inferred from the DOM element. Use this to set the action input's \`type\` field accurately:
+     - \`field_type.type === "number"\` → set \`type: "number"\` on the input
+     - \`field_type.type === "boolean"\` → set \`type: "boolean"\` on the input
+     - \`field_type.type === "string"\` → set \`type: "string"\` on the input
+     - \`field_type.options\` (present for \`<select>\` elements) → set \`options\` on the input to the provided array
+   - Do NOT default all inputs to \`type: "string"\`. Use the \`field_type\` from the transition event.
    - Details:
-   - Use inspect_element on each target ref to discover field type, label, placeholder, options.
+   - Use inspect_element on each target ref to discover field label, placeholder, widget.
    - **Per-field actions**: Create one action per form field. Each action has:
      - \`kind\`: "input", "select", or "toggle" matching the field type
      - \`form_group\`: a shared name for the form (e.g., \`"registration_form"\`)
      - \`sequence_order\`: integer (0, 1, 2, ...) matching the order fields were filled in the recording
-     - One input with \`widget\`, \`label\`, \`options\`, \`format\`, \`placeholder\`, and \`selector\` populated
+     - One input with \`type\` from \`field_type\`, plus \`widget\`, \`label\`, \`options\` (from \`field_type.options\` if present), \`placeholder\`, and \`selector\` populated
      - \`leads_to\`: omit (field actions stay in the same state)
      - Code does only the single field fill
    - **Submit action**: One action for the submit button:

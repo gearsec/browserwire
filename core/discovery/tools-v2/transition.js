@@ -11,6 +11,7 @@
 
 import { z } from "zod";
 import { EventType, IncrementalSource, MouseInteraction } from "../../recording/rrweb-constants.js";
+import { inferFieldType } from "./field-type.js";
 
 const MOUSE_INTERACTION_NAMES = {
   [MouseInteraction.MouseUp]: "mouseup",
@@ -67,12 +68,14 @@ export const get_transition_events = {
       } else if (source === IncrementalSource.Input) {
         const nodeId = event.data.id;
         const ref = index.rrwebIdToRef?.get(nodeId) || null;
+        const field_type = ref ? inferFieldType(index, ref) : null;
         interactions.push({
           type: "input",
           text: event.data.text || null,
           is_checked: event.data.isChecked ?? null,
           rrweb_node_id: nodeId,
           ref,
+          field_type,
           timestamp: event.timestamp,
         });
       }
