@@ -1,34 +1,33 @@
 /**
  * session-bridge.js — Orchestrates the capture pipeline for Electron.
  *
- * On startExploring: injects rrweb recorder + page signals, starts settle cycle.
+ * On startExploring: injects rrweb recorder, starts event recorder.
  * On stopExploring: drains the rrweb event stream from the page, assembles the
  * session recording, and saves it to disk.
  *
  * The session recording is the source of truth:
  * {
  *   sessionId, origin, startedAt, stoppedAt,
- *   events: rrwebEvent[],      // continuous rrweb event stream
- *   snapshots: [               // state boundary markers
- *     { snapshotId, eventIndex, screenshot, url, title }
- *   ]
+ *   events: rrwebEvent[],      // continuous rrweb event stream (all sources, no filtering)
  * }
+ *
+ * Snapshots are NOT created during capture — the backend's segmenter
+ * (core/recording/segment.js) derives them post-hoc from the event stream.
  */
 
 import { injectCapture, removeCapture } from "./dom-capture.js";
-import { SettleCycleManager } from "./settle-cycle.js";
+import { EventRecorder } from "./event-recorder.js";
 
 /**
  * Create a session bridge that orchestrates capture and session recording.
  *
  * @param {{ sessionManager: import('../../core/session-manager.js').SessionManager, getBrowserView: () => Electron.BrowserView, sendToUI: (channel: string, data: any) => void }} deps
  */
-export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI, showOverlay, hideOverlay }) => {
+export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI }) => {
   let activeSessionId = null;
   let activeOrigin = null;
   let activeStartedAt = null;
-  let pendingSnapshots = [];
-  let settleCycle = null;
+  let eventRecorder = null;
   let navListener = null;
   let willNavListener = null;
 
@@ -50,7 +49,6 @@ export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI, 
     const sessionId = crypto.randomUUID();
     activeSessionId = sessionId;
     activeStartedAt = new Date().toISOString();
-    pendingSnapshots = [];
 
     try {
       activeOrigin = new URL(url).origin;
@@ -78,33 +76,11 @@ export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI, 
       return { action: "deny" };
     });
 
-    // Create and start the settle cycle manager BEFORE injecting page scripts,
-    // so the console-message listener is ready when PAGE_SIGNAL_SCRIPT fires
-    // its initial signal.
-    settleCycle = new SettleCycleManager({
-      webContents,
-      onCaptureStart: () => showOverlay(),
-      onCaptureEnd: () => hideOverlay(),
-      onSnapshot: (snap) => {
-        if (!activeSessionId) return;
+    // Create and start the event recorder
+    eventRecorder = new EventRecorder({ webContents });
+    eventRecorder.start();
 
-        pendingSnapshots.push(snap);
-
-        // Update UI with snapshot count
-        sendToUI("browserwire:session-status", {
-          sessionId: activeSessionId,
-          snapshotCount: pendingSnapshots.length,
-        });
-
-        sendToUI("browserwire:log",
-          `Snapshot #${pendingSnapshots.length}: ${snap.url}`
-        );
-      },
-    });
-    settleCycle.start();
-
-    // Now inject rrweb recorder + page signal script.
-    // The settle cycle listener is already active, so the initial signal will be caught.
+    // Inject rrweb recorder
     await injectCapture(webContents);
 
     // Before navigation: drain events from the page before the context is destroyed
@@ -112,9 +88,8 @@ export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI, 
       webContents.removeListener("will-navigate", willNavListener);
     }
     willNavListener = () => {
-      if (!activeSessionId || !settleCycle) return;
-      // Drain synchronously — will-navigate fires before context destruction
-      settleCycle.drainEvents().catch(() => {});
+      if (!activeSessionId || !eventRecorder) return;
+      eventRecorder.drainEvents().catch(() => {});
     };
     webContents.on("will-navigate", willNavListener);
 
@@ -135,7 +110,6 @@ export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI, 
     sendToUI("browserwire:session-status", {
       sessionId,
       status: "exploring",
-      snapshotCount: 0,
     });
 
     sendToUI("browserwire:log", `Session started: ${sessionId}`);
@@ -153,19 +127,18 @@ export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI, 
     const browserView = getBrowserView();
     const webContents = browserView?.webContents;
 
-    // Drain any remaining events from the current page into the settle cycle buffer
-    // (events that arrived after the last snapshot capture)
-    if (settleCycle) {
-      await settleCycle.drainEvents();
+    // Drain any remaining events from the current page
+    if (eventRecorder) {
+      await eventRecorder.drainEvents();
     }
 
-    // Get the cumulative event buffer from the settle cycle manager
-    const events = settleCycle ? [...settleCycle.events] : [];
+    // Get the cumulative event buffer
+    const events = eventRecorder ? [...eventRecorder.events] : [];
 
-    // Stop the settle cycle manager
-    if (settleCycle) {
-      settleCycle.stop();
-      settleCycle = null;
+    // Stop the event recorder
+    if (eventRecorder) {
+      eventRecorder.stop();
+      eventRecorder = null;
     }
 
     // Remove navigation listeners
@@ -188,24 +161,22 @@ export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI, 
       await removeCapture(webContents);
     }
 
-    // Assemble session recording — the source of truth
+    // Assemble session recording — no snapshots, just raw events
     const sessionRecording = {
       sessionId,
       origin: activeOrigin,
       startedAt: activeStartedAt,
       stoppedAt: new Date().toISOString(),
       events,
-      snapshots: pendingSnapshots,
     };
 
     console.log(
-      `[browserwire-electron] session recording: ${events.length} events, ${pendingSnapshots.length} snapshots`
+      `[browserwire-electron] session recording: ${events.length} events`
     );
 
     activeSessionId = null;
     activeOrigin = null;
     activeStartedAt = null;
-    pendingSnapshots = [];
 
     // Save session recording to disk (awaited — files must exist before we return)
     await sessionManager.saveRecordingToDisk(sessionRecording);
@@ -213,7 +184,6 @@ export const createSessionBridge = ({ sessionManager, getBrowserView, sendToUI, 
     sendToUI("browserwire:session-status", {
       sessionId,
       status: "processing",
-      snapshotCount: sessionRecording.snapshots.length,
     });
 
     // Process through discovery pipeline (async, don't await)

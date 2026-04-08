@@ -13,7 +13,7 @@ interface BatchInfo {
 
 interface DiscoveryPanelProps {
   exploring: boolean;
-  snapshotCount: number;
+  sessionStatus: string;
   batches: Map<string, BatchInfo>;
   llmConfigured: boolean;
   onStartExploring: () => Promise<any>;
@@ -52,7 +52,7 @@ function BatchStatusLine({ batch }: { batch: BatchInfo }) {
 
 export function DiscoveryPanel({
   exploring,
-  snapshotCount,
+  sessionStatus,
   batches,
   llmConfigured,
   onStartExploring,
@@ -60,6 +60,8 @@ export function DiscoveryPanel({
   onGoToSettings,
 }: DiscoveryPanelProps) {
   const batchList = [...batches.values()];
+  const isProcessing = sessionStatus === "processing";
+  const isFinalized = sessionStatus === "finalized" || sessionStatus === "complete";
 
   return (
     <ScrollArea className="flex-1">
@@ -83,20 +85,34 @@ export function DiscoveryPanel({
           </>
         ) : (
           <>
-            {/* ── Session controls ── */}
             {exploring ? (
               <div className="flex flex-col gap-2">
-                <div className="flex items-center justify-between">
-                  <span className="flex items-center gap-2 text-sm font-medium">
-                    <span className="size-2 rounded-full bg-primary animate-pulse" />
-                    Recording
-                  </span>
-                  <span className="text-sm text-muted-foreground">
-                    {snapshotCount} {snapshotCount === 1 ? "page" : "pages"}
-                  </span>
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <span className="size-2 rounded-full bg-primary animate-pulse" />
+                  Recording
                 </div>
                 <p className="text-xs text-muted-foreground">
                   Click around the site to discover pages and interactions.
+                </p>
+              </div>
+            ) : isProcessing ? (
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <Loader2 className="size-4 animate-spin" />
+                  Processing recording...
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Analyzing events and generating snapshots. This may take a moment.
+                </p>
+              </div>
+            ) : isFinalized ? (
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2 text-sm font-medium text-green-600">
+                  <Check className="size-4" />
+                  Processing complete
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Session has been processed. Check the History tab to view results.
                 </p>
               </div>
             ) : (
@@ -105,14 +121,24 @@ export function DiscoveryPanel({
               </p>
             )}
 
-            <Button
-              data-tour="start-exploring"
-              className="w-full"
-              variant={exploring ? "destructive" : "default"}
-              onClick={exploring ? () => onStopExploring() : onStartExploring}
-            >
-              {exploring ? "Stop Exploring" : "Start Exploring"}
-            </Button>
+            {exploring ? (
+              <Button
+                data-tour="start-exploring"
+                className="w-full"
+                variant="destructive"
+                onClick={() => onStopExploring()}
+              >
+                Stop Exploring
+              </Button>
+            ) : isProcessing ? null : (
+              <Button
+                data-tour="start-exploring"
+                className="w-full"
+                onClick={onStartExploring}
+              >
+                Start Exploring
+              </Button>
+            )}
           </>
         )}
 

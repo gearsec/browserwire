@@ -29,7 +29,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 let mainWindow = null;
 let browserView = null;
-let overlayWindow = null;
 let sessionManager = null;
 let sessionBridge = null;
 let httpServer = null;
@@ -278,8 +277,6 @@ const startApp = async () => {
         mainWindow.webContents.send(channel, data);
       }
     },
-    showOverlay: showSnapshotOverlay,
-    hideOverlay: hideSnapshotOverlay,
   });
 
   // Wire IPC handlers
@@ -326,56 +323,6 @@ const layoutBrowserView = () => {
 };
 
 // ─── Snapshot Overlay ─────────────────────────────────────────────────────────
-
-const OVERLAY_HTML = `data:text/html;charset=utf-8,${encodeURIComponent(`<!DOCTYPE html>
-<html><head><style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; }
-  body { display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.3); }
-  .label { background: rgba(0,0,0,0.7); color: white; padding: 12px 24px; border-radius: 8px; font: 500 14px system-ui, sans-serif; }
-</style></head><body><div class="label">Taking snapshot\u2026</div></body></html>`)}`;
-
-const showSnapshotOverlay = () => {
-  if (overlayWindow || !mainWindow || !browserView) return;
-
-  const bounds = browserView.getBounds();
-  const winBounds = mainWindow.getBounds();
-  const contentBounds = mainWindow.getContentBounds();
-  // Offset from window frame to content area
-  const frameOffsetX = contentBounds.x - winBounds.x;
-  const frameOffsetY = contentBounds.y - winBounds.y;
-
-  overlayWindow = new BrowserWindow({
-    parent: mainWindow,
-    x: winBounds.x + frameOffsetX + bounds.x,
-    y: winBounds.y + frameOffsetY + bounds.y,
-    width: bounds.width,
-    height: bounds.height,
-    frame: false,
-    transparent: true,
-    hasShadow: false,
-    focusable: false,
-    skipTaskbar: true,
-    resizable: false,
-    movable: false,
-    show: false,
-    webPreferences: { contextIsolation: true, nodeIntegration: false },
-  });
-
-  overlayWindow.loadURL(OVERLAY_HTML);
-  overlayWindow.once("ready-to-show", () => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-      overlayWindow.showInactive();
-    }
-  });
-};
-
-const hideSnapshotOverlay = () => {
-  if (!overlayWindow) return;
-  try {
-    if (!overlayWindow.isDestroyed()) overlayWindow.destroy();
-  } catch { /* ignore */ }
-  overlayWindow = null;
-};
 
 // ─── Navigation Helpers ──────────────────────────────────────────────────────
 

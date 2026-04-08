@@ -9,7 +9,6 @@
 
 import { z } from "zod";
 import { SnapshotIndex } from "../snapshot/snapshot-index.js";
-import { EventType } from "../../recording/rrweb-constants.js";
 
 export const navigate_to_snapshot = {
   name: "navigate_to_snapshot",
@@ -42,22 +41,21 @@ export const navigate_to_snapshot = {
     }
 
     const snapshot = ctx.snapshots[idx];
-    const snapshotEvent = ctx.events[snapshot.eventIndex];
 
-    if (snapshotEvent.type !== EventType.FullSnapshot || !snapshotEvent.data?.node) {
-      return { error: `Snapshot #${snapshot_index} has no valid FullSnapshot event` };
+    if (!snapshot.rrwebTree) {
+      return { error: `Snapshot #${snapshot_index} has no rrwebTree` };
     }
 
     // Reload the browser with the new snapshot's DOM
     try {
-      await ctx.browser.loadSnapshot(snapshotEvent.data.node, snapshot.url);
+      await ctx.browser.loadSnapshot(snapshot.rrwebTree, snapshot.url);
     } catch (err) {
       return { error: `Failed to load snapshot #${snapshot_index}: ${err.message}` };
     }
 
     // Rebuild the SnapshotIndex
     const newIndex = new SnapshotIndex({
-      rrwebSnapshot: snapshotEvent.data.node,
+      rrwebSnapshot: snapshot.rrwebTree,
       browser: ctx.browser,
       screenshot: snapshot.screenshot || null,
       url: snapshot.url,

@@ -2,11 +2,12 @@
  * validate.js — Semantic validation for session recordings.
  *
  * Validates beyond what Zod catches:
- *   - Every snapshot's eventIndex is within bounds of the events array
- *   - Every snapshot's eventIndex points to a FullSnapshot event
- *   - Snapshot eventIndexes are in ascending order
  *   - The events array starts with a Meta event
  *   - At least one FullSnapshot event exists
+ *   - If snapshots are present, validates their eventIndex bounds and ordering
+ *
+ * Snapshots are optional — new recordings from the simplified capture layer
+ * don't include them. The backend segmenter derives them post-hoc.
  */
 
 import { sessionRecordingSchema } from "./schema.js";
@@ -43,32 +44,26 @@ export function validateRecording(recording) {
     errors.push(`Events must contain at least one FullSnapshot (type=${EventType.FullSnapshot})`);
   }
 
-  // Validate each snapshot marker
-  let prevIndex = -1;
-  for (const snap of data.snapshots) {
-    // eventIndex must be within bounds
-    if (snap.eventIndex < 0 || snap.eventIndex >= data.events.length) {
-      errors.push(
-        `Snapshot "${snap.snapshotId}": eventIndex ${snap.eventIndex} is out of bounds (events length: ${data.events.length})`
-      );
-      continue;
-    }
+  // Validate snapshot markers if present
+  if (data.snapshots && data.snapshots.length > 0) {
+    let prevIndex = -1;
+    for (const snap of data.snapshots) {
+      // eventIndex must be within bounds
+      if (snap.eventIndex < 0 || snap.eventIndex >= data.events.length) {
+        errors.push(
+          `Snapshot "${snap.snapshotId}": eventIndex ${snap.eventIndex} is out of bounds (events length: ${data.events.length})`
+        );
+        continue;
+      }
 
-    // eventIndex must point to a FullSnapshot
-    const event = data.events[snap.eventIndex];
-    if (event.type !== EventType.FullSnapshot) {
-      errors.push(
-        `Snapshot "${snap.snapshotId}": eventIndex ${snap.eventIndex} points to event type=${event.type}, expected FullSnapshot (type=${EventType.FullSnapshot})`
-      );
+      // eventIndexes must be in ascending order
+      if (snap.eventIndex <= prevIndex) {
+        errors.push(
+          `Snapshot "${snap.snapshotId}": eventIndex ${snap.eventIndex} is not after previous index ${prevIndex}`
+        );
+      }
+      prevIndex = snap.eventIndex;
     }
-
-    // eventIndexes must be in ascending order
-    if (snap.eventIndex <= prevIndex) {
-      errors.push(
-        `Snapshot "${snap.snapshotId}": eventIndex ${snap.eventIndex} is not after previous index ${prevIndex}`
-      );
-    }
-    prevIndex = snap.eventIndex;
   }
 
   if (errors.length > 0) {

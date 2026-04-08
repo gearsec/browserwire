@@ -1,7 +1,8 @@
 /**
- * session-processor.js — 4-pass session processing orchestrator.
+ * session-processor.js — 5-pass session processing orchestrator.
  *
  * Takes a session recording and processes it through a pipeline:
+ *   Pass 0: Segment events + generate snapshots (if not provided)
  *   Pass 1: Classify snapshots into states (state-classifier)
  *   Pass 2: Extract API intents from states (intent-extractor)
  *   Pass 3: Run parallel react agents — one per intent
@@ -19,19 +20,8 @@ import { runStateAgent } from "./state-agent.js";
 import { initTelemetry } from "../telemetry.js";
 import { classifyAndConsolidate } from "./state-classifier.js";
 import { extractIntents } from "./intent-extractor.js";
-
-/**
- * Extract the rrweb FullSnapshot node tree from an event.
- */
-function extractSnapshotTree(event) {
-  if (event.type !== EventType.FullSnapshot) {
-    throw new Error(`Expected FullSnapshot (type=${EventType.FullSnapshot}), got type=${event.type}`);
-  }
-  if (!event.data?.node) {
-    throw new Error("FullSnapshot event has no data.node");
-  }
-  return event.data.node;
-}
+import { segmentEvents } from "../recording/segment.js";
+import { generateSnapshots } from "../recording/replay-screenshots.js";
 
 /**
  * Process a session recording into a StateMachineManifest.
@@ -45,7 +35,28 @@ function extractSnapshotTree(event) {
 export async function processRecording({ recording, onProgress, sessionId }) {
   await initTelemetry();
 
-  const { events, snapshots } = recording;
+  const { events } = recording;
+  let { snapshots } = recording;
+
+  // ── Pass 0: Segment events + generate snapshots (if not provided) ──
+  if (!snapshots || snapshots.length === 0) {
+    console.log(`[browserwire] ── Pass 0: Segmentation + Snapshot Generation ──`);
+
+    const { triggers, snapshots: segments } = segmentEvents(events);
+    console.log(`[browserwire]   ${triggers.length} triggers detected, ${segments.length} snapshot boundaries`);
+
+    if (onProgress) onProgress({ phase: "segmentation", tool: `Segmented: ${triggers.length} triggers → ${segments.length} snapshots` });
+
+    snapshots = await generateSnapshots(events, segments);
+    console.log(`[browserwire]   ${snapshots.length} snapshots generated via replay`);
+
+    if (onProgress) onProgress({ phase: "segmentation", tool: `Generated ${snapshots.length} snapshots` });
+  }
+
+  if (!snapshots || snapshots.length === 0) {
+    console.warn("[browserwire] no snapshots available, cannot process");
+    return { manifest: null, error: "No snapshots", totalToolCalls: 0 };
+  }
 
   console.log(
     `[browserwire] processing session: ${snapshots.length} snapshots, ${events.length} events`
@@ -139,13 +150,10 @@ async function runIntentAgent({ intent, groups, events, consolidatedSnapshots, o
   // (the agent will navigate through all of them)
   const firstGroup = groups[0];
   const snapshot = firstGroup.representative;
-  const snapshotEvent = events[snapshot.eventIndex];
 
-  let rrwebTree;
-  try {
-    rrwebTree = extractSnapshotTree(snapshotEvent);
-  } catch (err) {
-    return { error: err.message, pendingViews: [], pendingActions: [], toolCallCount: 0 };
+  const rrwebTree = snapshot.rrwebTree;
+  if (!rrwebTree) {
+    return { error: "Snapshot has no rrwebTree", pendingViews: [], pendingActions: [], toolCallCount: 0 };
   }
 
   const browser = new PlaywrightBrowser();
