@@ -1,29 +1,53 @@
 /**
- * transition.js — Transition understanding tool.
+ * transition.js — Transition event ref resolution.
  *
- * Returns the rrweb interaction events between the current snapshot and
- * the next snapshot — the user actions that caused the transition OUT
- * of this state. Events are filtered to MouseInteraction and Input only,
- * and mapped to element ref IDs via the rrweb mirror.
+ * Takes pre-computed interaction events (from segmentation) and resolves
+ * rrweb node IDs to accessibility tree ref IDs using the loaded SnapshotIndex.
  *
- * For the last snapshot (terminal state), returns an empty array.
+ * The event SELECTION (which events belong to which transition) is fixed
+ * during segmentation in segment.js. This module only adds ref mappings
+ * needed by the transition agent.
  */
 
 import { z } from "zod";
-import { EventType, IncrementalSource, MouseInteraction } from "../../recording/rrweb-constants.js";
 import { inferFieldType } from "./field-type.js";
 
-const MOUSE_INTERACTION_NAMES = {
-  [MouseInteraction.MouseUp]: "mouseup",
-  [MouseInteraction.MouseDown]: "mousedown",
-  [MouseInteraction.Click]: "click",
-  [MouseInteraction.ContextMenu]: "contextmenu",
-  [MouseInteraction.DblClick]: "dblclick",
-  [MouseInteraction.Focus]: "focus",
-  [MouseInteraction.Blur]: "blur",
-  [MouseInteraction.TouchStart]: "touchstart",
-  [MouseInteraction.TouchEnd]: "touchend",
-};
+/**
+ * Resolve rrweb node IDs to accessibility tree refs on pre-computed
+ * interaction events. Enriches Input events with field_type.
+ *
+ * @param {Array} interactionEvents — pre-computed from buildTransitions()
+ * @param {import('../snapshot/snapshot-index.js').SnapshotIndex} index — snapshot index for ref mapping
+ * @returns {Array} interaction events with refs resolved
+ */
+export function resolveTransitionRefs(interactionEvents, index) {
+  return interactionEvents.map((event) => {
+    const ref = index.rrwebIdToRef?.get(event.rrwebNodeId) || null;
+
+    if (event.type === "mouse_interaction") {
+      return {
+        type: event.type,
+        interaction: event.interaction,
+        rrweb_node_id: event.rrwebNodeId,
+        ref,
+        timestamp: event.timestamp,
+      };
+    } else if (event.type === "input") {
+      const field_type = ref ? inferFieldType(index, ref) : null;
+      return {
+        type: event.type,
+        text: event.text,
+        is_checked: event.isChecked ?? null,
+        rrweb_node_id: event.rrwebNodeId,
+        ref,
+        field_type,
+        timestamp: event.timestamp,
+      };
+    }
+
+    return { ...event, ref };
+  });
+}
 
 export const get_transition_events = {
   name: "get_transition_events",
@@ -34,53 +58,19 @@ export const get_transition_events = {
     "Returns empty for the last snapshot (terminal state — no forward transition).",
   parameters: z.object({}),
   execute: (ctx) => {
-    const { events, currentSnapshotIndex, snapshots, index } = ctx;
+    const { currentSnapshotIndex, snapshots, index, transitionData } = ctx;
 
-    // Terminal state — no forward transition
     if (currentSnapshotIndex >= snapshots.length - 1) {
       return { events: [], terminal: true };
     }
 
-    const currentSnapshot = snapshots[currentSnapshotIndex];
-    const nextSnapshot = snapshots[currentSnapshotIndex + 1];
-
-    // Slice events between current and next snapshot
-    const startIdx = currentSnapshot.eventIndex + 1;
-    const endIdx = nextSnapshot.eventIndex;
-    const transitionSlice = events.slice(startIdx, endIdx);
-
-    // Filter to interaction events and map to ref IDs
-    const interactions = [];
-    for (const event of transitionSlice) {
-      if (event.type !== EventType.IncrementalSnapshot) continue;
-      const source = event.data?.source;
-
-      if (source === IncrementalSource.MouseInteraction) {
-        const nodeId = event.data.id;
-        const ref = index.rrwebIdToRef?.get(nodeId) || null;
-        interactions.push({
-          type: "mouse_interaction",
-          interaction: MOUSE_INTERACTION_NAMES[event.data.type] || `unknown(${event.data.type})`,
-          rrweb_node_id: nodeId,
-          ref,
-          timestamp: event.timestamp,
-        });
-      } else if (source === IncrementalSource.Input) {
-        const nodeId = event.data.id;
-        const ref = index.rrwebIdToRef?.get(nodeId) || null;
-        const field_type = ref ? inferFieldType(index, ref) : null;
-        interactions.push({
-          type: "input",
-          text: event.data.text || null,
-          is_checked: event.data.isChecked ?? null,
-          rrweb_node_id: nodeId,
-          ref,
-          field_type,
-          timestamp: event.timestamp,
-        });
-      }
+    if (transitionData?.interactionEvents) {
+      return {
+        events: resolveTransitionRefs(transitionData.interactionEvents, index),
+        terminal: false,
+      };
     }
 
-    return { events: interactions, terminal: false };
+    return { events: [], terminal: false };
   },
 };

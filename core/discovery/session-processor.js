@@ -15,13 +15,16 @@
 import { SnapshotIndex } from "./snapshot/snapshot-index.js";
 import { PlaywrightBrowser } from "./snapshot/playwright-browser.js";
 import { StateMachineManifest } from "../manifest/manifest.js";
-import { EventType } from "../recording/rrweb-constants.js";
-import { runStateAgent } from "./state-agent.js";
+import { runAgent, runViewAgent } from "./state-agent.js";
+import { resolveTransitionRefs } from "./tools-v2/transition.js";
 import { initTelemetry } from "../telemetry.js";
 import { classifyAndConsolidate } from "./state-classifier.js";
 import { extractIntents } from "./intent-extractor.js";
 import { segmentEvents } from "../recording/segment.js";
 import { generateSnapshots } from "../recording/replay-screenshots.js";
+import { z } from "zod";
+import { SystemMessage, HumanMessage } from "@langchain/core/messages";
+import { getModel } from "./ai-provider.js";
 
 /**
  * Process a session recording into a StateMachineManifest.
@@ -37,13 +40,15 @@ export async function processRecording({ recording, onProgress, sessionId }) {
 
   const { events } = recording;
   let { snapshots } = recording;
+  let precomputedTransitions = null;
 
   // ── Pass 0: Segment events + generate snapshots (if not provided) ──
   if (!snapshots || snapshots.length === 0) {
     console.log(`[browserwire] ── Pass 0: Segmentation + Snapshot Generation ──`);
 
-    const { triggers, snapshots: segments } = segmentEvents(events);
-    console.log(`[browserwire]   ${triggers.length} triggers detected, ${segments.length} snapshot boundaries`);
+    const { triggers, snapshots: segments, transitions } = segmentEvents(events);
+    precomputedTransitions = transitions;
+    console.log(`[browserwire]   ${triggers.length} triggers detected, ${segments.length} snapshot boundaries, ${transitions.length} transitions`);
 
     if (onProgress) onProgress({ phase: "segmentation", tool: `Segmented: ${triggers.length} triggers → ${segments.length} snapshots` });
 
@@ -51,11 +56,14 @@ export async function processRecording({ recording, onProgress, sessionId }) {
     console.log(`[browserwire]   ${snapshots.length} snapshots generated via replay`);
 
     if (onProgress) onProgress({ phase: "segmentation", tool: `Generated ${snapshots.length} snapshots` });
+
+    // Emit segmentation data so the UI can show it during training
+    if (onProgress) await onProgress({ phase: "segmentation-complete", segmentation: { snapshots: segments, transitions: precomputedTransitions } });
   }
 
   if (!snapshots || snapshots.length === 0) {
     console.warn("[browserwire] no snapshots available, cannot process");
-    return { manifest: null, error: "No snapshots", totalToolCalls: 0 };
+    return { manifest: null, error: "No snapshots", totalToolCalls: 0, segmentation: null };
   }
 
   console.log(
@@ -66,6 +74,21 @@ export async function processRecording({ recording, onProgress, sessionId }) {
   console.log(`[browserwire] ── Pass 1: Classification ──`);
   const { groups } = await classifyAndConsolidate({ snapshots, events });
   const consolidatedSnapshots = groups.map((g) => g.representative);
+
+  // Emit segmentation with state labels as soon as classifier is done
+  if (onProgress && precomputedTransitions) {
+    await onProgress({ phase: "segmentation-complete", segmentation: {
+      snapshotCount: consolidatedSnapshots.length,
+      snapshots: consolidatedSnapshots.map((s, idx) => ({
+        snapshotId: s.snapshotId,
+        eventIndex: s.eventIndex,
+        trigger: s.trigger || null,
+        stateLabel: idx < groups.length ? groups[idx].stateLabel : null,
+        stateName: idx < groups.length ? (groups[idx].stateIdentity?.name || null) : null,
+      })),
+      transitions: precomputedTransitions,
+    }});
+  }
 
   // ── Pass 2: Extract API intents ──
   console.log(`[browserwire] ── Pass 2: Intent Extraction ──`);
@@ -86,43 +109,173 @@ export async function processRecording({ recording, onProgress, sessionId }) {
     }
   }
 
-  console.log(`[browserwire] ── Pass 3: Parallel Agent Execution (${intents.length} intents) ──`);
+  // Split intents by type
+  const viewIntents = intents.filter((i) => i.type === "view");
+  const workflowIntents = intents.filter((i) => i.type === "workflow");
 
-  // ── Pass 3: Run parallel react agents — one per intent ──
+  // ── Pass 2.5: Detect transitions ──
+  const transitionSpecs = detectTransitions(consolidatedSnapshots, groups, precomputedTransitions);
+  console.log(`[browserwire] ── Pass 2.5: Transition Detection (${transitionSpecs.length} actionable transitions) ──`);
+
+  console.log(`[browserwire] ── Pass 3: Agent Execution (${viewIntents.length} views, ${transitionSpecs.length} transitions) ──`);
+
   let totalToolCalls = 0;
 
-  const agentResults = await Promise.all(
-    intents.map(async (intent, intentIdx) => {
-      console.log(`[browserwire]   launching agent for intent: ${intent.name} (${intent.type})`);
+  // ── Pass 3: Parallel view + transition agents ──
+  const [viewResults, transitionResults] = await Promise.all([
+    // View agents — one per view intent
+    Promise.all(
+      viewIntents.map(async (intent) => {
+        console.log(`[browserwire]   launching view agent: ${intent.name}`);
+        try {
+          const targetGroup = groups.find((g) => g.isFirstOccurrence && g.stateIdentity?.name === intent.name)
+            || groups.find((g) => g.isFirstOccurrence)
+            || groups[0];
+          const snapshot = targetGroup.representative;
+          const snapshotIdx = groups.indexOf(targetGroup);
 
-      try {
-        const result = await runIntentAgent({
-          intent,
-          groups,
+          if (!snapshot?.rrwebTree) {
+            return { intent, error: "No rrwebTree", pendingViews: [], pendingActions: [], toolCallCount: 0 };
+          }
+
+          const browser = new PlaywrightBrowser();
+          try {
+            await browser.ensureBrowser();
+
+            const index = new SnapshotIndex({
+              rrwebSnapshot: snapshot.rrwebTree,
+              browser,
+              screenshot: snapshot.screenshot || null,
+              url: snapshot.url,
+              title: snapshot.title,
+            });
+            await index.enrichWithCDP();
+
+            const result = await runViewAgent({
+              index,
+              browser,
+              events,
+              snapshots: consolidatedSnapshots,
+              snapshotIndex: snapshotIdx,
+              stateInfo: targetGroup.stateIdentity,
+              intent,
+              onProgress: ({ tool }) => {
+                if (onProgress) onProgress({ phase: "extraction", intent: intent.name, tool });
+              },
+              sessionId,
+            });
+
+            for (const view of result.pendingViews || []) {
+              view._snapshotIndex = snapshotIdx;
+            }
+
+            console.log(`[browserwire]   view "${intent.name}" done: ${result.pendingViews?.length || 0} views`);
+            return { intent, pendingViews: result.pendingViews, pendingActions: [], toolCallCount: result.toolCallCount };
+          } finally {
+            await browser.close().catch(() => {});
+          }
+        } catch (err) {
+          console.warn(`[browserwire]   view "${intent.name}" error: ${err.message}`);
+          return { intent, error: err.message, pendingViews: [], pendingActions: [], toolCallCount: 0 };
+        }
+      })
+    ),
+    // Transition agents — one per detected transition, all parallel
+    Promise.all(
+      transitionSpecs.map(async (spec) => {
+        console.log(`[browserwire]   launching transition agent: #${spec.index + 1}→#${spec.index + 2}`);
+        return runSingleTransition({
+          spec,
           events,
-          consolidatedSnapshots,
+          snapshots: consolidatedSnapshots,
           onProgress: ({ tool }) => {
-            if (onProgress) onProgress({ phase: "extraction", intent: intent.name, tool });
+            if (onProgress) onProgress({ phase: "extraction", intent: `transition_${spec.index + 1}`, tool });
           },
           sessionId,
         });
+      })
+    ),
+  ]);
 
-        console.log(
-          `[browserwire]   intent "${intent.name}" done: ` +
-          `${result.pendingViews?.length || 0} views, ${result.pendingActions?.length || 0} actions`
-        );
+  // Collect atomic actions in snapshot order (Promise.all preserves input order)
+  const allActions = transitionResults.map((r) => r.action).filter(Boolean);
+  const transitionToolCalls = transitionResults.reduce((s, r) => s + (r.toolCallCount || 0), 0);
 
-        return { intent, ...result };
-      } catch (err) {
-        console.warn(`[browserwire]   intent "${intent.name}" error: ${err.message}`);
-        return { intent, error: err.message, pendingViews: [], pendingActions: [], toolCallCount: 0 };
+  const agentResults = [...viewResults];
+
+  // ── Pass 3.5: Workflow assembly — one LLM agent per workflow intent ──
+  if (workflowIntents.length > 0 && allActions.length > 0) {
+    console.log(`[browserwire] ── Pass 3.5: Workflow Assembly (${workflowIntents.length} workflows, ${allActions.length} actions) ──`);
+
+    const workflowAssignments = await Promise.all(
+      workflowIntents.map((intent) => runWorkflowAssemblyAgent({ actions: allActions, intent }))
+    );
+
+    const claimedIndices = new Set();
+
+    for (let w = 0; w < workflowIntents.length; w++) {
+      const assignment = workflowAssignments[w];
+      const workflowActions = assignment.selected_actions
+        .filter((idx) => idx >= 0 && idx < allActions.length)
+        .map((idx) => {
+          claimedIndices.add(idx);
+          return { ...allActions[idx] };
+        });
+
+      // Sort by snapshot order — deterministic regardless of LLM return order
+      workflowActions.sort((a, b) => a._snapshotIndex - b._snapshotIndex);
+
+      if (workflowActions.length > 0) {
+        const workflowName = assignment.workflow_name || workflowIntents[w].name;
+        const formGroupName = workflowName.replace(/\s+/g, "_").toLowerCase();
+        for (let j = 0; j < workflowActions.length; j++) {
+          workflowActions[j].form_group = formGroupName;
+          workflowActions[j].sequence_order = j;
+        }
+        // Detect form pattern: inputs + final click = form_submit
+        const hasInputs = workflowActions.some((a) => a.kind === "input");
+        const lastAction = workflowActions[workflowActions.length - 1];
+        if (hasInputs && lastAction.kind === "click") {
+          lastAction.kind = "form_submit";
+        }
       }
-    })
-  );
+
+      console.log(`[browserwire]   workflow "${assignment.workflow_name}": ${workflowActions.length} actions`);
+      agentResults.push({
+        intent: workflowIntents[w],
+        pendingViews: [],
+        pendingActions: workflowActions,
+        toolCallCount: 0,
+      });
+    }
+
+    // Unclaimed actions kept as standalone
+    const unclaimedActions = allActions.filter((_, idx) => !claimedIndices.has(idx));
+    if (unclaimedActions.length > 0) {
+      assignFormGroups(unclaimedActions, groups);
+      agentResults.push({
+        intent: { name: "standalone_actions", type: "workflow" },
+        pendingViews: [],
+        pendingActions: unclaimedActions,
+        toolCallCount: 0,
+      });
+      console.log(`[browserwire]   standalone actions: ${unclaimedActions.length}`);
+    }
+  } else if (allActions.length > 0) {
+    // No workflow intents — all actions are standalone
+    assignFormGroups(allActions, groups);
+    agentResults.push({
+      intent: { name: "standalone_actions", type: "workflow" },
+      pendingViews: [],
+      pendingActions: allActions,
+      toolCallCount: 0,
+    });
+  }
 
   for (const r of agentResults) {
     totalToolCalls += r.toolCallCount || 0;
   }
+  totalToolCalls += transitionToolCalls;
 
   // ── Pass 4: Assemble manifest ──
   console.log(`[browserwire] ── Pass 4: Assembly ──`);
@@ -134,35 +287,95 @@ export async function processRecording({ recording, onProgress, sessionId }) {
     `${manifest.getStates().length} states, ${totalToolCalls} total tool calls`
   );
 
-  return { manifest: manifestJson, totalToolCalls };
+  // Build segmentation data for persistence
+  const segmentation = precomputedTransitions ? {
+    snapshotCount: consolidatedSnapshots.length,
+    snapshots: consolidatedSnapshots.map((s, idx) => ({
+      snapshotId: s.snapshotId,
+      eventIndex: s.eventIndex,
+      trigger: s.trigger || null,
+      stateLabel: idx < groups.length ? groups[idx].stateLabel : null,
+      stateName: idx < groups.length ? (groups[idx].stateIdentity?.name || null) : null,
+    })),
+    transitions: precomputedTransitions,
+  } : null;
+
+  // Emit final segmentation (with stateLabel/stateName from classifier)
+  if (onProgress && segmentation) {
+    await onProgress({ phase: "segmentation-complete", segmentation });
+  }
+
+  return { manifest: manifestJson, totalToolCalls, segmentation };
 }
 
 // ---------------------------------------------------------------------------
-// Pass 3: Run a react agent for a single intent
+// Pass 2.5: Transition detection (pure, no I/O)
+// ---------------------------------------------------------------------------
+
+/** Trigger kinds that correspond to API-relevant actions */
+const ACTION_TRIGGERS = new Set(["click", "dblclick", "touch", "type", "navigation"]);
+
+/**
+ * Scan snapshot pairs and return specs for actionable transitions.
+ * Pure function — no browser, no LLM, no I/O.
+ *
+ * @param {Array} snapshots
+ * @param {Array} groups — classifier groups
+ * @returns {Array<{ index: number, triggerKind: string, stateInfo: object|null }>}
+ */
+export function detectTransitions(snapshots, groups, precomputedTransitions) {
+  const specs = [];
+  for (let i = 0; i < snapshots.length - 1; i++) {
+    const nextSnapshot = snapshots[i + 1];
+    const triggerKind = nextSnapshot.trigger?.kind;
+    if (!triggerKind || !ACTION_TRIGGERS.has(triggerKind)) continue;
+    if (!snapshots[i].rrwebTree) continue;
+    const group = i < groups.length ? groups[i] : null;
+
+    // Attach pre-computed transition data (interaction events + event range)
+    const transitionData = precomputedTransitions?.[i] || null;
+
+    specs.push({
+      index: i,
+      triggerKind,
+      stateInfo: group?.stateIdentity || null,
+      eventRange: transitionData?.eventRange || {
+        start: snapshots[i].eventIndex + 1,
+        end: snapshots[i + 1].eventIndex,
+      },
+      transitionData,
+    });
+  }
+  return specs;
+}
+
+// ---------------------------------------------------------------------------
+// Pass 3b: Single transition agent (self-contained, parallel-safe)
 // ---------------------------------------------------------------------------
 
 /**
- * Run a react agent scoped to a single API intent.
- * The agent gets ALL snapshots and processes the full recording end-to-end.
+ * Run one transition agent for a single snapshot transition.
+ * Owns its own browser lifecycle — safe for parallel execution.
+ *
+ * @param {object} options
+ * @param {object} options.spec — { index, triggerKind, stateInfo }
+ * @param {Array} options.events — full rrweb event stream
+ * @param {Array} options.snapshots — snapshot markers
+ * @param {function} [options.onProgress]
+ * @param {string} [options.sessionId]
+ * @returns {Promise<{ action: object|null, toolCallCount: number }>}
  */
-async function runIntentAgent({ intent, groups, events, consolidatedSnapshots, onProgress, sessionId }) {
-  // Find the best snapshot to start with — use the first group's snapshot
-  // (the agent will navigate through all of them)
-  const firstGroup = groups[0];
-  const snapshot = firstGroup.representative;
-
-  const rrwebTree = snapshot.rrwebTree;
-  if (!rrwebTree) {
-    return { error: "Snapshot has no rrwebTree", pendingViews: [], pendingActions: [], toolCallCount: 0 };
-  }
+async function runSingleTransition({ spec, events, snapshots, onProgress, sessionId }) {
+  const { index: i, triggerKind } = spec;
+  const snapshot = snapshots[i];
+  const nextSnapshot = snapshots[i + 1];
 
   const browser = new PlaywrightBrowser();
   try {
     await browser.ensureBrowser();
-    await browser.loadSnapshot(rrwebTree, snapshot.url);
 
     const index = new SnapshotIndex({
-      rrwebSnapshot: rrwebTree,
+      rrwebSnapshot: snapshot.rrwebTree,
       browser,
       screenshot: snapshot.screenshot || null,
       url: snapshot.url,
@@ -170,25 +383,174 @@ async function runIntentAgent({ intent, groups, events, consolidatedSnapshots, o
     });
     await index.enrichWithCDP();
 
-    const agentResult = await runStateAgent({
+    // Resolve refs on pre-computed interaction events
+    const rawEvents = spec.transitionData?.interactionEvents || [];
+    const transitionEvents = resolveTransitionRefs(rawEvents, index);
+
+    if (transitionEvents.length === 0) return { action: null, toolCallCount: 0 };
+
+    console.log(`[browserwire]   transition #${i + 1}→#${i + 2} (${triggerKind}): ${transitionEvents.length} events`);
+
+    const result = await runAgent({
       index,
       browser,
-      manifest: new StateMachineManifest(), // fresh — agents don't share manifest
       events,
-      snapshots: consolidatedSnapshots,
-      currentSnapshotIndex: 0,
-      isExistingState: false,
-      stateInfo: firstGroup.stateIdentity,
-      intent,
-      groups,
+      snapshots,
+      snapshotIndex: i,
+      transitionEvents,
+      stateInfo: spec.stateInfo,
+      eventRange: spec.eventRange,
+      transitionData: spec.transitionData,
       onProgress,
       sessionId,
     });
 
-    return agentResult;
+    if (!result.code) return { action: null, toolCallCount: result.toolCallCount };
+
+    return {
+      action: {
+        name: result.name || `action_${i + 1}_${triggerKind}`,
+        kind: triggerKind === "type" ? "input" : "click",
+        description: result.description || `Transition #${i + 1}→#${i + 2} (${triggerKind})`,
+        inputs: result.inputs || [],
+        code: result.code,
+        _snapshotIndex: i,
+        _triggerKind: triggerKind,
+        _stateInfo: spec.stateInfo,
+      },
+      toolCallCount: result.toolCallCount,
+    };
   } finally {
     await browser.close().catch(() => {});
   }
+}
+
+// ---------------------------------------------------------------------------
+// Pass 3.5: Workflow assembly agent (LLM classifier, no browser)
+// ---------------------------------------------------------------------------
+
+const WORKFLOW_ASSEMBLY_PROMPT = `You are an API workflow assembler. Given a list of atomic user actions extracted from a browser recording and a workflow intent, select which actions belong to this workflow.
+
+Each action has:
+- index: position in the list
+- name: auto-generated name
+- kind: "click" or "input"
+- inputs: parameter definitions (name, type)
+- state: which page/state the action occurs on
+- trigger: what user interaction caused it
+
+The workflow intent describes what the workflow should accomplish (e.g., "user registration", "product search").
+
+Select the actions that are part of this workflow. Actions should form a logical sequence that accomplishes the workflow's goal.
+
+Return a JSON object with:
+- selected_actions: array of action indices (0-based) from the provided list
+- workflow_name: a clean snake_case name for this workflow`;
+
+/**
+ * LLM classifier that selects which atomic actions belong to a workflow intent.
+ * No browser, no tools — structured output only.
+ *
+ * @param {object} options
+ * @param {Array} options.actions — all atomic actions from transition agents
+ * @param {object} options.intent — { name, description }
+ * @returns {Promise<{ selected_actions: number[], workflow_name: string }>}
+ */
+async function runWorkflowAssemblyAgent({ actions, intent }) {
+  let model;
+  try {
+    model = getModel();
+  } catch {
+    model = null;
+  }
+  if (!model) return { selected_actions: [], workflow_name: intent.name };
+
+  const actionSummaries = actions.map((action, idx) => ({
+    index: idx,
+    name: action.name,
+    kind: action.kind,
+    inputs: action.inputs,
+    state: action._stateInfo?.name || "unknown",
+    trigger: action._triggerKind,
+  }));
+
+  const WorkflowAssemblySchema = z.object({
+    selected_actions: z.array(z.number()),
+    workflow_name: z.string(),
+  });
+
+  try {
+    const modelWithOutput = model.withStructuredOutput(WorkflowAssemblySchema);
+    const result = await modelWithOutput.invoke([
+      new SystemMessage(WORKFLOW_ASSEMBLY_PROMPT),
+      new HumanMessage({
+        content: `## Workflow Intent\nName: ${intent.name}\nDescription: ${intent.description}\n\n## Available Actions\n${JSON.stringify(actionSummaries, null, 2)}\n\nSelect the actions that belong to this workflow.`,
+      }),
+    ]);
+    return result;
+  } catch (err) {
+    console.warn(`[browserwire] workflow assembly error for "${intent.name}": ${err.message}`);
+    return { selected_actions: [], workflow_name: intent.name };
+  }
+}
+
+/**
+ * Deterministically assign form_group, sequence_order, and to_state
+ * to a sequence of per-transition actions.
+ *
+ * Groups consecutive actions on the same state. If a group has input
+ * actions followed by a click/submit, they form a workflow group.
+ */
+export function assignFormGroups(actions, groups) {
+  if (actions.length === 0) return;
+
+  // Group consecutive actions by state label
+  let currentGroup = [];
+  let currentLabel = null;
+
+  const flushGroup = () => {
+    if (currentGroup.length === 0) return;
+
+    // Check if this is a form pattern: input actions + final click
+    const hasInputs = currentGroup.some((a) => a.kind === "input");
+    const lastAction = currentGroup[currentGroup.length - 1];
+    const endsWithClick = lastAction.kind === "click";
+
+    if (hasInputs && endsWithClick) {
+      // This is a form workflow
+      const stateName = getStateName(currentGroup[0], groups);
+      const formGroupName = `${stateName}_form`.replace(/\s+/g, "_").toLowerCase();
+
+      for (let j = 0; j < currentGroup.length; j++) {
+        currentGroup[j].form_group = formGroupName;
+        currentGroup[j].sequence_order = j;
+      }
+      // Mark the last action as form_submit
+      lastAction.kind = "form_submit";
+    }
+
+    currentGroup = [];
+  };
+
+  for (const action of actions) {
+    const snapshotIdx = action._snapshotIndex;
+    const label = snapshotIdx < groups.length ? groups[snapshotIdx].stateLabel : null;
+
+    if (label !== currentLabel) {
+      flushGroup();
+      currentLabel = label;
+    }
+    currentGroup.push(action);
+  }
+  flushGroup();
+}
+
+function getStateName(action, groups) {
+  const idx = action._snapshotIndex;
+  if (idx !== undefined && idx < groups.length) {
+    return groups[idx].stateIdentity?.name || `state_${groups[idx].stateLabel}`;
+  }
+  return "unknown";
 }
 
 // ---------------------------------------------------------------------------
@@ -252,10 +614,19 @@ function assembleManifest({ groups, agentResults }) {
       }
     }
 
-    // Merge actions
+    // Merge actions — set to_state from snapshot-state mapping
     for (const action of result.pendingActions || []) {
       const targetStateId = findBestState(action, groups, labelToManifestId, manifest, intentName);
       if (targetStateId) {
+        // Determine to_state from the next snapshot's state
+        const i = action._snapshotIndex;
+        if (i !== undefined && (i + 1) < groups.length) {
+          const destLabel = groups[i + 1].stateLabel;
+          action.to_state = labelToManifestId.get(destLabel) || targetStateId;
+        } else {
+          action.to_state = targetStateId;
+        }
+
         manifest.mergeActions(targetStateId, [action]);
         const state = manifest.getStates().find((s) => s.id === targetStateId);
         if (state && !state.signature.actions.includes(action.name)) {
@@ -264,9 +635,6 @@ function assembleManifest({ groups, agentResults }) {
       }
     }
   }
-
-  // 3. Wire leads_to edges from action sequence (based on group ordering)
-  wireEdgesFromGroups(manifest, groups, labelToManifestId);
 
   return manifest;
 }
@@ -298,32 +666,4 @@ function findBestState(item, groups, labelToManifestId, manifest, intentName) {
   return states.length > 0 ? states[0].id : null;
 }
 
-/**
- * Wire leads_to edges based on the order groups appear in the recording.
- * For consecutive groups with different states, if the source state has
- * an action that could transition, link it.
- */
-function wireEdgesFromGroups(manifest, groups, labelToManifestId) {
-  for (let i = 0; i < groups.length - 1; i++) {
-    const fromLabel = groups[i].stateLabel;
-    const toLabel = groups[i + 1].stateLabel;
-    if (fromLabel === toLabel) continue;
-
-    const fromStateId = labelToManifestId.get(fromLabel);
-    const toStateId = labelToManifestId.get(toLabel);
-    if (!fromStateId || !toStateId) continue;
-
-    const fromState = manifest.getStates().find((s) => s.id === fromStateId);
-    if (!fromState) continue;
-
-    // Find the first action without a leads_to on the source state and wire it
-    for (const action of fromState.actions || []) {
-      if (!action.leads_to) {
-        manifest.setLeadsTo(fromStateId, action.name, toStateId);
-        console.log(`[browserwire]   → linked ${fromStateId}.${action.name} → ${toStateId}`);
-        break;
-      }
-    }
-  }
-}
 

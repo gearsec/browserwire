@@ -9,7 +9,29 @@ import { Badge } from "../../components/ui/badge";
 import { Progress } from "../../components/ui/progress";
 import { ScrollArea } from "../../components/ui/scroll-area";
 import { Separator } from "../../components/ui/separator";
-import { useHistory, type SessionSummary, type TrainingProgress } from "../hooks/useHistory";
+import { useHistory, type SessionSummary, type TrainingProgress, type SegmentationData } from "../hooks/useHistory";
+import { MousePointerClick, Type, ChevronRight } from "lucide-react";
+
+class ReplayErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="p-4 text-red-500 overflow-auto">
+          <h3 className="font-bold mb-2">Replay Error</h3>
+          <pre className="text-xs whitespace-pre-wrap">{this.state.error.message}{"\n"}{this.state.error.stack}</pre>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 const TOOL_LABELS: Record<string, string> = {
   "view_screenshot": "Viewing screenshot",
@@ -22,7 +44,7 @@ const TOOL_LABELS: Record<string, string> = {
   "test_code": "Testing code",
   "submit_state": "Submitting state",
   "submit_view": "Submitting view",
-  "submit_action": "Submitting action",
+  "transition-agent": "Writing action code",
   "done": "Finishing analysis",
 };
 
@@ -204,10 +226,144 @@ function SessionList({
   );
 }
 
+function summarizeTransition(transition: SegmentationData["transitions"][0]): string {
+  const events = transition.interactionEvents;
+  if (events.length === 0) return "no events";
+
+  const parts: string[] = [];
+  for (const e of events) {
+    if (e.type === "mouse_interaction") {
+      parts.push(e.interaction || "mouse");
+    } else if (e.type === "input") {
+      const text = e.text;
+      if (text) {
+        parts.push(`type "${text.length > 15 ? text.slice(0, 15) + "..." : text}"`);
+      } else {
+        parts.push("input");
+      }
+    }
+  }
+
+  // Deduplicate consecutive same entries (e.g., "type a", "type ab" → just show last)
+  const deduped: string[] = [];
+  for (const p of parts) {
+    if (p.startsWith("type ") && deduped.length > 0 && deduped[deduped.length - 1].startsWith("type ")) {
+      deduped[deduped.length - 1] = p; // replace with latest typed value
+    } else {
+      deduped.push(p);
+    }
+  }
+
+  return deduped.join(" → ");
+}
+
+function SegmentationTimeline({
+  segmentation,
+  events,
+  sessionId,
+  activeSnapshotIndex,
+  onSeekToSnapshot,
+  onSeekToEvent,
+}: {
+  segmentation: SegmentationData;
+  events: any[];
+  sessionId: string;
+  activeSnapshotIndex: number | null;
+  onSeekToSnapshot: (idx: number) => void;
+  onSeekToEvent: (eventIndex: number) => void;
+}) {
+  const [thumbnails, setThumbnails] = useState<Map<string, string>>(new Map());
+
+  // Load thumbnails for each snapshot
+  useEffect(() => {
+    let cancelled = false;
+    async function loadThumbnails() {
+      const loaded = new Map<string, string>();
+      for (const snap of segmentation.snapshots) {
+        if (cancelled) break;
+        try {
+          const result = await window.browserwire.loadSessionScreenshot(sessionId, snap.snapshotId);
+          if (result.ok) loaded.set(snap.snapshotId, result.screenshot);
+        } catch { /* ignore */ }
+      }
+      if (!cancelled) setThumbnails(loaded);
+    }
+    loadThumbnails();
+    return () => { cancelled = true; };
+  }, [segmentation, sessionId]);
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="text-xs font-medium text-muted-foreground">Segmentation Timeline</div>
+      <div className="flex flex-col gap-1">
+        {segmentation.snapshots.map((snap, i) => {
+          const thumb = thumbnails.get(snap.snapshotId);
+          const transition = segmentation.transitions[i]; // transition AFTER this snapshot
+          const isActive = activeSnapshotIndex === i;
+
+          return (
+            <React.Fragment key={snap.snapshotId}>
+              {/* Snapshot row */}
+              <div
+                className={`flex items-center gap-2 p-1.5 rounded cursor-pointer hover:bg-muted/50 ${isActive ? "bg-primary/10 ring-1 ring-primary/30" : ""}`}
+                onClick={() => onSeekToSnapshot(i)}
+              >
+                {thumb ? (
+                  <img
+                    src={`data:image/jpeg;base64,${thumb}`}
+                    alt={snap.snapshotId}
+                    className="w-16 h-10 object-cover rounded border border-border shrink-0"
+                  />
+                ) : (
+                  <div className="w-16 h-10 bg-muted rounded border border-border shrink-0 flex items-center justify-center">
+                    <Layers className="size-3 text-muted-foreground" />
+                  </div>
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-medium truncate flex items-center gap-1">
+                    {snap.stateLabel && (
+                      <Badge variant="secondary" className="text-[10px] py-0 shrink-0">
+                        {snap.stateLabel}
+                      </Badge>
+                    )}
+                    {snap.stateName || snap.snapshotId}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground">
+                    {snap.snapshotId} · event #{snap.eventIndex}
+                    {snap.trigger && ` · ${snap.trigger.kind}`}
+                  </div>
+                </div>
+              </div>
+
+              {/* Transition events between this snapshot and the next */}
+              {transition && transition.interactionEvents.length > 0 && (
+                <div
+                  className="ml-8 flex items-center gap-1.5 px-2 py-1 text-[10px] text-muted-foreground cursor-pointer hover:text-foreground hover:bg-muted/30 rounded"
+                  onClick={() => onSeekToEvent(transition.interactionEvents[0].eventIndex)}
+                >
+                  <ChevronRight className="size-3 shrink-0" />
+                  {transition.interactionEvents.some((e) => e.interaction === "click") && (
+                    <MousePointerClick className="size-3 shrink-0" />
+                  )}
+                  {transition.interactionEvents.some((e) => e.type === "input") && (
+                    <Type className="size-3 shrink-0" />
+                  )}
+                  <span className="truncate">{summarizeTransition(transition)}</span>
+                </div>
+              )}
+            </React.Fragment>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function ReplayView({
   session,
   events,
   eventsLoading,
+  segmentation,
   retraining,
   progress,
   onBack,
@@ -216,6 +372,7 @@ function ReplayView({
   session: SessionSummary;
   events: any[] | null;
   eventsLoading: boolean;
+  segmentation: SegmentationData | null;
   retraining: boolean;
   progress: TrainingProgress | null;
   onBack: () => void;
@@ -229,7 +386,7 @@ function ReplayView({
     const player = playerRef.current;
     if (!player || !events || events.length === 0) return;
 
-    const snap = session.snapshots[snapIndex];
+    const snap = segmentation?.snapshots?.[snapIndex] || session.snapshots[snapIndex];
     if (!snap || snap.eventIndex < 0 || snap.eventIndex >= events.length) return;
 
     // Compute time offset from the start of the recording
@@ -282,6 +439,16 @@ function ReplayView({
       }
     };
   }, [events]);
+
+  const seekToEvent = (eventIndex: number) => {
+    const player = playerRef.current;
+    if (!player || !events || events.length === 0 || eventIndex >= events.length) return;
+    const startTimestamp = events[0].timestamp;
+    const targetTimestamp = events[eventIndex].timestamp;
+    const offsetMs = targetTimestamp - startTimestamp;
+    player.goto(offsetMs, true);
+    requestAnimationFrame(() => { player.pause(); });
+  };
 
   const showTimeline = progress && (progress.status === "processing" || progress.status === "complete" || progress.status === "error");
 
@@ -336,15 +503,32 @@ function ReplayView({
         </div>
       )}
 
-      {/* Player */}
-      <div className="flex-1 flex items-center justify-center bg-muted/30 overflow-auto p-4">
-        {eventsLoading ? (
-          <div className="text-muted-foreground text-sm">Loading recording...</div>
-        ) : events && events.length > 0 ? (
-          <div ref={containerRef} className="w-full h-full" />
-        ) : (
-          <div className="text-muted-foreground text-sm">No events in this recording</div>
+      {/* Timeline + Player side by side */}
+      <div className="flex-1 flex min-h-0">
+        {/* Timeline sidebar */}
+        {segmentation && events && events.length > 0 && (
+          <div className="w-64 border-r border-border overflow-y-auto p-2 shrink-0">
+            <SegmentationTimeline
+              segmentation={segmentation}
+              events={events}
+              sessionId={session.sessionId}
+              activeSnapshotIndex={activeSnapshotIndex}
+              onSeekToSnapshot={seekToSnapshot}
+              onSeekToEvent={seekToEvent}
+            />
+          </div>
         )}
+
+        {/* Player */}
+        <div className="flex-1 flex items-center justify-center bg-muted/30 overflow-auto p-4">
+          {eventsLoading ? (
+            <div className="text-muted-foreground text-sm">Loading recording...</div>
+          ) : events && events.length > 0 ? (
+            <div ref={containerRef} className="w-full h-full" />
+          ) : (
+            <div className="text-muted-foreground text-sm">No events in this recording</div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -379,15 +563,18 @@ export function HistoryPanel({
 
   if (history.selectedSession && history.selectedSessionId) {
     return (
-      <ReplayView
-        session={history.selectedSession}
-        events={history.events}
-        eventsLoading={history.eventsLoading}
-        retraining={history.retraining}
-        progress={history.getProgress(history.selectedSessionId)}
-        onBack={history.clearSelection}
-        onRetrain={() => history.retrainSession(history.selectedSessionId!)}
-      />
+      <ReplayErrorBoundary>
+        <ReplayView
+          session={history.selectedSession}
+          events={history.events}
+          eventsLoading={history.eventsLoading}
+          segmentation={history.segmentation}
+          retraining={history.retraining}
+          progress={history.getProgress(history.selectedSessionId)}
+          onBack={history.clearSelection}
+          onRetrain={() => history.retrainSession(history.selectedSessionId!)}
+        />
+      </ReplayErrorBoundary>
     );
   }
 

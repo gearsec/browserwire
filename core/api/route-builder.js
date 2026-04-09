@@ -2,7 +2,7 @@
  * route-builder.js — Build a flat route table from a state machine manifest.
  *
  * For each view and action in the manifest, computes the shortest path
- * from the initial state via BFS through the leads_to graph. Collects
+ * from the initial state via BFS through the to_state graph. Collects
  * all inputs needed along the path into a single flat input schema.
  *
  * The route table is a pure data structure — no execution logic.
@@ -35,7 +35,7 @@ function getEntryPoints(manifest) {
   const hasIncoming = new Set();
   for (const state of manifest.states) {
     for (const action of state.actions || []) {
-      if (action.leads_to) hasIncoming.add(action.leads_to);
+      if (action.to_state && action.to_state !== state.id) hasIncoming.add(action.to_state);
     }
   }
 
@@ -67,8 +67,8 @@ function findPath(manifest, targetStateId, entryPoints) {
   for (const state of manifest.states) {
     const edges = [];
     for (const action of state.actions || []) {
-      if (action.leads_to) {
-        edges.push({ actionName: action.name, toStateId: action.leads_to });
+      if (action.to_state && action.to_state !== state.id) {
+        edges.push({ actionName: action.name, toStateId: action.to_state });
       }
     }
     adjacency.set(state.id, edges);
@@ -246,7 +246,7 @@ export function buildRouteTable(manifest) {
         path,
         entryPointStateId,
         inputs: [...urlInputs, ...collectInputs(manifest, path, action.inputs, name)],
-        leadsTo: action.leads_to,
+        leadsTo: action.to_state,
       });
     }
   }
@@ -325,8 +325,8 @@ function buildWorkflowRoutes(manifest, entryPoints, usedNames) {
         }
       }
 
-      // Find the submit action (has leads_to) for the description
-      const submitAction = formActions.find((a) => a.leads_to) || formActions[formActions.length - 1];
+      // Find the submit action (has to_state) for the description
+      const submitAction = formActions.find((a) => a.to_state) || formActions[formActions.length - 1];
 
       // Deduplicate name
       let name = formGroup;
@@ -346,7 +346,7 @@ function buildWorkflowRoutes(manifest, entryPoints, usedNames) {
         inputs: allInputs,
         // Ordered list of actions to replay within the state
         actions: formActions.map((a) => ({ actionName: a.name, stateId: state.id })),
-        leadsTo: submitAction.leads_to,
+        leadsTo: submitAction.to_state,
       });
     }
   }

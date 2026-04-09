@@ -15,6 +15,7 @@
 
 import { z } from "zod";
 import { EventType, IncrementalSource } from "../../recording/rrweb-constants.js";
+import { resolveTransitionRefs } from "./transition.js";
 
 /**
  * Execute a code string as a self-contained async function against a Playwright page.
@@ -83,39 +84,13 @@ function compareResults(actual, expectedJson) {
 
 /**
  * Get recorded forward transition interaction events for comparison.
+ * Uses pre-computed events from segmentation (single source of truth).
  */
 function getRecordedTransitionEvents(ctx) {
-  const { events, currentSnapshotIndex, snapshots, index } = ctx;
-
-  if (currentSnapshotIndex >= snapshots.length - 1) {
-    return [];
+  if (ctx.transitionData?.interactionEvents) {
+    return resolveTransitionRefs(ctx.transitionData.interactionEvents, ctx.index);
   }
-
-  const currentSnapshot = snapshots[currentSnapshotIndex];
-  const nextSnapshot = snapshots[currentSnapshotIndex + 1];
-  const startIdx = currentSnapshot.eventIndex + 1;
-  const endIdx = nextSnapshot.eventIndex;
-  const slice = events.slice(startIdx, endIdx);
-
-  const interactions = [];
-  for (const event of slice) {
-    if (event.type !== EventType.IncrementalSnapshot) continue;
-    if (event.data?.source === IncrementalSource.MouseInteraction) {
-      interactions.push({
-        type: "mouse_interaction",
-        interaction_type: event.data.type,
-        rrweb_node_id: event.data.id,
-        ref: index.rrwebIdToRef?.get(event.data.id) || null,
-      });
-    } else if (event.data?.source === IncrementalSource.Input) {
-      interactions.push({
-        type: "input",
-        rrweb_node_id: event.data.id,
-        ref: index.rrwebIdToRef?.get(event.data.id) || null,
-      });
-    }
-  }
-  return interactions;
+  return [];
 }
 
 /**

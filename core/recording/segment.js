@@ -1,8 +1,13 @@
 /**
- * segment.js — Heuristic trigger boundary parser for rrweb event streams.
+ * segment.js — Trigger boundary parser for rrweb event streams.
  *
- * Walks an rrweb event stream, identifies user trigger indexes, and derives
- * snapshot boundaries. N triggers produce N+1 snapshots.
+ * Only user-initiated actions create triggers: Click, DblClick, Touch,
+ * ContextMenu, Navigation. Input/Scroll/Drag events are NOT triggers —
+ * they're captured as transition events between snapshots.
+ *
+ * N triggers produce N+1 snapshots. Each snapshot boundary is placed
+ * one event before the trigger (so the snapshot DOM is the state right
+ * before the user acted).
  */
 
 import {
@@ -10,8 +15,6 @@ import {
   IncrementalSource,
   MouseInteraction,
 } from "./rrweb-constants.js";
-
-const DEBOUNCE_MS = 500;
 
 // ---------------------------------------------------------------------------
 // Trigger detection helpers
@@ -50,25 +53,11 @@ function isTouch(event) {
   );
 }
 
-function isUserInput(event) {
+function isFocus(event) {
   return (
     event.type === EventType.IncrementalSnapshot &&
-    event.data.source === IncrementalSource.Input &&
-    event.data.userTriggered === true
-  );
-}
-
-function isScroll(event) {
-  return (
-    event.type === EventType.IncrementalSnapshot &&
-    event.data.source === IncrementalSource.Scroll
-  );
-}
-
-function isDrag(event) {
-  return (
-    event.type === EventType.IncrementalSnapshot &&
-    event.data.source === IncrementalSource.Drag
+    event.data.source === IncrementalSource.MouseInteraction &&
+    event.data.type === MouseInteraction.Focus
   );
 }
 
@@ -85,76 +74,41 @@ function isMetaFollowedByFullSnapshot(events, index) {
 // ---------------------------------------------------------------------------
 
 /**
- * Walk the event stream and return all user trigger indexes with their kind.
- * Debounced kinds (type, scroll, drag) collapse consecutive events within
- * 500ms into a single trigger at the first event's index.
+ * Walk the event stream and return user action trigger indexes.
+ *
+ * Triggers: Click, DblClick, Touch, ContextMenu, Navigation,
+ * and first Input on a new element (detects typing in auto-focused fields).
  *
  * @param {object[]} events - Array of rrweb events
  * @returns {{ index: number, kind: string }[]}
  */
 function detectTriggers(events) {
   const triggers = [];
-
-  // Track whether we have seen the initial Meta+FullSnapshot pair so we can
-  // skip it (navigation triggers only fire for subsequent navigations).
   let seenInitialNavigation = false;
-
-  // Debounce state for grouped trigger kinds.
-  let debounceKind = null;
-  let debounceStart = null; // timestamp of first event in current group
-
-  function flushDebounce() {
-    // Nothing to flush — groups are recorded at detection time.
-    debounceKind = null;
-    debounceStart = null;
-  }
+  let lastInteractionNodeId = null;
 
   for (let i = 0; i < events.length; i++) {
     const event = events[i];
 
-    // --- Debounced kinds: type, scroll, drag ---
-    // Check if this event continues an open debounce group.
-    if (debounceKind !== null) {
-      const withinWindow = event.timestamp - debounceStart <= DEBOUNCE_MS;
-      const sameKind =
-        (debounceKind === "type" && isUserInput(event)) ||
-        (debounceKind === "scroll" && isScroll(event)) ||
-        (debounceKind === "drag" && isDrag(event));
-
-      if (withinWindow && sameKind) {
-        // This event is absorbed into the current debounce group — skip.
-        continue;
-      } else {
-        // Group ended; close it before processing the current event.
-        flushDebounce();
-      }
-    }
-
-    // --- Classify the current event ---
-
     if (isClick(event)) {
       triggers.push({ index: i, kind: "click" });
+      lastInteractionNodeId = event.data.id;
     } else if (isDblClick(event)) {
       triggers.push({ index: i, kind: "dblclick" });
+      lastInteractionNodeId = event.data.id;
     } else if (isContextMenu(event)) {
       triggers.push({ index: i, kind: "context-menu" });
+      lastInteractionNodeId = event.data.id;
     } else if (isTouch(event)) {
       triggers.push({ index: i, kind: "touch" });
-    } else if (isUserInput(event)) {
+      lastInteractionNodeId = event.data.id;
+    } else if (isInputOnNewElement(event, lastInteractionNodeId)) {
+      // First Input on a different element than the last click/input target.
+      // Detects typing in auto-focused or tab-focused fields.
       triggers.push({ index: i, kind: "type" });
-      debounceKind = "type";
-      debounceStart = event.timestamp;
-    } else if (isScroll(event)) {
-      triggers.push({ index: i, kind: "scroll" });
-      debounceKind = "scroll";
-      debounceStart = event.timestamp;
-    } else if (isDrag(event)) {
-      triggers.push({ index: i, kind: "drag" });
-      debounceKind = "drag";
-      debounceStart = event.timestamp;
+      lastInteractionNodeId = event.data.id;
     } else if (isMetaFollowedByFullSnapshot(events, i)) {
       if (!seenInitialNavigation) {
-        // Skip the very first Meta+FullSnapshot pair.
         seenInitialNavigation = true;
       } else {
         triggers.push({ index: i, kind: "navigation" });
@@ -163,6 +117,14 @@ function detectTriggers(events) {
   }
 
   return triggers;
+}
+
+function isInputOnNewElement(event, lastInteractionNodeId) {
+  if (event.type !== EventType.IncrementalSnapshot) return false;
+  if (event.data.source !== IncrementalSource.Input) return false;
+  const nodeId = event.data.id;
+  if (!nodeId || nodeId <= 0) return false; // skip React init noise (node=-1)
+  return nodeId !== lastInteractionNodeId;
 }
 
 /**
@@ -188,11 +150,11 @@ function deriveSnapshots(events, triggers) {
 }
 
 /**
- * Walk an rrweb event stream and identify user trigger indexes, then derive
+ * Walk an rrweb event stream and identify user action triggers, then derive
  * snapshot boundaries.
  *
  * @param {object[]} events - Array of rrweb events with at minimum { type, timestamp, data }
- * @returns {{ triggers: { index: number, kind: string }[], snapshots: { snapshotId: string, eventIndex: number, eventTimestamp: number, trigger: { kind: string } | null }[] }}
+ * @returns {{ triggers: { index: number, kind: string }[], snapshots: { snapshotId: string, eventIndex: number, trigger: { kind: string } | null }[] }}
  */
 export function segmentEvents(events) {
   if (events.length === 0) {
@@ -202,7 +164,6 @@ export function segmentEvents(events) {
   const triggers = detectTriggers(events);
 
   if (triggers.length === 0) {
-    // No triggers: single snapshot at the last event representing initial state.
     return {
       triggers: [],
       snapshots: [
@@ -216,5 +177,82 @@ export function segmentEvents(events) {
   }
 
   const snapshots = deriveSnapshots(events, triggers);
-  return { triggers, snapshots };
+  const transitions = buildTransitions(events, snapshots);
+  return { triggers, snapshots, transitions };
+}
+
+// ---------------------------------------------------------------------------
+// Transition extraction
+// ---------------------------------------------------------------------------
+
+const MOUSE_INTERACTION_NAMES = {
+  [MouseInteraction.MouseUp]: "mouseup",
+  [MouseInteraction.MouseDown]: "mousedown",
+  [MouseInteraction.Click]: "click",
+  [MouseInteraction.ContextMenu]: "contextmenu",
+  [MouseInteraction.DblClick]: "dblclick",
+  [MouseInteraction.Focus]: "focus",
+  [MouseInteraction.Blur]: "blur",
+  [MouseInteraction.TouchStart]: "touchstart",
+  [MouseInteraction.TouchEnd]: "touchend",
+};
+
+/**
+ * Build transitions between consecutive snapshots.
+ * Each transition has the event range and extracted interaction events
+ * (MouseInteraction + Input only, with raw rrweb node IDs).
+ *
+ * This is the single source of truth — persisted to segmentation.json
+ * and reused by transition agents and the UI.
+ *
+ * @param {object[]} events - Full rrweb event stream
+ * @param {object[]} snapshots - Snapshot boundaries from deriveSnapshots
+ * @returns {object[]} transitions
+ */
+export function buildTransitions(events, snapshots) {
+  const transitions = [];
+  for (let i = 0; i < snapshots.length - 1; i++) {
+    const startIdx = snapshots[i].eventIndex + 1;
+    const endIdx = snapshots[i + 1].eventIndex;
+    const interactionEvents = extractInteractions(events, startIdx, endIdx);
+
+    transitions.push({
+      from: snapshots[i].snapshotId,
+      to: snapshots[i + 1].snapshotId,
+      snapshotIndex: i,
+      eventRange: { start: startIdx, end: endIdx },
+      triggerKind: snapshots[i + 1].trigger?.kind || null,
+      interactionEvents,
+    });
+  }
+  return transitions;
+}
+
+function extractInteractions(events, startIdx, endIdx) {
+  const interactions = [];
+  for (let j = startIdx; j < endIdx; j++) {
+    const event = events[j];
+    if (event.type !== EventType.IncrementalSnapshot) continue;
+    const source = event.data?.source;
+
+    if (source === IncrementalSource.MouseInteraction) {
+      interactions.push({
+        eventIndex: j,
+        type: "mouse_interaction",
+        interaction: MOUSE_INTERACTION_NAMES[event.data.type] || `unknown(${event.data.type})`,
+        rrwebNodeId: event.data.id,
+        timestamp: event.timestamp,
+      });
+    } else if (source === IncrementalSource.Input) {
+      interactions.push({
+        eventIndex: j,
+        type: "input",
+        text: event.data.text || null,
+        isChecked: event.data.isChecked ?? null,
+        rrwebNodeId: event.data.id,
+        timestamp: event.timestamp,
+      });
+    }
+  }
+  return interactions;
 }

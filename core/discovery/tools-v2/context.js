@@ -13,7 +13,7 @@ export const get_state_machine = {
   description:
     "Get the state machine built so far from previous snapshots. " +
     "Shows all states with their signatures (page_purpose, view names, action names), " +
-    "and action leads_to links. Use this to determine if the current snapshot " +
+    "and action to_state links. Use this to determine if the current snapshot " +
     "is a state you've already seen or a new one.",
   parameters: z.object({}),
   execute: (ctx) => {

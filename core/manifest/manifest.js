@@ -4,7 +4,7 @@
  * Used by the session to incrementally build the manifest as snapshots
  * are processed serially. Each snapshot either adds a new state or
  * revisits an existing one, and optionally links the previous state's
- * action to the new state via leads_to.
+ * action to the destination state via to_state.
  *
  * Views and actions carry executable Playwright code alongside
  * structured signatures (returns/inputs) that define their API.
@@ -41,7 +41,7 @@ export class StateMachineManifest {
       url_pattern,
       signature,
       views: [...views],
-      actions: actions.map((a) => ({ ...a, leads_to: a.leads_to || undefined })),
+      actions: [...actions],
     };
     this._states.set(id, state);
     return id;
@@ -128,33 +128,10 @@ export class StateMachineManifest {
     const existing = new Set(state.actions.map((a) => a.name));
     for (const action of actions) {
       if (!existing.has(action.name)) {
-        state.actions.push({ ...action, leads_to: action.leads_to || undefined });
+        state.actions.push({ ...action });
         existing.add(action.name);
       }
     }
-  }
-
-  // -------------------------------------------------------------------------
-  // Transition linking
-  // -------------------------------------------------------------------------
-
-  /**
-   * Set leads_to on an action, linking it to a destination state.
-   *
-   * @param {string} fromStateId - The state that owns the action
-   * @param {string} actionName - The action name to update
-   * @param {string} toStateId - The destination state id
-   * @returns {boolean} true if the action was found and updated
-   */
-  setLeadsTo(fromStateId, actionName, toStateId) {
-    const state = this._states.get(fromStateId);
-    if (!state) return false;
-
-    const action = state.actions.find((a) => a.name === actionName);
-    if (!action) return false;
-
-    action.leads_to = toStateId;
-    return true;
   }
 
   // -------------------------------------------------------------------------
@@ -190,7 +167,7 @@ export class StateMachineManifest {
 
   /**
    * Produce a compact summary for passing to the LLM as context.
-   * Includes state names, signatures, and action leads_to links.
+   * Includes state names, signatures, and action to_state links.
    * Omits code and grounding details to keep context small.
    *
    * @returns {object}
@@ -214,7 +191,7 @@ export class StateMachineManifest {
           name: a.name,
           kind: a.kind,
           inputs: a.inputs,
-          leads_to: a.leads_to,
+          to_state: a.to_state,
         })),
       })),
     };
@@ -245,7 +222,7 @@ export class StateMachineManifest {
         url_pattern: state.url_pattern,
         signature: state.signature,
         views: state.views || [],
-        actions: (state.actions || []).map((a) => ({ ...a, leads_to: a.leads_to || undefined })),
+        actions: [...(state.actions || [])],
       });
 
       // Keep counter ahead of any existing numeric ids

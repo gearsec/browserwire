@@ -34,12 +34,12 @@ function dblClick() {
   return { type: EventType.IncrementalSnapshot, data: { source: IncrementalSource.MouseInteraction, type: MouseInteractions.DblClick, id: 10, x: 100, y: 200 }, timestamp: ts() };
 }
 
-function focus() {
-  return { type: EventType.IncrementalSnapshot, data: { source: IncrementalSource.MouseInteraction, type: MouseInteractions.Focus, id: 10 }, timestamp: ts() };
+function touch() {
+  return { type: EventType.IncrementalSnapshot, data: { source: IncrementalSource.MouseInteraction, type: MouseInteractions.TouchStart, id: 10 }, timestamp: ts() };
 }
 
-function blur() {
-  return { type: EventType.IncrementalSnapshot, data: { source: IncrementalSource.MouseInteraction, type: MouseInteractions.Blur, id: 10 }, timestamp: ts() };
+function focus() {
+  return { type: EventType.IncrementalSnapshot, data: { source: IncrementalSource.MouseInteraction, type: MouseInteractions.Focus, id: 10 }, timestamp: ts() };
 }
 
 function mutation() {
@@ -78,26 +78,20 @@ describe("segmentEvents", () => {
     expect(triggers[0].index).toBe(2);
 
     expect(snapshots).toHaveLength(2);
-    // First snapshot: initial state (event before first trigger)
     expect(snapshots[0].eventIndex).toBe(1);
     expect(snapshots[0].trigger).toBeNull();
-    // Second snapshot: end of stream (after click)
     expect(snapshots[1].eventIndex).toBe(4);
     expect(snapshots[1].trigger).toEqual({ kind: "click" });
   });
 
-  it("click then type → 2 triggers, 3 snapshots", () => {
-    const events = [meta(), fullSnapshot(), click(), mutation(), userInput("h"), mutation()];
+  it("click then more clicks → multiple triggers", () => {
+    const events = [meta(), fullSnapshot(), click(), mutation(), click(), mutation()];
     const { triggers, snapshots } = segmentEvents(events);
 
     expect(triggers).toHaveLength(2);
     expect(triggers[0].kind).toBe("click");
-    expect(triggers[1].kind).toBe("type");
-
+    expect(triggers[1].kind).toBe("click");
     expect(snapshots).toHaveLength(3);
-    expect(snapshots[0].trigger).toBeNull(); // initial
-    expect(snapshots[1].trigger).toEqual({ kind: "click" }); // after click
-    expect(snapshots[2].trigger).toEqual({ kind: "type" }); // after type
   });
 
   it("no-op click (no mutations after) → 1 trigger, 2 snapshots", () => {
@@ -106,8 +100,8 @@ describe("segmentEvents", () => {
 
     expect(triggers).toHaveLength(1);
     expect(snapshots).toHaveLength(2);
-    expect(snapshots[0].eventIndex).toBe(1); // before click
-    expect(snapshots[1].eventIndex).toBe(2); // click itself (end of stream)
+    expect(snapshots[0].eventIndex).toBe(1);
+    expect(snapshots[1].eventIndex).toBe(2);
   });
 
   it("back-to-back clicks → 2 triggers, 3 snapshots", () => {
@@ -116,45 +110,92 @@ describe("segmentEvents", () => {
 
     expect(triggers).toHaveLength(2);
     expect(snapshots).toHaveLength(3);
-    expect(snapshots[0].eventIndex).toBe(1); // before first click
-    expect(snapshots[1].eventIndex).toBe(2); // before second click (= first click itself)
-    expect(snapshots[2].eventIndex).toBe(4); // end of stream
+    expect(snapshots[0].eventIndex).toBe(1);
+    expect(snapshots[1].eventIndex).toBe(2);
+    expect(snapshots[2].eventIndex).toBe(4);
   });
 
-  it("programmatic input is NOT a trigger", () => {
+  it("input on new element (no preceding click) IS a trigger", () => {
+    const events = [meta(), fullSnapshot(), userInput("h"), userInput("e"), mutation()];
+    const { triggers } = segmentEvents(events);
+
+    // First input on id=20 (no preceding click) → trigger
+    // Second input on same id=20 → NOT a trigger
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0].kind).toBe("type");
+  });
+
+  it("subsequent inputs on same element are NOT triggers", () => {
+    const events = [meta(), fullSnapshot(), userInput("h"), userInput("he"), userInput("hel")];
+    const { triggers } = segmentEvents(events);
+
+    expect(triggers).toHaveLength(1); // only the first
+  });
+
+  it("programmatic input on new element IS a trigger (same as user input)", () => {
     const events = [meta(), fullSnapshot(), programmaticInput("auto")];
+    const { triggers } = segmentEvents(events);
+
+    // id=20 differs from any preceding interaction → trigger
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0].kind).toBe("type");
+  });
+
+  it("scroll events are NOT triggers", () => {
+    const events = [meta(), fullSnapshot(), scroll(), scroll(), mutation()];
     const { triggers, snapshots } = segmentEvents(events);
 
     expect(triggers).toHaveLength(0);
-    // No triggers → single snapshot at end
     expect(snapshots).toHaveLength(1);
-    expect(snapshots[0].trigger).toBeNull();
   });
 
-  it("Focus and Blur are suppressed (not triggers)", () => {
+  it("drag events are NOT triggers", () => {
+    const events = [meta(), fullSnapshot(), drag(), drag(), mutation()];
+    const { triggers, snapshots } = segmentEvents(events);
+
+    expect(triggers).toHaveLength(0);
+    expect(snapshots).toHaveLength(1);
+  });
+
+  it("Focus alone is NOT a trigger", () => {
     const events = [meta(), fullSnapshot(), click(), focus(), mutation()];
     const { triggers, snapshots } = segmentEvents(events);
 
-    // Only click should be a trigger, not focus
     expect(triggers).toHaveLength(1);
     expect(triggers[0].kind).toBe("click");
-    expect(snapshots).toHaveLength(2);
   });
 
-  it("consecutive scroll events within 500ms → 1 trigger (debounced)", () => {
-    const events = [
-      meta(),
-      fullSnapshot(),
-      scroll(50),  // +50ms
-      scroll(50),  // +50ms (within 500ms of first)
-      scroll(50),  // +50ms (within 500ms of first)
-      mutation(),
-    ];
-    const { triggers, snapshots } = segmentEvents(events);
+  it("Input on a new element (auto-focused field) IS a trigger", () => {
+    // Click on button (id=10), then input on a different element (id=20)
+    const events = [meta(), fullSnapshot(), click(), userInput("h"), mutation()];
+    const { triggers } = segmentEvents(events);
+
+    // click (id=10) + input on new element (id=20) = 2 triggers
+    expect(triggers).toHaveLength(2);
+    expect(triggers[0].kind).toBe("click");
+    expect(triggers[1].kind).toBe("type");
+  });
+
+  it("Input on same element as click is NOT a trigger", () => {
+    // Click and input both on id=10 (click helper uses id=10, need custom input)
+    const clickEvt = { type: 3, data: { source: 2, type: 2, id: 10, x: 100, y: 200 }, timestamp: 1200 };
+    const inputEvt = { type: 3, data: { source: 5, id: 10, text: "h", isChecked: false }, timestamp: 1300 };
+    const events = [meta(), fullSnapshot(), clickEvt, inputEvt];
+    const { triggers } = segmentEvents(events);
 
     expect(triggers).toHaveLength(1);
-    expect(triggers[0].kind).toBe("scroll");
-    expect(snapshots).toHaveLength(2);
+    expect(triggers[0].kind).toBe("click");
+  });
+
+  it("click then input on different element then click → 3 triggers", () => {
+    const events = [meta(), fullSnapshot(), click(), userInput("h"), userInput("e"), click(), mutation()];
+    const { triggers } = segmentEvents(events);
+
+    // click (id=10) + input on new element (id=20) + click (id=10) = 3 triggers
+    expect(triggers).toHaveLength(3);
+    expect(triggers[0].kind).toBe("click");
+    expect(triggers[1].kind).toBe("type");
+    expect(triggers[2].kind).toBe("click");
   });
 
   it("navigation (Meta+FullSnapshot pair after initial) → 1 trigger", () => {
@@ -177,38 +218,6 @@ describe("segmentEvents", () => {
     expect(snapshots).toHaveLength(0);
   });
 
-  it("scroll events beyond 500ms gap → 2 separate triggers", () => {
-    const events = [
-      meta(),
-      fullSnapshot(),
-      scroll(50),
-      scroll(600),  // >500ms gap from first scroll
-      mutation(),
-    ];
-    const { triggers, snapshots } = segmentEvents(events);
-
-    expect(triggers).toHaveLength(2);
-    expect(triggers[0].kind).toBe("scroll");
-    expect(triggers[1].kind).toBe("scroll");
-    expect(snapshots).toHaveLength(3);
-  });
-
-  it("consecutive userInput within 500ms → 1 type trigger", () => {
-    const events = [
-      meta(),
-      fullSnapshot(),
-      userInput("h"),  // +50ms
-      userInput("e"),  // +50ms
-      userInput("l"),  // +50ms
-      mutation(),
-    ];
-    const { triggers, snapshots } = segmentEvents(events);
-
-    expect(triggers).toHaveLength(1);
-    expect(triggers[0].kind).toBe("type");
-    expect(snapshots).toHaveLength(2);
-  });
-
   it("dblclick is its own trigger kind", () => {
     const events = [meta(), fullSnapshot(), dblClick(), mutation()];
     const { triggers } = segmentEvents(events);
@@ -217,23 +226,15 @@ describe("segmentEvents", () => {
     expect(triggers[0].kind).toBe("dblclick");
   });
 
-  it("drag events within 500ms → 1 drag trigger", () => {
-    const events = [
-      meta(),
-      fullSnapshot(),
-      drag(50),
-      drag(50),
-      drag(50),
-      mutation(),
-    ];
-    const { triggers, snapshots } = segmentEvents(events);
+  it("touch is a trigger", () => {
+    const events = [meta(), fullSnapshot(), touch(), mutation()];
+    const { triggers } = segmentEvents(events);
 
     expect(triggers).toHaveLength(1);
-    expect(triggers[0].kind).toBe("drag");
-    expect(snapshots).toHaveLength(2);
+    expect(triggers[0].kind).toBe("touch");
   });
 
-  it("snapshot has no eventTimestamp (removed — use eventIndex)", () => {
+  it("snapshot has no eventTimestamp (use eventIndex)", () => {
     const events = [meta(), fullSnapshot(), click(), mutation()];
     const { snapshots } = segmentEvents(events);
 
@@ -243,8 +244,6 @@ describe("segmentEvents", () => {
   });
 
   it("first snapshot eventIndex is clamped to 0 when T1=0", () => {
-    // Edge case: if the first trigger IS event 0 (unlikely but possible),
-    // the initial snapshot should be at index 0 (clamped, not -1)
     const events = [click(), mutation()];
     const { snapshots } = segmentEvents(events);
 

@@ -438,6 +438,17 @@ const wireIPC = () => {
     }
   });
 
+  ipcMain.handle("browserwire:load-session-segmentation", async (_event, sessionId) => {
+    const segPath = resolve(homedir(), ".browserwire", "logs", `session-${sessionId}`, "segmentation.json");
+    if (!existsSync(segPath)) return { ok: false, error: "Segmentation file not found" };
+    try {
+      const data = JSON.parse(readFileSync(segPath, "utf8"));
+      return { ok: true, segmentation: data };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
   ipcMain.handle("browserwire:load-session-screenshot", async (_event, sessionId, snapshotId) => {
     const screenshotPath = resolve(homedir(), ".browserwire", "logs", `session-${sessionId}`, `${snapshotId}.jpg`);
     if (!existsSync(screenshotPath)) return { ok: false, error: "Screenshot not found" };

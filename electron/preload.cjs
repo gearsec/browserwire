@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld("browserwire", {
   listSessions: () => ipcRenderer.invoke("browserwire:list-sessions"),
   loadSessionEvents: (sessionId) => ipcRenderer.invoke("browserwire:load-session-events", sessionId),
   loadSessionScreenshot: (sessionId, snapshotId) => ipcRenderer.invoke("browserwire:load-session-screenshot", sessionId, snapshotId),
+  loadSessionSegmentation: (sessionId) => ipcRenderer.invoke("browserwire:load-session-segmentation", sessionId),
   retrainSession: (sessionId) => ipcRenderer.invoke("browserwire:retrain-session", sessionId),
 
   // Settings

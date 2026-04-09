@@ -142,7 +142,11 @@ export class SessionManager {
       const { manifest, totalToolCalls } = await processRecording({
         recording,
         sessionId,
-        onProgress: ({ snapshot, tool }) => {
+        onProgress: async ({ phase, snapshot, tool, segmentation: segData }) => {
+          if (segData) {
+            await writeFile(resolve(sessionDir, "segmentation.json"), JSON.stringify(segData, null, 2), "utf8");
+            onStatus({ sessionId, status: "processing", segmentation: segData, snapshotCount });
+          }
           onStatus({ sessionId, status: "processing", snapshot, tool, snapshotCount });
         },
       });
@@ -225,7 +229,8 @@ export class SessionManager {
       startedAt: meta.startedAt,
       stoppedAt: meta.stoppedAt,
       events,
-      snapshots,
+      // Don't pass snapshots — force Pass 0 to re-segment from raw events
+      // so segmentation.json is freshly computed on retrain
     };
 
     const origin = meta.origin;
@@ -238,7 +243,11 @@ export class SessionManager {
       const { manifest, totalToolCalls } = await processRecording({
         recording,
         sessionId,
-        onProgress: ({ snapshot, tool }) => {
+        onProgress: async ({ phase, snapshot, tool, segmentation: segData }) => {
+          if (segData) {
+            await writeFile(resolve(sessionDir, "segmentation.json"), JSON.stringify(segData, null, 2), "utf8");
+            onStatus({ sessionId, status: "processing", segmentation: segData, snapshotCount });
+          }
           onStatus({ sessionId, status: "processing", snapshot, tool, snapshotCount });
         },
       });

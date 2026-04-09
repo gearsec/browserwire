@@ -13,6 +13,7 @@ interface SessionStatus {
   tool?: string;
   error?: string;
   totalToolCalls?: number;
+  segmentation?: any;
 }
 
 interface BatchStatus {
@@ -81,6 +82,7 @@ interface BrowserWireAPI {
   listSessions: () => Promise<SessionRecordingMeta[]>;
   loadSessionEvents: (sessionId: string) => Promise<{ ok: boolean; events?: any[]; error?: string }>;
   loadSessionScreenshot: (sessionId: string, snapshotId: string) => Promise<{ ok: boolean; screenshot?: string; error?: string }>;
+  loadSessionSegmentation: (sessionId: string) => Promise<{ ok: boolean; segmentation?: any; error?: string }>;
   retrainSession: (sessionId: string) => Promise<{ ok: boolean; error?: string }>;
   getSettings: () => Promise<Settings>;
   saveSettings: (settings: SaveSettingsPayload) => Promise<{ ok: boolean; llmConfigured?: boolean; error?: string }>;
