@@ -39,7 +39,7 @@ describe("assignFormGroups", () => {
 
   it("single click action → no form_group", () => {
     const groups = makeGroups({ label: "s0", name: "Home" });
-    const actions = [makeAction(0, "click")];
+    const actions: any[] = [makeAction(0, "click")];
     assignFormGroups(actions, groups);
 
     expect(actions[0].form_group).toBeUndefined();
@@ -52,7 +52,7 @@ describe("assignFormGroups", () => {
       { label: "s0", name: "Registration" },
       { label: "s0", name: "Registration" },
     );
-    const actions = [
+    const actions: any[] = [
       makeAction(0, "input", "fill_name"),
       makeAction(1, "input", "fill_email"),
       makeAction(2, "click", "submit"),
@@ -78,7 +78,7 @@ describe("assignFormGroups", () => {
       { label: "s1", name: "Login" },
       { label: "s1", name: "Login" },
     );
-    const actions = [
+    const actions: any[] = [
       makeAction(0, "click", "nav_to_login"),
       makeAction(1, "input", "fill_username"),
       makeAction(2, "click", "login_submit"),
@@ -102,7 +102,7 @@ describe("assignFormGroups", () => {
       { label: "s0", name: "Search" },
       { label: "s0", name: "Search" },
     );
-    const actions = [
+    const actions: any[] = [
       makeAction(0, "input", "fill_query"),
       makeAction(1, "input", "fill_filter"),
     ];
@@ -115,7 +115,7 @@ describe("assignFormGroups", () => {
 
   it("only click on same state → no form_group", () => {
     const groups = makeGroups({ label: "s0", name: "Home" });
-    const actions = [makeAction(0, "click", "click_button")];
+    const actions: any[] = [makeAction(0, "click", "click_button")];
     assignFormGroups(actions, groups);
 
     expect(actions[0].form_group).toBeUndefined();
@@ -127,7 +127,7 @@ describe("assignFormGroups", () => {
       { label: "s0", name: "Create Calendar" },
       { label: "s0", name: "Create Calendar" },
     );
-    const actions = [
+    const actions: any[] = [
       makeAction(0, "input", "fill_name"),
       makeAction(1, "click", "submit"),
     ];

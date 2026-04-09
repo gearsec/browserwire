@@ -36,12 +36,12 @@ function makeGroups(
 
 describe("detectTransitions", () => {
   it("empty snapshots → empty specs", () => {
-    expect(detectTransitions([], [])).toEqual([]);
+    expect(detectTransitions([], [], null)).toEqual([]);
   });
 
   it("single snapshot → no transitions", () => {
     const snapshots = [makeSnapshot(0)];
-    expect(detectTransitions(snapshots, [])).toEqual([]);
+    expect(detectTransitions(snapshots, [], null)).toEqual([]);
   });
 
   it("two snapshots with click trigger → one spec with eventRange", () => {
@@ -50,7 +50,7 @@ describe("detectTransitions", () => {
       makeSnapshot(1, { trigger: { kind: "click" } }),
     ];
     const groups = makeGroups({ label: "s0", name: "Home" });
-    const specs = detectTransitions(snapshots, groups);
+    const specs: any[] = detectTransitions(snapshots, groups, null);
 
     expect(specs).toHaveLength(1);
     expect(specs[0].index).toBe(0);
@@ -71,7 +71,7 @@ describe("detectTransitions", () => {
       { label: "s0", name: "Home" },
       { label: "s0", name: "Home" },
     );
-    expect(detectTransitions(snapshots, groups)).toEqual([]);
+    expect(detectTransitions(snapshots, groups, null)).toEqual([]);
   });
 
   it("detects all ACTION_TRIGGERS kinds (click, dblclick, touch, navigation)", () => {
@@ -83,7 +83,7 @@ describe("detectTransitions", () => {
 
     const specs = detectTransitions(snapshots, makeGroups(
       ...Array(snapshots.length).fill({ label: "s0", name: "Page" })
-    ));
+    ), null);
 
     expect(specs).toHaveLength(kinds.length);
     for (let i = 0; i < kinds.length; i++) {
@@ -98,7 +98,7 @@ describe("detectTransitions", () => {
     ];
     const groups = makeGroups({ label: "s0", name: "Home" });
 
-    expect(detectTransitions(snapshots, groups)).toEqual([]);
+    expect(detectTransitions(snapshots, groups, null)).toEqual([]);
   });
 
   it("skips snapshots with no trigger", () => {
@@ -106,7 +106,7 @@ describe("detectTransitions", () => {
       makeSnapshot(0),
       makeSnapshot(1), // no trigger
     ];
-    expect(detectTransitions(snapshots, [])).toEqual([]);
+    expect(detectTransitions(snapshots, [], null)).toEqual([]);
   });
 
   it("multiple transitions — click detected, scroll and type skipped", () => {
@@ -122,7 +122,7 @@ describe("detectTransitions", () => {
       { label: "s1", name: "Form" },
       { label: "s1", name: "Form" },
     );
-    const specs = detectTransitions(snapshots, groups);
+    const specs = detectTransitions(snapshots, groups, null);
 
     expect(specs).toHaveLength(2);
     expect(specs[0].index).toBe(0);
@@ -138,7 +138,7 @@ describe("detectTransitions", () => {
       makeSnapshot(2, { trigger: { kind: "click" } }),
     ];
     const groups = makeGroups({ label: "s0", name: "Home" });
-    const specs = detectTransitions(snapshots, groups);
+    const specs = detectTransitions(snapshots, groups, null);
 
     expect(specs).toHaveLength(2);
     expect(specs[0].stateInfo).toEqual({ name: "Home" });
@@ -155,7 +155,7 @@ describe("detectTransitions", () => {
       { label: "s0", name: "Home" },
       { label: "s1", name: "Form" },
     );
-    const specs = detectTransitions(snapshots, groups);
+    const specs: any[] = detectTransitions(snapshots, groups, null);
 
     expect(specs[0].eventRange).toEqual({ start: 1, end: 100 });
     expect(specs[1].eventRange).toEqual({ start: 101, end: 200 });
