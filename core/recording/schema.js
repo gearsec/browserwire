@@ -2,16 +2,12 @@
  * schema.js — Zod schemas for the session recording.
  *
  * The session recording is the source of truth for a browsing session.
- * It contains a continuous rrweb event stream and snapshot markers that
- * identify state boundaries within the stream.
+ * It contains a continuous rrweb event stream (all sources, no filtering)
+ * and optionally snapshot markers that identify state boundaries.
  *
- * rrweb event types captured:
- *   - Meta (type=4), FullSnapshot (type=2), DomContentLoaded (type=0), Load (type=1)
- *   - IncrementalSnapshot (type=3) sources:
- *     Mutation(0), MouseInteraction(2), Input(5), StyleSheetRule(8), StyleDeclaration(13)
- *
- * Everything else (MouseMove, Scroll, ViewportResize, etc.) is filtered out
- * during capture. See electron/capture/dom-capture.js for the filter.
+ * Capture records ALL rrweb event types with no filtering.
+ * Snapshots are derived post-hoc by the backend segmenter
+ * (core/recording/segment.js), not during capture.
  */
 
 import { z } from "zod";
@@ -39,15 +35,20 @@ export const rrwebEventSchema = z.object({
 /**
  * A snapshot marker identifies a state boundary in the event stream.
  *
- * The settle cycle creates these when the page stabilizes after an interaction.
- * eventIndex points to a FullSnapshot (type=2) event in the events array.
+ * The backend segmenter creates these post-hoc from the raw event stream.
+ * eventIndex points to the last event before the next trigger (the settled state).
+ * rrwebTree carries the serialized DOM at that point (from Playwright replay).
  */
 export const snapshotMarkerSchema = z.object({
   snapshotId: z.string(),
   eventIndex: z.number().int().min(0),
-  screenshot: z.string().describe("Base64-encoded JPEG screenshot"),
+  screenshot: z.string().nullable().describe("Base64-encoded JPEG screenshot"),
   url: z.string(),
   title: z.string(),
+  trigger: z.object({
+    kind: z.string(),
+  }).nullable().optional(),
+  rrwebTree: z.unknown().optional().describe("rrweb serializedNodeWithId tree from replay"),
 });
 
 // ---------------------------------------------------------------------------
@@ -60,5 +61,5 @@ export const sessionRecordingSchema = z.object({
   startedAt: z.string().datetime(),
   stoppedAt: z.string().datetime(),
   events: z.array(rrwebEventSchema).min(1),
-  snapshots: z.array(snapshotMarkerSchema).min(1),
+  snapshots: z.array(snapshotMarkerSchema).optional(),
 });

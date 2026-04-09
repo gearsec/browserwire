@@ -20,7 +20,7 @@ interface StateManifest {
     description: string;
     url_pattern: string;
     views: { name: string; description: string; isList: boolean; returns: { name: string; type: string }[] }[];
-    actions: { name: string; kind: string; description: string; leads_to: string | null; inputs?: { name: string; type: string; required: boolean }[] }[];
+    actions: { name: string; kind: string; description: string; to_state: string; inputs?: { name: string; type: string; required: boolean }[] }[];
   }[];
 }
 

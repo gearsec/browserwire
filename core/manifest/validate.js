@@ -2,7 +2,7 @@
  * validate.js — Semantic validation for state machine manifests.
  *
  * Validates beyond what Zod catches: referential integrity, duplicates,
- * signature consistency, leads_to graph validity, and code presence.
+ * signature consistency, to_state graph validity, and code presence.
  */
 
 import { stateMachineManifestSchema } from "./schema.js";
@@ -19,7 +19,7 @@ import { stateMachineManifestSchema } from "./schema.js";
  *      - No duplicate action names within a state
  *      - Signature views[] match actual views[].name
  *      - Signature actions[] match actual actions[].name
- *      - All leads_to references point to valid state ids
+ *      - All to_state references point to valid state ids
  *      - All views and actions have non-empty code
  *
  * @param {object} manifest
@@ -91,10 +91,10 @@ export function validateManifest(manifest) {
       }
     }
 
-    // leads_to must reference valid state ids
+    // to_state must reference valid state ids
     for (const action of state.actions) {
-      if (action.leads_to != null && !stateIds.has(action.leads_to)) {
-        errors.push(`${prefix}: action "${action.name}" leads_to "${action.leads_to}" is not a valid state id`);
+      if (!stateIds.has(action.to_state)) {
+        errors.push(`${prefix}: action "${action.name}" to_state "${action.to_state}" is not a valid state id`);
       }
     }
 

@@ -22,13 +22,8 @@ export function ShellApp() {
   const isDiscovery = layout.activeMode === "discovery";
 
   const handleStopExploring = useCallback(async (note?: string) => {
-    const result = await bw.stopExploring(note);
-    if (result.ok && bw.lastSessionId) {
-      autoSelectRef.current = bw.lastSessionId;
-      layout.switchMode("history");
-    }
-    return result;
-  }, [bw.stopExploring, bw.lastSessionId, layout.switchMode]);
+    return await bw.stopExploring(note);
+  }, [bw.stopExploring]);
 
   return (
     <TooltipProvider>
@@ -55,7 +50,7 @@ export function ShellApp() {
               <RightPanel
                 open={layout.rightPanelOpen}
                 exploring={bw.exploring}
-                snapshotCount={bw.snapshotCount}
+                sessionStatus={bw.sessionStatus}
                 batches={bw.batches}
                 llmConfigured={bw.llmConfigured}
                 onStartExploring={bw.startExploring}

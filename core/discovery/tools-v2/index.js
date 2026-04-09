@@ -1,49 +1,63 @@
 /**
- * tools-v2/index.js — Tool registry for the state machine agent.
+ * tools-v2/index.js — Tool registry for agents.
+ *
+ * Two tool sets:
+ *   - Transition mode: agent writes code for a single snapshot transition
+ *   - View mode: agent extracts business data views from a state
  *
  * All tools receive a context object (ctx) with:
  *   - index: SnapshotIndex (queryable DOM)
  *   - browser: PlaywrightBrowser (for code execution)
- *   - manifest: StateMachineManifest (accumulated state machine)
  *   - events: rrwebEvent[] (full session event stream)
  *   - snapshots: snapshotMarker[] (snapshot boundaries)
  *   - currentSnapshotIndex: number (which snapshot we're processing)
- *
- * The context also accumulates submission state (set by submit tools):
- *   - _isExistingState (pre-set by classifier), _pendingViews, _pendingActions
- *
- * Tools are converted to LangChain tool() instances via getAgentTools().
  */
 
 import { tool } from "@langchain/core/tools";
 import { view_screenshot, get_accessibility_tree, get_page_regions, find_interactive } from "./query.js";
 import { inspect_element } from "./inspect.js";
-import { get_transition_events } from "./transition.js";
 import { test_code } from "./test-code.js";
-import { submit_view, submit_action, done } from "./submit.js";
-import { navigate_to_snapshot } from "./navigate.js";
+import { submit_view, done } from "./submit.js";
 
-// All tool definitions
-// Note: submit_state and get_state_machine removed — state determination
-// is now handled by the classifier (state-classifier.js) before the agent runs.
-const allTools = [
-  // Page understanding
+// ---------------------------------------------------------------------------
+// Tool set: Transition mode
+// ---------------------------------------------------------------------------
+
+// Agent writes code for a SINGLE transition.
+// No submit tools (orchestrator builds the action from done output).
+// No navigation (agent stays on one snapshot).
+// No get_transition_events (transition events provided upfront in the prompt).
+const transitionTools = [
   view_screenshot,
   get_accessibility_tree,
   get_page_regions,
   find_interactive,
   inspect_element,
-  // Transition understanding
-  get_transition_events,
-  // Code testing
   test_code,
-  // Navigation (intent-driven agents)
-  navigate_to_snapshot,
-  // Submission (incremental)
-  submit_view,
-  submit_action,
   done,
 ];
+
+// ---------------------------------------------------------------------------
+// Tool set: View mode
+// ---------------------------------------------------------------------------
+
+// Agent extracts business data views from a state.
+// Has submit_view to submit views, but no action submission.
+// No navigation (agent processes one snapshot at a time).
+const viewTools = [
+  view_screenshot,
+  get_accessibility_tree,
+  get_page_regions,
+  find_interactive,
+  inspect_element,
+  test_code,
+  submit_view,
+  done,
+];
+
+// ---------------------------------------------------------------------------
+// LangChain tool conversion
+// ---------------------------------------------------------------------------
 
 /**
  * Convert a tool definition to a LangChain tool() bound to the agent context.
@@ -66,16 +80,17 @@ const toLangChainTool = (def, ctx) =>
   );
 
 /**
- * Get all agent tools as LangChain tool() instances bound to the given context.
- *
+ * Get tools for transition agents.
  * @param {object} ctx
- * @param {import('../snapshot/snapshot-index.js').SnapshotIndex} ctx.index
- * @param {import('../snapshot/playwright-browser.js').PlaywrightBrowser} ctx.browser
- * @param {import('../../manifest/manifest.js').StateMachineManifest} ctx.manifest
- * @param {Array} ctx.events — full rrweb event stream
- * @param {Array} ctx.snapshots — snapshot markers
- * @param {number} ctx.currentSnapshotIndex
  * @returns {import('@langchain/core/tools').StructuredTool[]}
  */
-export const getAgentTools = (ctx) =>
-  allTools.map((def) => toLangChainTool(def, ctx));
+export const getTransitionAgentTools = (ctx) =>
+  transitionTools.map((def) => toLangChainTool(def, ctx));
+
+/**
+ * Get tools for view agents.
+ * @param {object} ctx
+ * @returns {import('@langchain/core/tools').StructuredTool[]}
+ */
+export const getViewAgentTools = (ctx) =>
+  viewTools.map((def) => toLangChainTool(def, ctx));

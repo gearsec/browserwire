@@ -14,3 +14,4 @@ export {
   sessionRecordingSchema,
 } from "./schema.js";
 export { EventType, IncrementalSource, MouseInteraction } from "./rrweb-constants.js";
+export { segmentEvents } from "./segment.js";

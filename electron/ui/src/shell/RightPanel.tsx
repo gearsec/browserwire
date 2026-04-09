@@ -10,7 +10,7 @@ interface BatchInfo {
 interface RightPanelProps {
   open: boolean;
   exploring: boolean;
-  snapshotCount: number;
+  sessionStatus: string;
   batches: Map<string, BatchInfo>;
   llmConfigured: boolean;
   onStartExploring: () => Promise<any>;
@@ -21,7 +21,7 @@ interface RightPanelProps {
 export function RightPanel({
   open,
   exploring,
-  snapshotCount,
+  sessionStatus,
   batches,
   llmConfigured,
   onStartExploring,
@@ -34,7 +34,7 @@ export function RightPanel({
     <div data-tour="discovery-panel" className="w-80 bg-background border-l border-border flex flex-col shrink-0 overflow-hidden">
       <DiscoveryPanel
         exploring={exploring}
-        snapshotCount={snapshotCount}
+        sessionStatus={sessionStatus}
         batches={batches}
         llmConfigured={llmConfigured}
         onStartExploring={onStartExploring}

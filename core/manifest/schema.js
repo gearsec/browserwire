@@ -3,7 +3,7 @@
  *
  * The manifest represents a site as a state machine:
  *   - States are nodes (what you see + what you can do)
- *   - Actions on a state are edges (leads_to → destination state)
+ *   - Actions on a state are edges (to_state → destination state)
  *
  * Views and actions carry executable Playwright code alongside
  * structured signatures (inputs/returns) that define their API.
@@ -57,7 +57,7 @@ export const actionSchema = z.object({
   kind: z.enum(["click", "form_submit", "navigation", "input", "toggle", "select"]),
   description: z.string(),
   inputs: z.array(actionInputSchema).optional(),
-  leads_to: z.string().optional(),
+  to_state: z.string().describe("Destination state after executing this action"),
   form_group: z.string().optional().describe("Groups actions belonging to the same form (e.g. 'registration_form'). Actions sharing a form_group are replayed in sequence_order by a single workflow endpoint."),
   sequence_order: z.number().optional().describe("Execution order within the form_group (0, 1, 2, ...). The submit action gets the highest sequence_order."),
   code: z.string().describe("Playwright async function body: (page, inputs) => { ... }"),

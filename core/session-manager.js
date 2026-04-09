@@ -73,22 +73,25 @@ export class SessionManager {
     const sessionDir = resolve(homedir(), ".browserwire", `logs/session-${sessionId}`);
     await mkdir(sessionDir, { recursive: true });
 
-    // Save screenshots as separate files
+    // Save screenshots as separate files (if snapshots exist)
     const snapshotsForJson = [];
-    for (const snap of snapshots) {
-      if (snap.screenshot) {
-        await writeFile(
-          resolve(sessionDir, `${snap.snapshotId}.jpg`),
-          Buffer.from(snap.screenshot, "base64")
-        );
+    if (snapshots) {
+      for (const snap of snapshots) {
+        if (snap.screenshot) {
+          await writeFile(
+            resolve(sessionDir, `${snap.snapshotId}.jpg`),
+            Buffer.from(snap.screenshot, "base64")
+          );
+        }
+        snapshotsForJson.push({
+          snapshotId: snap.snapshotId,
+          eventIndex: snap.eventIndex,
+          screenshotFile: snap.screenshot ? `${snap.snapshotId}.jpg` : null,
+          url: snap.url,
+          title: snap.title,
+          ...(snap.trigger && { trigger: snap.trigger }),
+        });
       }
-      snapshotsForJson.push({
-        snapshotId: snap.snapshotId,
-        eventIndex: snap.eventIndex,
-        screenshotFile: `${snap.snapshotId}.jpg`,
-        url: snap.url,
-        title: snap.title,
-      });
     }
 
     // Save recording metadata
@@ -100,7 +103,7 @@ export class SessionManager {
         startedAt: recording.startedAt,
         stoppedAt: recording.stoppedAt,
         eventCount: events.length,
-        snapshotCount: snapshots.length,
+        snapshotCount: snapshotsForJson.length,
         snapshots: snapshotsForJson,
       }, null, 2),
       "utf8"
@@ -115,7 +118,7 @@ export class SessionManager {
 
     console.log(
       `[browserwire] session recording saved: ${sessionDir} ` +
-      `(${events.length} events, ${snapshots.length} snapshots)`
+      `(${events.length} events, ${snapshotsForJson.length} snapshots)`
     );
 
     return sessionDir;
@@ -129,9 +132,9 @@ export class SessionManager {
    */
   async processSessionRecording(recording, opts = {}) {
     const { onStatus = () => {} } = opts;
-    const { sessionId, origin, snapshots } = recording;
+    const { sessionId, origin } = recording;
     const sessionDir = resolve(homedir(), ".browserwire", `logs/session-${sessionId}`);
-    const snapshotCount = snapshots.length;
+    const snapshotCount = recording.snapshots?.length || 0;
 
     onStatus({ sessionId, status: "processing", snapshotCount });
 
@@ -139,7 +142,11 @@ export class SessionManager {
       const { manifest, totalToolCalls } = await processRecording({
         recording,
         sessionId,
-        onProgress: ({ snapshot, tool }) => {
+        onProgress: async ({ phase, snapshot, tool, segmentation: segData }) => {
+          if (segData) {
+            await writeFile(resolve(sessionDir, "segmentation.json"), JSON.stringify(segData, null, 2), "utf8");
+            onStatus({ sessionId, status: "processing", segmentation: segData, snapshotCount });
+          }
           onStatus({ sessionId, status: "processing", snapshot, tool, snapshotCount });
         },
       });
@@ -222,7 +229,8 @@ export class SessionManager {
       startedAt: meta.startedAt,
       stoppedAt: meta.stoppedAt,
       events,
-      snapshots,
+      // Don't pass snapshots — force Pass 0 to re-segment from raw events
+      // so segmentation.json is freshly computed on retrain
     };
 
     const origin = meta.origin;
@@ -235,7 +243,11 @@ export class SessionManager {
       const { manifest, totalToolCalls } = await processRecording({
         recording,
         sessionId,
-        onProgress: ({ snapshot, tool }) => {
+        onProgress: async ({ phase, snapshot, tool, segmentation: segData }) => {
+          if (segData) {
+            await writeFile(resolve(sessionDir, "segmentation.json"), JSON.stringify(segData, null, 2), "utf8");
+            onStatus({ sessionId, status: "processing", segmentation: segData, snapshotCount });
+          }
           onStatus({ sessionId, status: "processing", snapshot, tool, snapshotCount });
         },
       });

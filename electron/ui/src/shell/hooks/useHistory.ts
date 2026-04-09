@@ -25,12 +25,39 @@ export interface TrainingProgress {
   totalToolCalls?: number;
 }
 
+export interface SegmentationData {
+  snapshotCount: number;
+  snapshots: {
+    snapshotId: string;
+    eventIndex: number;
+    trigger: { kind: string } | null;
+    stateLabel: string | null;
+    stateName: string | null;
+  }[];
+  transitions: {
+    from: string;
+    to: string;
+    snapshotIndex: number;
+    eventRange: { start: number; end: number };
+    triggerKind: string | null;
+    interactionEvents: {
+      eventIndex: number;
+      type: string;
+      interaction?: string;
+      text?: string | null;
+      rrwebNodeId: number;
+      timestamp: number;
+    }[];
+  }[];
+}
+
 export function useHistory() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [events, setEvents] = useState<any[] | null>(null);
   const [eventsLoading, setEventsLoading] = useState(false);
+  const [segmentation, setSegmentation] = useState<SegmentationData | null>(null);
   const [retraining, setRetraining] = useState(false);
   const [progressMap, setProgressMap] = useState<Map<string, TrainingProgress>>(new Map());
   const initialLoadDone = useRef(false);
@@ -53,6 +80,11 @@ export function useHistory() {
       }
 
       if (status.status === "processing" || status.status === "complete" || status.status === "error") {
+        // Pick up segmentation data streamed during training
+        if (status.segmentation) {
+          setSegmentation(status.segmentation);
+        }
+
         setProgressMap((prev) => {
           const next = new Map(prev);
           const existing = prev.get(sid);
@@ -94,6 +126,7 @@ export function useHistory() {
     setSelectedSessionId(sessionId);
     setEventsLoading(true);
     setEvents(null);
+    setSegmentation(null);
     try {
       const result = await window.browserwire.loadSessionEvents(sessionId);
       if (result.ok) {
@@ -106,6 +139,15 @@ export function useHistory() {
     } finally {
       setEventsLoading(false);
     }
+    // Load segmentation separately — don't block events/player
+    try {
+      if (window.browserwire.loadSessionSegmentation) {
+        const segResult = await window.browserwire.loadSessionSegmentation(sessionId);
+        if (segResult.ok) {
+          setSegmentation(segResult.segmentation);
+        }
+      }
+    } catch { /* segmentation is optional */ }
   }, []);
 
   const retrainSession = useCallback(async (sessionId: string) => {
@@ -121,6 +163,7 @@ export function useHistory() {
   const clearSelection = useCallback(() => {
     setSelectedSessionId(null);
     setEvents(null);
+    setSegmentation(null);
   }, []);
 
   const selectedSession = sessions.find((s) => s.sessionId === selectedSessionId) || null;
@@ -132,6 +175,7 @@ export function useHistory() {
     selectedSessionId,
     events,
     eventsLoading,
+    segmentation,
     retraining,
     progressMap,
     getProgress,

@@ -17,7 +17,7 @@ export interface BrowserWireState {
   navState: NavigationState;
   loading: boolean;
   exploring: boolean;
-  snapshotCount: number;
+  sessionStatus: string;
   batches: Map<string, BatchInfo>;
   llmConfigured: boolean;
   llmProvider: string;
@@ -31,7 +31,7 @@ export function useBrowserWire() {
   const [canGoForward, setCanGoForward] = useState(false);
   const [loading, setLoading] = useState(false);
   const [exploring, setExploring] = useState(false);
-  const [snapshotCount, setSnapshotCount] = useState(0);
+  const [sessionStatus, setSessionStatus] = useState("");
   const [batches, setBatches] = useState<Map<string, BatchInfo>>(new Map());
   const [llmConfigured, setLlmConfigured] = useState(false);
   const [llmProvider, setLlmProvider] = useState("");
@@ -61,8 +61,8 @@ export function useBrowserWire() {
 
     cleanups.push(
       window.browserwire.onSessionStatus((status) => {
-        if (status.snapshotCount != null) {
-          setSnapshotCount(status.snapshotCount);
+        if (status.status) {
+          setSessionStatus(status.status);
         }
         if (status.sessionId) {
           setLastSessionId(status.sessionId);
@@ -107,11 +107,9 @@ export function useBrowserWire() {
       const result = await window.browserwire.startExploring();
       if (result.ok) {
         setExploring(true);
-        setSnapshotCount(0);
-        return result;
-      } else {
-        return result;
+        setSessionStatus("exploring");
       }
+      return result;
     } catch (err: any) {
       return { ok: false, error: err.message };
     }
@@ -120,11 +118,12 @@ export function useBrowserWire() {
   const stopExploring = useCallback(async (note?: string) => {
     try {
       const result = await window.browserwire.stopExploring(note || undefined);
-      if (result.ok) {
-        setExploring(false);
-      }
+      setExploring(false);
+      setSessionStatus(result.ok ? "processing" : "");
       return result;
     } catch (err: any) {
+      setExploring(false);
+      setSessionStatus("");
       return { ok: false, error: err.message };
     }
   }, []);
@@ -135,7 +134,7 @@ export function useBrowserWire() {
     canGoForward,
     loading,
     exploring,
-    snapshotCount,
+    sessionStatus,
     batches,
     llmConfigured,
     llmProvider,

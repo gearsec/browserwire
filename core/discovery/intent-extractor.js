@@ -17,7 +17,6 @@ import { SystemMessage, HumanMessage } from "@langchain/core/messages";
 import { getModel } from "./ai-provider.js";
 import { SnapshotIndex } from "./snapshot/snapshot-index.js";
 import { PlaywrightBrowser } from "./snapshot/playwright-browser.js";
-import { EventType } from "../recording/rrweb-constants.js";
 
 // ---------------------------------------------------------------------------
 // System prompt
@@ -81,9 +80,8 @@ export async function extractIntents({ groups, events, snapshots }) {
     seenStates.add(group.stateLabel);
 
     const snapshot = group.representative;
-    const snapshotEvent = events[snapshot.eventIndex];
 
-    if (snapshotEvent.type !== EventType.FullSnapshot || !snapshotEvent.data?.node) {
+    if (!snapshot.rrwebTree) {
       continue;
     }
 
@@ -91,10 +89,10 @@ export async function extractIntents({ groups, events, snapshots }) {
     const browser = new PlaywrightBrowser();
     try {
       await browser.ensureBrowser();
-      await browser.loadSnapshot(snapshotEvent.data.node, snapshot.url);
+      await browser.loadSnapshot(snapshot.rrwebTree, snapshot.url);
 
       const index = new SnapshotIndex({
-        rrwebSnapshot: snapshotEvent.data.node,
+        rrwebSnapshot: snapshot.rrwebTree,
         browser,
         screenshot: snapshot.screenshot || null,
         url: snapshot.url,
