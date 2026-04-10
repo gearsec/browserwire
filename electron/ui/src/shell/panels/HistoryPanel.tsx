@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { ArrowLeft, Globe, Clock, Layers, Radio, RotateCcw, Check, AlertCircle, Loader2 } from "lucide-react";
+import { ArrowLeft, Globe, Clock, Layers, RotateCcw, Check, AlertCircle } from "lucide-react";
 import rrwebPlayer from "rrweb-player";
 import "rrweb-player/dist/style.css";
 import { Alert, AlertDescription } from "../../components/ui/alert";
@@ -8,7 +8,6 @@ import { Card, CardContent } from "../../components/ui/card";
 import { Badge } from "../../components/ui/badge";
 import { Progress } from "../../components/ui/progress";
 import { ScrollArea } from "../../components/ui/scroll-area";
-import { Separator } from "../../components/ui/separator";
 import { useHistory, type SessionSummary, type TrainingProgress, type SegmentationData } from "../hooks/useHistory";
 import { MousePointerClick, Type, ChevronRight } from "lucide-react";
 
@@ -103,19 +102,11 @@ function TrainingTimeline({ progress }: { progress: TrainingProgress }) {
     );
   }
 
-  // Processing — show progress bar with snapshot info
+  // Processing — show progress bar with current tool
   return (
     <Card>
       <CardContent className="p-4 flex flex-col gap-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Loader2 className="size-4 animate-spin text-primary" />
-            <span className="text-sm font-medium">Training in progress</span>
-          </div>
-          <Badge variant="secondary" className="text-xs">
-            Snapshot {currentSnapshot || 1} of {total}
-          </Badge>
-        </div>
+        <span className="text-sm font-medium">Training in progress</span>
         <Progress value={progressValue} />
         {currentTool && (
           <p className="text-xs text-muted-foreground">
@@ -158,25 +149,12 @@ function SessionCard({
               <span>{formatDuration(session.startedAt, session.stoppedAt)}</span>
             </div>
           </div>
-          <div className="flex gap-1.5 shrink-0">
-            {isTraining ? (
-              <Badge variant="default" className="text-xs gap-1">
-                <span className="size-1.5 rounded-full bg-primary-foreground animate-pulse" />
-                Training
-              </Badge>
-            ) : (
-              <>
-                <Badge variant="secondary" className="text-xs">
-                  <Layers className="size-3 mr-1" />
-                  {session.snapshotCount}
-                </Badge>
-                <Badge variant="outline" className="text-xs">
-                  <Radio className="size-3 mr-1" />
-                  {session.eventCount}
-                </Badge>
-              </>
-            )}
-          </div>
+          {isTraining && (
+            <Badge variant="default" className="text-xs gap-1 shrink-0">
+              <span className="size-1.5 rounded-full bg-primary-foreground animate-pulse" />
+              Training
+            </Badge>
+          )}
         </div>
       </CardContent>
     </Card>
@@ -262,6 +240,7 @@ function SegmentationTimeline({
   events,
   sessionId,
   activeSnapshotIndex,
+  debug,
   onSeekToSnapshot,
   onSeekToEvent,
 }: {
@@ -269,6 +248,7 @@ function SegmentationTimeline({
   events: any[];
   sessionId: string;
   activeSnapshotIndex: number | null;
+  debug?: boolean;
   onSeekToSnapshot: (idx: number) => void;
   onSeekToEvent: (eventIndex: number) => void;
 }) {
@@ -294,7 +274,7 @@ function SegmentationTimeline({
 
   return (
     <div className="flex flex-col gap-2">
-      <div className="text-xs font-medium text-muted-foreground">Segmentation Timeline</div>
+      <div className="text-xs font-medium text-muted-foreground">Page Flow</div>
       <div className="flex flex-col gap-1">
         {segmentation.snapshots.map((snap, i) => {
           const thumb = thumbnails.get(snap.snapshotId);
@@ -321,17 +301,18 @@ function SegmentationTimeline({
                 )}
                 <div className="min-w-0 flex-1">
                   <div className="text-xs font-medium truncate flex items-center gap-1">
-                    {snap.stateLabel && (
+                    {debug && snap.stateLabel && (
                       <Badge variant="secondary" className="text-[10px] py-0 shrink-0">
                         {snap.stateLabel}
                       </Badge>
                     )}
                     {snap.stateName || snap.snapshotId}
                   </div>
-                  <div className="text-[10px] text-muted-foreground">
-                    {snap.snapshotId} · event #{snap.eventIndex}
-                    {snap.trigger && ` · ${snap.trigger.kind}`}
-                  </div>
+                  {debug && (
+                    <div className="text-[10px] text-muted-foreground">
+                      {snap.snapshotId} · event #{snap.eventIndex}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -381,6 +362,11 @@ function ReplayView({
   const containerRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<any>(null);
   const [activeSnapshotIndex, setActiveSnapshotIndex] = useState<number | null>(null);
+  const [debug, setDebug] = useState(false);
+
+  useEffect(() => {
+    window.browserwire.getSettings().then((s) => setDebug(!!s.debug)).catch(() => {});
+  }, []);
 
   const seekToSnapshot = (snapIndex: number) => {
     const player = playerRef.current;
@@ -462,7 +448,7 @@ function ReplayView({
         <div className="min-w-0 flex-1">
           <div className="text-sm font-medium truncate">{session.origin}</div>
           <div className="text-xs text-muted-foreground">
-            {formatDate(session.startedAt)} · {session.snapshotCount} snapshots · {session.eventCount} events
+            {formatDate(session.startedAt)} · {formatDuration(session.startedAt, session.stoppedAt)}
           </div>
         </div>
         <Button
@@ -513,6 +499,7 @@ function ReplayView({
               events={events}
               sessionId={session.sessionId}
               activeSnapshotIndex={activeSnapshotIndex}
+              debug={debug}
               onSeekToSnapshot={seekToSnapshot}
               onSeekToEvent={seekToEvent}
             />
@@ -592,7 +579,10 @@ export function HistoryPanel({
             sessions={history.sessions}
             loading={history.loading}
             getProgress={history.getProgress}
-            onSelect={history.selectSession}
+            onSelect={(sessionId) => {
+              window.browserwire.trackEvent("session_viewed", { sessionId });
+              history.selectSession(sessionId);
+            }}
           />
         </div>
       </ScrollArea>

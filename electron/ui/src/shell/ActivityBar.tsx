@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Compass, Play, History, Settings } from "lucide-react";
+import { Home, Compass, Play, History, Settings } from "lucide-react";
 import { cn } from "../lib/utils";
 import type { Mode } from "./hooks/useLayout";
 
@@ -10,6 +10,7 @@ interface ActivityBarProps {
 }
 
 const TOP_ITEMS: { mode: Mode; icon: typeof Compass; label: string }[] = [
+  { mode: "dashboard", icon: Home, label: "Home" },
   { mode: "discovery", icon: Compass, label: "Discovery" },
   { mode: "execution", icon: Play, label: "API Explorer" },
   { mode: "history", icon: History, label: "History" },
@@ -28,7 +29,6 @@ export function ActivityBar({ activeMode, rightPanelOpen, onSwitchMode }: Activi
 
       {/* Actual bar — positioned absolutely so it overlays content on expand */}
       <div
-        data-tour="activity-bar"
         className={cn(
           "absolute top-0 left-0 bottom-0 z-40 bg-background border-r border-border flex flex-col py-2 gap-1 shrink-0 transition-[width] duration-200 ease-in-out overflow-hidden",
           hovered ? "w-40" : "w-12"
@@ -39,7 +39,6 @@ export function ActivityBar({ activeMode, rightPanelOpen, onSwitchMode }: Activi
         {TOP_ITEMS.map(({ mode, icon: Icon, label }) => (
           <button
             key={mode}
-            data-tour={`${mode}-mode`}
             onClick={() => onSwitchMode(mode)}
             className={cn(
               "mx-1 h-10 flex items-center gap-3 rounded-md transition-colors px-2.5",
@@ -64,7 +63,6 @@ export function ActivityBar({ activeMode, rightPanelOpen, onSwitchMode }: Activi
 
         {/* Settings pinned to bottom */}
         <button
-          data-tour="settings-mode"
           onClick={() => onSwitchMode("settings")}
           className={cn(
             "mx-1 h-10 flex items-center gap-3 rounded-md transition-colors px-2.5",

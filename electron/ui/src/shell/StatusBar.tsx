@@ -1,15 +1,14 @@
 import React from "react";
-import { HelpCircle } from "lucide-react";
+import { BookOpen } from "lucide-react";
 
 interface StatusBarProps {
   port: number;
   portOk: boolean;
-  onStartTour?: () => void;
 }
 
-export function StatusBar({ port, portOk, onStartTour }: StatusBarProps) {
+export function StatusBar({ port, portOk }: StatusBarProps) {
   return (
-    <div data-tour="status-bar" className="h-6 bg-background border-t border-border flex items-center px-3 shrink-0 text-xs">
+    <div className="h-6 bg-background border-t border-border flex items-center px-3 shrink-0 text-xs">
       <span className="inline-flex items-center gap-1.5">
         <span
           className={`size-1.5 rounded-full ${portOk ? "bg-primary" : "bg-destructive"}`}
@@ -21,15 +20,13 @@ export function StatusBar({ port, portOk, onStartTour }: StatusBarProps) {
 
       <div className="flex-1" />
 
-      {onStartTour && (
-        <button
-          onClick={onStartTour}
-          className="text-muted-foreground hover:text-foreground transition-colors"
-          title="Replay tour"
-        >
-          <HelpCircle className="size-3.5" />
-        </button>
-      )}
+      <button
+        onClick={() => window.browserwire.openDocs()}
+        className="text-muted-foreground hover:text-foreground transition-colors"
+        title="Open docs"
+      >
+        <BookOpen className="size-3.5" />
+      </button>
     </div>
   );
 }

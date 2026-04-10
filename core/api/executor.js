@@ -7,55 +7,64 @@
  *
  * Transport-agnostic — receives a Playwright page from the caller.
  *
- * Page settling uses the same approach as the capture pipeline:
- * wait for network idle AND DOM mutations to stop (debounced).
+ * Page settling uses a DOM MutationObserver to detect when the page
+ * has finished rendering (DOM stops mutating).
  */
 
 import { parseTemplate } from "url-template";
 
 const ACTION_TIMEOUT_MS = 30_000;
+const CODE_TIMEOUT_MS = 3_000; // Short timeout for view/action code — selectors should match fast
 
 /**
- * Wait for the page to settle: network requests complete + DOM stops mutating.
+ * Wait for the page to settle: DOM stops mutating.
  *
- * Uses a MutationObserver inside the page to detect when the DOM stabilizes.
- * Waits until both conditions are true for the debounce period.
+ * Uses a MutationObserver to detect when the DOM stabilizes after a
+ * debounce period with no mutations. A max timeout acts as a safety net
+ * for pages with constant DOM mutations (animations, live tickers).
+ *
+ * Does NOT wait for network idle — modern SPAs (Reddit, etc.) maintain
+ * persistent connections, analytics pings, and background fetches that
+ * prevent network idle from ever being reached.
  *
  * @param {import('playwright').Page} page
  * @param {{ timeout?: number, debounce?: number }} [opts]
  */
-async function waitForSettle(page, { timeout = 15_000, debounce = 500 } = {}) {
+async function waitForSettle(page, { timeout = 5_000, debounce = 300 } = {}) {
   try {
-    // Wait for network idle first
-    await page.waitForLoadState("networkidle", { timeout });
-  } catch {
-    // Timeout is ok — some pages never reach full network idle
-  }
-
-  // Then wait for DOM mutations to stop (debounced)
-  try {
-    await page.evaluate((debounceMs) => {
+    await page.evaluate(({ timeoutMs, debounceMs }) => {
       return new Promise((resolve) => {
         let timer = null;
         const observer = new MutationObserver(() => {
           if (timer) clearTimeout(timer);
           timer = setTimeout(() => {
+            clearTimeout(maxTimer);
             observer.disconnect();
             resolve();
           }, debounceMs);
         });
+
+        // Safety net: resolve after max timeout even if DOM keeps mutating
+        const maxTimer = setTimeout(() => {
+          if (timer) clearTimeout(timer);
+          observer.disconnect();
+          resolve();
+        }, timeoutMs);
+
         observer.observe(document.documentElement, {
           childList: true,
           subtree: true,
           attributes: true,
         });
+
         // Start the timer immediately — if no mutations happen, settle quickly
         timer = setTimeout(() => {
+          clearTimeout(maxTimer);
           observer.disconnect();
           resolve();
         }, debounceMs);
       });
-    }, debounce);
+    }, { timeoutMs: timeout, debounceMs: debounce });
   } catch {
     // Page may have navigated during evaluation
   }
@@ -141,8 +150,11 @@ export async function executeRoute({ page, manifest, route, inputs, origin }) {
       console.log(`[browserwire-exec] action: ${step.actionName} on ${state.name}`);
 
       try {
+        page.setDefaultTimeout(CODE_TIMEOUT_MS);
         await runCode(page, action.code, actionInputs);
+        page.setDefaultTimeout(ACTION_TIMEOUT_MS);
       } catch (err) {
+        page.setDefaultTimeout(ACTION_TIMEOUT_MS);
         return {
           ok: false,
           error: `Action "${step.actionName}" failed: ${err.message}`,
@@ -150,7 +162,7 @@ export async function executeRoute({ page, manifest, route, inputs, origin }) {
         };
       }
 
-      await waitForSettle(page);
+      await waitForSettle(page, { timeout: 3_000, debounce: 200 });
       executedSteps.push(`action:${step.actionName}`);
     }
 
@@ -173,8 +185,11 @@ export async function executeRoute({ page, manifest, route, inputs, origin }) {
         console.log(`[browserwire-exec] workflow step: ${step.actionName} on ${targetState.name}`);
 
         try {
+          page.setDefaultTimeout(CODE_TIMEOUT_MS);
           await runCode(page, action.code, actionInputs);
+          page.setDefaultTimeout(ACTION_TIMEOUT_MS);
         } catch (err) {
+          page.setDefaultTimeout(ACTION_TIMEOUT_MS);
           return {
             ok: false,
             error: `Workflow action "${step.actionName}" failed: ${err.message}`,
@@ -182,7 +197,7 @@ export async function executeRoute({ page, manifest, route, inputs, origin }) {
           };
         }
 
-        await waitForSettle(page);
+        await waitForSettle(page, { timeout: 3_000, debounce: 200 });
         executedSteps.push(`action:${step.actionName}`);
       }
 
@@ -197,11 +212,14 @@ export async function executeRoute({ page, manifest, route, inputs, origin }) {
 
       console.log(`[browserwire-exec] reading view: ${route.name} on ${targetState.name}`);
       try {
+        page.setDefaultTimeout(CODE_TIMEOUT_MS);
         const data = await runCode(page, view.code);
+        page.setDefaultTimeout(ACTION_TIMEOUT_MS);
         console.log(`[browserwire-exec] view result: type=${typeof data}, isArray=${Array.isArray(data)}, length=${Array.isArray(data) ? data.length : 'n/a'}`);
         executedSteps.push(`view:${route.name}`);
         return { ok: true, data, state: targetState.name, steps: executedSteps };
       } catch (err) {
+        page.setDefaultTimeout(ACTION_TIMEOUT_MS);
         console.error(`[browserwire-exec] view error:`, err);
         return { ok: false, error: `View "${route.name}" failed: ${err.message}`, steps: executedSteps };
       }
@@ -214,10 +232,13 @@ export async function executeRoute({ page, manifest, route, inputs, origin }) {
       const actionInputs = pickInputs(inputs, action.inputs);
       console.log(`[browserwire-exec] executing action: ${route.name} on ${targetState.name}`);
       try {
+        page.setDefaultTimeout(CODE_TIMEOUT_MS);
         await runCode(page, action.code, actionInputs);
+        page.setDefaultTimeout(ACTION_TIMEOUT_MS);
         executedSteps.push(`action:${route.name}`);
         return { ok: true, state: targetState.name, steps: executedSteps };
       } catch (err) {
+        page.setDefaultTimeout(ACTION_TIMEOUT_MS);
         return { ok: false, error: `Action "${route.name}" failed: ${err.message}`, steps: executedSteps };
       }
     }

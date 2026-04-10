@@ -5,7 +5,7 @@
  * browser pane, and wires IPC between the shell UI and the capture pipeline.
  */
 
-import { app, BrowserWindow, BrowserView, ipcMain, session, Menu, safeStorage, dialog } from "electron";
+import { app, BrowserWindow, BrowserView, ipcMain, session, Menu, safeStorage, dialog, shell } from "electron";
 import { createServer } from "node:http";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +19,7 @@ import { createHttpHandler } from "../core/api/router.js";
 import { createSessionBridge } from "./capture/session-bridge.js";
 import { executeViaElectron, setCDPPort } from "./capture/execution-bridge.js";
 import { initUpdater } from "./updater.js";
+import { initPostHog, trackEvent, shutdownPostHog } from "./posthog.js";
 
 const CDP_PORT = 9223;
 app.commandLine.appendSwitch("remote-debugging-port", String(CDP_PORT));
@@ -34,6 +35,7 @@ let sessionBridge = null;
 let httpServer = null;
 let activePort = 8787;
 let portOk = false;
+let analyticsId = null;
 
 // ─── Layout Constants ─────────────────────────────────────────────────────────
 
@@ -112,6 +114,17 @@ const buildAppMenu = () => {
         { role: "front" },
       ],
     },
+    {
+      label: "Help",
+      submenu: [
+        {
+          label: "BrowserWire Docs",
+          click: () => {
+            shell.openExternal("https://docs.browserwire.io/");
+          },
+        },
+      ],
+    },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 };
@@ -158,6 +171,36 @@ const startApp = async () => {
   const { initTelemetry } = await import("../core/telemetry.js");
   await initTelemetry();
 
+  // Load .env for local dev (build-time key takes precedence)
+  try {
+    const envPath = resolve(dirname(fileURLToPath(import.meta.url)), "../.env");
+    if (existsSync(envPath)) {
+      for (const line of readFileSync(envPath, "utf8").split("\n")) {
+        const match = line.match(/^\s*([^#=]+?)\s*=\s*(.*)\s*$/);
+        if (match && !process.env[match[1]]) process.env[match[1]] = match[2];
+      }
+    }
+  } catch { /* ignore */ }
+
+  // Initialize PostHog analytics (no-op if no POSTHOG_API_KEY)
+  const fc = readConfigFile();
+  analyticsId = fc.analyticsId;
+  if (!analyticsId) {
+    analyticsId = crypto.randomUUID();
+    writeConfigFile({ ...fc, analyticsId });
+  }
+  initPostHog(analyticsId);
+  trackEvent("app_launched", { version: app.getVersion() });
+
+  // Register early — preload calls sendSync before wireIPC() runs
+  ipcMain.on("browserwire:get-posthog-config", (event) => {
+    event.returnValue = {
+      apiKey: process.env.POSTHOG_API_KEY || "",
+      host: process.env.POSTHOG_HOST || "https://us.i.posthog.com",
+      distinctId: analyticsId || "",
+    };
+  });
+
   const host = config.host || "127.0.0.1";
   const port = config.port || 8787;
 
@@ -175,7 +218,10 @@ const startApp = async () => {
   const httpHandler = createHttpHandler({
     getManifestBySlug: (slug) => sessionManager.getManifestBySlug(slug),
     listSites: () => sessionManager.listSites(),
-    execute: (opts) => executeViaElectron({ ...opts, parentWindow: mainWindow }),
+    execute: (opts) => {
+      trackEvent("api_executed", { route_type: opts.route?.type, site: opts.route?.stateName });
+      return executeViaElectron({ ...opts, parentWindow: mainWindow });
+    },
     host,
     port,
   });
@@ -373,6 +419,10 @@ const wireIPC = () => {
     browserView?.webContents.reload();
   });
 
+  ipcMain.on("browserwire:open-docs", () => {
+    shell.openExternal("https://docs.browserwire.io/");
+  });
+
   // Layout reporting from renderer
   ipcMain.on("browserwire:layout-changed", (_event, state) => {
     rightPanelOpen = state.rightPanelOpen;
@@ -385,11 +435,18 @@ const wireIPC = () => {
     layoutBrowserView();
   });
 
+  // Analytics — forward renderer events to PostHog
+  ipcMain.on("browserwire:track-event", (_event, name, properties) => {
+    trackEvent(name, properties || {});
+  });
+
+
   // Discovery session
   ipcMain.handle("browserwire:start-exploring", async () => {
     if (!sessionBridge) return { ok: false, error: "Not initialized" };
     try {
       const result = await sessionBridge.startExploring();
+      trackEvent("session_started", { origin: sessionBridge.currentUrl || "" });
       return { ok: true, ...result };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -400,6 +457,7 @@ const wireIPC = () => {
     if (!sessionBridge) return { ok: false, error: "Not initialized" };
     try {
       await sessionBridge.stopExploring(note);
+      trackEvent("session_stopped");
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -466,6 +524,7 @@ const wireIPC = () => {
         mainWindow.webContents.send(channel, data);
       }
     };
+    trackEvent("session_retrained", { sessionId });
     try {
       await sessionManager.reprocessSession(sessionId, {
         onStatus: (status) => {
@@ -474,6 +533,7 @@ const wireIPC = () => {
             send("browserwire:log", `${status.tool}`);
           }
           if (status.status === "complete") {
+            trackEvent("session_trained", { sessionId, toolCalls: status.totalToolCalls || 0 });
             send("browserwire:session-status", { sessionId, status: "finalized" });
             send("browserwire:log",
               `Retrain ${sessionId}: complete (${status.totalToolCalls || 0} tool calls)`
@@ -503,12 +563,14 @@ const wireIPC = () => {
       providerDefaults: PROVIDER_DEFAULTS,
       port: activePort,
       portOk,
+      debug: !!cfg.debug,
       hasLangsmithKey: !!(cfg.langsmithApiKey || file.langsmithApiKeyEncrypted),
       langsmithProject: file.langsmithProject || "",
     };
   });
 
   ipcMain.handle("browserwire:save-settings", async (_event, settings) => {
+    trackEvent("settings_saved", { provider: settings.provider });
     try {
       const fileFields = {};
 
@@ -605,8 +667,9 @@ const wireIPC = () => {
 
 app.whenReady().then(startApp);
 
-app.on("window-all-closed", () => {
+app.on("window-all-closed", async () => {
   if (httpServer) httpServer.close();
+  await shutdownPostHog();
   app.quit();
 });
 

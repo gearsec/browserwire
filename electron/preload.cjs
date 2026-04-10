@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld("browserwire", {
   goBack: () => ipcRenderer.send("browserwire:go-back"),
   goForward: () => ipcRenderer.send("browserwire:go-forward"),
   reload: () => ipcRenderer.send("browserwire:reload"),
+  openDocs: () => ipcRenderer.send("browserwire:open-docs"),
 
   // Discovery session
   startExploring: () => ipcRenderer.invoke("browserwire:start-exploring"),
@@ -40,6 +41,10 @@ contextBridge.exposeInMainWorld("browserwire", {
   // Layout reporting
   reportLayout: (state) => ipcRenderer.send("browserwire:layout-changed", state),
   reportNavbarHover: (expanded) => ipcRenderer.send("browserwire:navbar-hover", expanded),
+
+  // Analytics
+  trackEvent: (event, properties) => ipcRenderer.send("browserwire:track-event", event, properties),
+  posthogConfig: ipcRenderer.sendSync("browserwire:get-posthog-config"),
 
   // Listeners
   onUrlChanged: (callback) => {
