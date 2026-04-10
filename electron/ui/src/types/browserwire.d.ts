@@ -28,6 +28,7 @@ interface Settings {
   baseUrl: string;
   hasApiKey: boolean;
   llmConfigured: boolean;
+  debug?: boolean;
   providerDefaults: Record<string, { model: string; baseUrl: string }>;
 }
 
@@ -77,6 +78,7 @@ interface BrowserWireAPI {
   goBack: () => void;
   goForward: () => void;
   reload: () => void;
+  openDocs: () => void;
   startExploring: () => Promise<StartResult>;
   stopExploring: (note?: string) => Promise<{ ok: boolean; error?: string }>;
   listSessions: () => Promise<SessionRecordingMeta[]>;
@@ -88,6 +90,8 @@ interface BrowserWireAPI {
   saveSettings: (settings: SaveSettingsPayload) => Promise<{ ok: boolean; llmConfigured?: boolean; error?: string }>;
   reportLayout: (state: LayoutState) => void;
   reportNavbarHover: (expanded: boolean) => void;
+  trackEvent: (event: string, properties?: Record<string, any>) => void;
+  posthogConfig: { apiKey: string; host: string; distinctId: string };
   onUrlChanged: (callback: (url: string) => void) => () => void;
   onSessionStatus: (callback: (status: SessionStatus) => void) => () => void;
   onBatchStatus: (callback: (status: BatchStatus) => void) => () => void;

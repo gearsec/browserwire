@@ -40,7 +40,6 @@ export function Topbar({ url, canGoBack, canGoForward, loading }: TopbarProps) {
 
   return (
     <div
-      data-tour="url-bar"
       className="h-12 bg-background border-b border-border flex items-center px-3 gap-2 shrink-0"
       style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
     >

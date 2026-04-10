@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Loader2,
   ChevronRight,
@@ -262,7 +262,13 @@ function SiteDetailView({
   );
 }
 
-export function ExecutionPanel() {
+export function ExecutionPanel({
+  autoSelectSlug,
+  onAutoSelectConsumed,
+}: {
+  autoSelectSlug?: string | null;
+  onAutoSelectConsumed?: () => void;
+} = {}) {
   const {
     sites,
     endpoints,
@@ -271,10 +277,20 @@ export function ExecutionPanel() {
     executeEndpoint,
   } = useExecution();
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
+  const autoSelectHandled = useRef(false);
 
   useEffect(() => {
     sites.forEach((s) => ensureOpenApiSpec(s.slug));
   }, [sites, ensureOpenApiSpec]);
+
+  // Auto-select site when navigated from dashboard
+  useEffect(() => {
+    if (autoSelectSlug && !autoSelectHandled.current && !loadingSites) {
+      autoSelectHandled.current = true;
+      setSelectedSlug(autoSelectSlug);
+      onAutoSelectConsumed?.();
+    }
+  }, [autoSelectSlug, loadingSites]);
 
   if (loadingSites) {
     return (

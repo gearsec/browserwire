@@ -53,7 +53,7 @@ Field rules:
  * @param {Array} options.events — full rrweb event stream
  * @returns {Promise<{ groups: ConsolidatedGroup[], stateCount: number }>}
  */
-export async function classifyAndConsolidate({ snapshots, events }) {
+export async function classifyAndConsolidate({ snapshots, events, onProgress }) {
   let model;
   try {
     model = getModel();
@@ -70,6 +70,7 @@ export async function classifyAndConsolidate({ snapshots, events }) {
     model,
     snapshots,
     systemPrompt: CLASSIFIER_PROMPT,
+    onProgress,
   });
 
   const { assignments, knownStates } = await invoke();

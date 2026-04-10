@@ -72,7 +72,11 @@ export async function processRecording({ recording, onProgress, sessionId }) {
 
   // ── Pass 1: Classify snapshots into states ──
   console.log(`[browserwire] ── Pass 1: Classification ──`);
-  const { groups } = await classifyAndConsolidate({ snapshots, events });
+  const { groups } = await classifyAndConsolidate({
+    snapshots,
+    events,
+    onProgress: onProgress ? ({ snapshot }) => onProgress({ phase: "classification", tool: `Classifying snapshot ${snapshot}/${snapshots.length}` }) : undefined,
+  });
   const consolidatedSnapshots = groups.map((g) => g.representative);
 
   // Emit segmentation with state labels as soon as classifier is done

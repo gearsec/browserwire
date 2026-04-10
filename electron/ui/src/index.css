@@ -44,18 +44,3 @@
     cursor: pointer;
   }
 }
-
-/* Product tour highlight ring — amber */
-.tour-highlight {
-  position: relative;
-  outline: 2px solid oklch(0.72 0.15 70);
-  outline-offset: 2px;
-  border-radius: var(--radius-md);
-  animation: tour-pulse 1.5s ease-in-out infinite;
-  z-index: 45;
-}
-
-@keyframes tour-pulse {
-  0%, 100% { outline-color: oklch(0.72 0.15 70); }
-  50% { outline-color: oklch(0.72 0.15 70 / 0.4); }
-}

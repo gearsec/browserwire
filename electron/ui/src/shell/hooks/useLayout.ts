@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from "react";
 
-export type Mode = "discovery" | "execution" | "history" | "settings";
+export type Mode = "dashboard" | "discovery" | "execution" | "history" | "settings";
 
 export interface LayoutState {
   activeMode: Mode;
@@ -8,7 +8,7 @@ export interface LayoutState {
 }
 
 export function useLayout() {
-  const [activeMode, setActiveMode] = useState<Mode>("discovery");
+  const [activeMode, setActiveMode] = useState<Mode>("dashboard");
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
 
   const switchMode = useCallback((mode: Mode) => {
@@ -17,6 +17,7 @@ export function useLayout() {
       setRightPanelOpen(false);
     } else {
       setActiveMode(mode);
+      window.browserwire.trackEvent("mode_switched", { mode });
       if (mode === "discovery") {
         setRightPanelOpen(true);
       }

@@ -23,6 +23,7 @@ export const getModel = () => {
         model: cfg.llmModel,
         apiKey: cfg.llmApiKey,
         temperature: 0.3,
+        timeout: 120_000,
         ...(cfg.llmBaseUrl ? { configuration: { baseURL: cfg.llmBaseUrl } } : {}),
       });
 
@@ -31,6 +32,7 @@ export const getModel = () => {
         model: cfg.llmModel,
         apiKey: cfg.llmApiKey,
         temperature: 0.3,
+        clientOptions: { timeout: 120_000 },
       });
 
     case "gemini":
@@ -45,6 +47,7 @@ export const getModel = () => {
         model: cfg.llmModel,
         apiKey: "ollama",
         temperature: 0.3,
+        timeout: 120_000,
         configuration: { baseURL: cfg.llmBaseUrl || "http://localhost:11434/v1" },
       });
 

@@ -112,13 +112,29 @@ export function createClassifierGraph({
 
     const humanMsg = new HumanMessage({ content });
 
+    // Compact: strip images from older messages, keep only the current screenshot
+    const compactedMessages = state.messages.map((msg) => {
+      if (msg._getType?.() !== "human") return msg;
+      if (!Array.isArray(msg.content)) return msg;
+      const hasImage = msg.content.some((c) => c.type === "image_url");
+      if (!hasImage) return msg;
+      return new HumanMessage({
+        content: msg.content.map((c) =>
+          c.type === "image_url" ? { type: "text", text: "[screenshot — see classification above]" } : c
+        ),
+      });
+    });
+
     // Invoke model with structured output + raw response for conversation history
     let json;
     let response;
     const modelWithOutput = model.withStructuredOutput(ClassifyResultSchema, { includeRaw: true });
 
+    console.log(`[browserwire] classifier: classifying snapshot ${i + 1}/${snapshots.length}...`);
     try {
-      const result = await modelWithOutput.invoke([...state.messages, humanMsg]);
+      const result = await modelWithOutput.invoke([...compactedMessages, humanMsg], {
+        signal: AbortSignal.timeout(90_000),
+      });
       json = result.parsed;
       response = result.raw;
     } catch (err) {
