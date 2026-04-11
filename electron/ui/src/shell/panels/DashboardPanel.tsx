@@ -113,7 +113,13 @@ function SessionRow({
           </span>
         </div>
       </div>
-      <Check className="size-4 text-green-500 shrink-0" />
+      {session.trainingStatus === "training" ? (
+        <Loader2 className="size-4 animate-spin text-primary shrink-0" />
+      ) : session.trainingStatus === "error" ? (
+        <AlertCircle className="size-4 text-destructive shrink-0" />
+      ) : (
+        <Check className="size-4 text-green-500 shrink-0" />
+      )}
     </button>
   );
 }

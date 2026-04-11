@@ -15,9 +15,10 @@
  * }
  */
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile, unlink } from "node:fs/promises";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
+import { readdirSync, existsSync } from "node:fs";
 import { ManifestStore } from "./manifest-store.js";
 import { validateRecording } from "./recording/index.js";
 import { processRecording } from "./discovery/session-processor.js";
@@ -34,6 +35,48 @@ export class SessionManager {
 
     /** origin → manifest (in-memory cache) */
     this.siteManifests = new Map();
+  }
+
+  // ── Training status persistence ──
+
+  async _writeTrainingStatus(sessionDir, data) {
+    await writeFile(resolve(sessionDir, "training-status.json"), JSON.stringify(data, null, 2), "utf8");
+  }
+
+  async _deleteTrainingStatus(sessionDir) {
+    try { await unlink(resolve(sessionDir, "training-status.json")); } catch {}
+  }
+
+  async _readTrainingStatus(sessionDir) {
+    try { return JSON.parse(await readFile(resolve(sessionDir, "training-status.json"), "utf8")); }
+    catch { return null; }
+  }
+
+  /**
+   * Get training status for all sessions that have a training-status.json.
+   * @returns {Promise<Record<string, object>>} sessionId → status object
+   */
+  async getTrainingStatus() {
+    const logsDir = resolve(homedir(), ".browserwire", "logs");
+    const result = {};
+    if (!existsSync(logsDir)) return result;
+    for (const entry of readdirSync(logsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith("session-")) continue;
+      const status = await this._readTrainingStatus(resolve(logsDir, entry.name));
+      if (status) result[entry.name.replace("session-", "")] = status;
+    }
+    return result;
+  }
+
+  /**
+   * Get session IDs where training was interrupted (status === "training" on disk but no active process).
+   * @returns {Promise<string[]>}
+   */
+  async getInterruptedSessions() {
+    const all = await this.getTrainingStatus();
+    return Object.entries(all)
+      .filter(([, s]) => s.status === "training")
+      .map(([id]) => id);
   }
 
   /**
@@ -136,6 +179,7 @@ export class SessionManager {
     const sessionDir = resolve(homedir(), ".browserwire", `logs/session-${sessionId}`);
     const snapshotCount = recording.snapshots?.length || 0;
 
+    await this._writeTrainingStatus(sessionDir, { status: "training", startedAt: new Date().toISOString(), snapshot: 0, snapshotCount });
     onStatus({ sessionId, status: "processing", snapshotCount });
 
     try {
@@ -147,6 +191,7 @@ export class SessionManager {
             await writeFile(resolve(sessionDir, "segmentation.json"), JSON.stringify(segData, null, 2), "utf8");
             onStatus({ sessionId, status: "processing", segmentation: segData, snapshotCount });
           }
+          await this._writeTrainingStatus(sessionDir, { status: "training", snapshot, snapshotCount, tool });
           onStatus({ sessionId, status: "processing", snapshot, tool, snapshotCount });
         },
       });
@@ -166,9 +211,11 @@ export class SessionManager {
         }
       }
 
+      await this._deleteTrainingStatus(sessionDir);
       onStatus({ sessionId, status: "complete", totalToolCalls, snapshotCount });
     } catch (err) {
       console.error(`[browserwire] processing failed:`, err.message);
+      await this._writeTrainingStatus(sessionDir, { status: "error", error: err.message });
       onStatus({ sessionId, status: "error", error: err.message, snapshotCount });
     }
   }
@@ -237,6 +284,7 @@ export class SessionManager {
 
     const snapshotCount = snapshots.length;
     console.log(`[browserwire] reprocessing session ${sessionId} (${snapshotCount} snapshots)`);
+    await this._writeTrainingStatus(sessionDir, { status: "training", startedAt: new Date().toISOString(), snapshot: 0, snapshotCount });
     onStatus({ sessionId, status: "processing", snapshotCount });
 
     try {
@@ -248,6 +296,7 @@ export class SessionManager {
             await writeFile(resolve(sessionDir, "segmentation.json"), JSON.stringify(segData, null, 2), "utf8");
             onStatus({ sessionId, status: "processing", segmentation: segData, snapshotCount });
           }
+          await this._writeTrainingStatus(sessionDir, { status: "training", snapshot, snapshotCount, tool });
           onStatus({ sessionId, status: "processing", snapshot, tool, snapshotCount });
         },
       });
@@ -267,9 +316,11 @@ export class SessionManager {
         }
       }
 
+      await this._deleteTrainingStatus(sessionDir);
       onStatus({ sessionId, status: "complete", totalToolCalls, snapshotCount });
     } catch (err) {
       console.error(`[browserwire] reprocessing failed:`, err.message);
+      await this._writeTrainingStatus(sessionDir, { status: "error", error: err.message });
       onStatus({ sessionId, status: "error", error: err.message, snapshotCount });
     }
   }

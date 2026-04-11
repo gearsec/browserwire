@@ -74,15 +74,33 @@ function isMetaFollowedByFullSnapshot(events, index) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Collect node IDs that received a MouseInteraction.Focus event.
+ * Used to distinguish real user-focused fields from programmatic input
+ * (e.g. analytics scripts writing to hidden fields).
+ */
+function collectFocusedNodeIds(events) {
+  const focused = new Set();
+  for (const event of events) {
+    if (isFocus(event)) focused.add(event.data.id);
+  }
+  return focused;
+}
+
+/**
  * Walk the event stream and return user action trigger indexes.
  *
  * Triggers: Click, DblClick, Touch, ContextMenu, Navigation,
  * and first Input on a new element (detects typing in auto-focused fields).
  *
+ * Input events are only triggers if the node previously received a Focus
+ * event — this filters out programmatic writes by analytics scripts
+ * (e.g. Facebook Pixel) that set hidden field values without user focus.
+ *
  * @param {object[]} events - Array of rrweb events
+ * @param {Set<number>} focusedNodeIds - Node IDs that received Focus events
  * @returns {{ index: number, kind: string }[]}
  */
-function detectTriggers(events) {
+function detectTriggers(events, focusedNodeIds) {
   const triggers = [];
   let seenInitialNavigation = false;
   let lastInteractionNodeId = null;
@@ -105,6 +123,8 @@ function detectTriggers(events) {
     } else if (isInputOnNewElement(event, lastInteractionNodeId)) {
       // First Input on a different element than the last click/input target.
       // Detects typing in auto-focused or tab-focused fields.
+      // Skip programmatic inputs (analytics scripts) — only count if user focused the field.
+      if (!focusedNodeIds.has(event.data.id)) continue;
       triggers.push({ index: i, kind: "type" });
       lastInteractionNodeId = event.data.id;
     } else if (isMetaFollowedByFullSnapshot(events, i)) {
@@ -161,7 +181,8 @@ export function segmentEvents(events) {
     return { triggers: [], snapshots: [] };
   }
 
-  const triggers = detectTriggers(events);
+  const focusedNodeIds = collectFocusedNodeIds(events);
+  const triggers = detectTriggers(events, focusedNodeIds);
 
   if (triggers.length === 0) {
     return {

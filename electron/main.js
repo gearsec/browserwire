@@ -211,6 +211,19 @@ const startApp = async () => {
   sessionManager = new SessionManager(new ManifestStore(), { host, port });
   await sessionManager.loadManifests();
 
+  // Auto-resume interrupted training sessions
+  const interrupted = await sessionManager.getInterruptedSessions();
+  for (const sessionId of interrupted) {
+    console.log(`[browserwire] resuming interrupted training: ${sessionId}`);
+    sessionManager.reprocessSession(sessionId, {
+      onStatus: (status) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("browserwire:session-status", { sessionId, ...status });
+        }
+      },
+    });
+  }
+
   // Configure CDP port for execution bridge
   setCDPPort(CDP_PORT);
 
@@ -391,7 +404,11 @@ const sendNavigationUpdate = () => {
 
 // ─── IPC Wiring ──────────────────────────────────────────────────────────────
 
+let ipcWired = false;
+
 const wireIPC = () => {
+  if (ipcWired) return;
+  ipcWired = true;
   // Navigation
   ipcMain.on("browserwire:navigate", (_event, url) => {
     if (!browserView) return;
@@ -477,12 +494,21 @@ const wireIPC = () => {
       if (!existsSync(metaPath)) continue;
       try {
         const meta = JSON.parse(readFileSync(metaPath, "utf8"));
-        sessions.push(meta);
+        let trainingStatus = null;
+        const tsPath = resolve(sessionDir, "training-status.json");
+        if (existsSync(tsPath)) {
+          try { trainingStatus = JSON.parse(readFileSync(tsPath, "utf8")).status; } catch {}
+        }
+        sessions.push({ ...meta, trainingStatus, snapshots: meta.snapshots ?? [] });
       } catch { /* skip corrupt files */ }
     }
     // Sort by startedAt descending (most recent first)
     sessions.sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || ""));
     return sessions;
+  });
+
+  ipcMain.handle("browserwire:get-training-status", async () => {
+    return sessionManager.getTrainingStatus();
   });
 
   ipcMain.handle("browserwire:load-session-events", async (_event, sessionId) => {

@@ -66,6 +66,7 @@ export class ElectronBrowser {
         nodeIntegration: false,
       },
     });
+    this._window.setMaxListeners(20);
 
     const wc = this._window.webContents;
 
