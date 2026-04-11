@@ -7,6 +7,7 @@ export interface SessionSummary {
   stoppedAt: string;
   eventCount: number;
   snapshotCount: number;
+  trainingStatus?: "training" | "error" | null;
   snapshots: {
     snapshotId: string;
     eventIndex: number;
@@ -58,7 +59,6 @@ export function useHistory() {
   const [events, setEvents] = useState<any[] | null>(null);
   const [eventsLoading, setEventsLoading] = useState(false);
   const [segmentation, setSegmentation] = useState<SegmentationData | null>(null);
-  const [retraining, setRetraining] = useState(false);
   const [progressMap, setProgressMap] = useState<Map<string, TrainingProgress>>(new Map());
   const initialLoadDone = useRef(false);
 
@@ -74,8 +74,6 @@ export function useHistory() {
           next.delete(sid);
           return next;
         });
-        // Retraining finished — clear flag if it was for the selected session
-        setRetraining(false);
         return;
       }
 
@@ -115,6 +113,26 @@ export function useHistory() {
     try {
       const list = await window.browserwire.listSessions();
       setSessions(list);
+      // Seed progressMap from core's disk-backed training status
+      if (window.browserwire.getTrainingStatus) {
+        const active = await window.browserwire.getTrainingStatus();
+        if (active && Object.keys(active).length > 0) {
+          setProgressMap((prev) => {
+            const next = new Map(prev);
+            for (const [sid, progress] of Object.entries(active) as [string, any][]) {
+              next.set(sid, {
+                status: progress.status === "training" ? "processing" : progress.status,
+                currentSnapshot: progress.snapshot ?? 0,
+                totalSnapshots: progress.snapshotCount ?? 0,
+                currentTool: progress.tool ?? "",
+                error: progress.error,
+                totalToolCalls: progress.totalToolCalls,
+              });
+            }
+            return next;
+          });
+        }
+      }
     } catch (err) {
       console.error("Failed to load sessions:", err);
     } finally {
@@ -151,12 +169,10 @@ export function useHistory() {
   }, []);
 
   const retrainSession = useCallback(async (sessionId: string) => {
-    setRetraining(true);
     try {
       await window.browserwire.retrainSession(sessionId);
     } catch (err) {
       console.error("Retrain failed:", err);
-      setRetraining(false);
     }
   }, []);
 
@@ -176,7 +192,6 @@ export function useHistory() {
     events,
     eventsLoading,
     segmentation,
-    retraining,
     progressMap,
     getProgress,
     retrainSession,

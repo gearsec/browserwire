@@ -125,7 +125,7 @@ export async function executeRoute({ page, manifest, route, inputs, origin }) {
     // Expand RFC 6570 URI template with input values
     const template = parseTemplate(entryState.url_pattern || "/");
     const urlPath = template.expand(inputs);
-    const startUrl = origin + urlPath;
+    const startUrl = urlPath.startsWith("http://") || urlPath.startsWith("https://") ? urlPath : origin + urlPath;
 
     console.log(`[browserwire-exec] navigating to ${startUrl}`);
     await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: ACTION_TIMEOUT_MS });

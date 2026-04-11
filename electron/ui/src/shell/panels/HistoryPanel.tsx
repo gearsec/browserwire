@@ -149,12 +149,21 @@ function SessionCard({
               <span>{formatDuration(session.startedAt, session.stoppedAt)}</span>
             </div>
           </div>
-          {isTraining && (
+          {isTraining ? (
             <Badge variant="default" className="text-xs gap-1 shrink-0">
               <span className="size-1.5 rounded-full bg-primary-foreground animate-pulse" />
               Training
             </Badge>
-          )}
+          ) : session.trainingStatus === "training" ? (
+            <Badge variant="secondary" className="text-xs gap-1 shrink-0">
+              <Loader2 className="size-3 animate-spin" />
+              Resuming
+            </Badge>
+          ) : session.trainingStatus === "error" ? (
+            <Badge variant="destructive" className="text-xs shrink-0">
+              Error
+            </Badge>
+          ) : null}
         </div>
       </CardContent>
     </Card>
@@ -345,7 +354,6 @@ function ReplayView({
   events,
   eventsLoading,
   segmentation,
-  retraining,
   progress,
   onBack,
   onRetrain,
@@ -354,7 +362,6 @@ function ReplayView({
   events: any[] | null;
   eventsLoading: boolean;
   segmentation: SegmentationData | null;
-  retraining: boolean;
   progress: TrainingProgress | null;
   onBack: () => void;
   onRetrain: () => void;
@@ -372,7 +379,7 @@ function ReplayView({
     const player = playerRef.current;
     if (!player || !events || events.length === 0) return;
 
-    const snap = segmentation?.snapshots?.[snapIndex] || session.snapshots[snapIndex];
+    const snap = segmentation?.snapshots?.[snapIndex] || session.snapshots?.[snapIndex];
     if (!snap || snap.eventIndex < 0 || snap.eventIndex >= events.length) return;
 
     // Compute time offset from the start of the recording
@@ -454,11 +461,11 @@ function ReplayView({
         <Button
           variant="outline"
           size="sm"
-          disabled={retraining || (progress != null && progress.status === "processing")}
+          disabled={progress != null && progress.status === "processing"}
           onClick={onRetrain}
         >
-          <RotateCcw className={`size-4 mr-1.5 ${retraining ? "animate-spin" : ""}`} />
-          {retraining ? "Retraining..." : progress?.status === "processing" ? "Training..." : "Retrain"}
+          <RotateCcw className={`size-4 mr-1.5 ${progress?.status === "processing" ? "animate-spin" : ""}`} />
+          {progress?.status === "processing" ? "Training..." : "Retrain"}
         </Button>
       </div>
 
@@ -470,7 +477,7 @@ function ReplayView({
       )}
 
       {/* Snapshot markers — clickable to seek */}
-      {session.snapshots.length > 0 && (
+      {(session.snapshots?.length ?? 0) > 0 && (
         <div className="border-b border-border px-4 py-2">
           <div className="text-xs font-medium text-muted-foreground mb-1.5">Snapshots</div>
           <div className="flex gap-1.5 flex-wrap">
@@ -556,7 +563,7 @@ export function HistoryPanel({
           events={history.events}
           eventsLoading={history.eventsLoading}
           segmentation={history.segmentation}
-          retraining={history.retraining}
+
           progress={history.getProgress(history.selectedSessionId)}
           onBack={history.clearSelection}
           onRetrain={() => history.retrainSession(history.selectedSessionId!)}

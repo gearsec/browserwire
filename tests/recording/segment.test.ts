@@ -38,8 +38,8 @@ function touch() {
   return { type: EventType.IncrementalSnapshot, data: { source: IncrementalSource.MouseInteraction, type: MouseInteractions.TouchStart, id: 10 }, timestamp: ts() };
 }
 
-function focus() {
-  return { type: EventType.IncrementalSnapshot, data: { source: IncrementalSource.MouseInteraction, type: MouseInteractions.Focus, id: 10 }, timestamp: ts() };
+function focus(id = 10) {
+  return { type: EventType.IncrementalSnapshot, data: { source: IncrementalSource.MouseInteraction, type: MouseInteractions.Focus, id }, timestamp: ts() };
 }
 
 function mutation() {
@@ -115,30 +115,29 @@ describe("segmentEvents", () => {
     expect(snapshots[2].eventIndex).toBe(4);
   });
 
-  it("input on new element (no preceding click) IS a trigger", () => {
-    const events = [meta(), fullSnapshot(), userInput("h"), userInput("e"), mutation()];
+  it("input on new element (no preceding click) IS a trigger if focused", () => {
+    const events = [meta(), fullSnapshot(), focus(20), userInput("h"), userInput("e"), mutation()];
     const { triggers } = segmentEvents(events);
 
-    // First input on id=20 (no preceding click) → trigger
+    // First input on id=20 (focused, no preceding click) → trigger
     // Second input on same id=20 → NOT a trigger
     expect(triggers).toHaveLength(1);
     expect(triggers[0].kind).toBe("type");
   });
 
   it("subsequent inputs on same element are NOT triggers", () => {
-    const events = [meta(), fullSnapshot(), userInput("h"), userInput("he"), userInput("hel")];
+    const events = [meta(), fullSnapshot(), focus(20), userInput("h"), userInput("he"), userInput("hel")];
     const { triggers } = segmentEvents(events);
 
     expect(triggers).toHaveLength(1); // only the first
   });
 
-  it("programmatic input on new element IS a trigger (same as user input)", () => {
+  it("programmatic input on unfocused element is NOT a trigger", () => {
     const events = [meta(), fullSnapshot(), programmaticInput("auto")];
     const { triggers } = segmentEvents(events);
 
-    // id=20 differs from any preceding interaction → trigger
-    expect(triggers).toHaveLength(1);
-    expect(triggers[0].kind).toBe("type");
+    // id=20 was never focused → not a trigger (filters analytics scripts)
+    expect(triggers).toHaveLength(0);
   });
 
   it("scroll events are NOT triggers", () => {
@@ -165,12 +164,12 @@ describe("segmentEvents", () => {
     expect(triggers[0].kind).toBe("click");
   });
 
-  it("Input on a new element (auto-focused field) IS a trigger", () => {
-    // Click on button (id=10), then input on a different element (id=20)
-    const events = [meta(), fullSnapshot(), click(), userInput("h"), mutation()];
+  it("Input on a new focused element IS a trigger", () => {
+    // Click on button (id=10), then input on a different focused element (id=20)
+    const events = [meta(), fullSnapshot(), click(), focus(20), userInput("h"), mutation()];
     const { triggers } = segmentEvents(events);
 
-    // click (id=10) + input on new element (id=20) = 2 triggers
+    // click (id=10) + input on new focused element (id=20) = 2 triggers
     expect(triggers).toHaveLength(2);
     expect(triggers[0].kind).toBe("click");
     expect(triggers[1].kind).toBe("type");
@@ -187,11 +186,11 @@ describe("segmentEvents", () => {
     expect(triggers[0].kind).toBe("click");
   });
 
-  it("click then input on different element then click → 3 triggers", () => {
-    const events = [meta(), fullSnapshot(), click(), userInput("h"), userInput("e"), click(), mutation()];
+  it("click then input on focused element then click → 3 triggers", () => {
+    const events = [meta(), fullSnapshot(), click(), focus(20), userInput("h"), userInput("e"), click(), mutation()];
     const { triggers } = segmentEvents(events);
 
-    // click (id=10) + input on new element (id=20) + click (id=10) = 3 triggers
+    // click (id=10) + input on new focused element (id=20) + click (id=10) = 3 triggers
     expect(triggers).toHaveLength(3);
     expect(triggers[0].kind).toBe("click");
     expect(triggers[1].kind).toBe("type");
