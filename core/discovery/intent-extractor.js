@@ -14,7 +14,6 @@
 
 import { z } from "zod";
 import { SystemMessage, HumanMessage } from "@langchain/core/messages";
-import { getModel } from "./ai-provider.js";
 import { SnapshotIndex } from "./snapshot/snapshot-index.js";
 import { PlaywrightBrowser } from "./snapshot/playwright-browser.js";
 
@@ -56,13 +55,7 @@ Return a JSON array:
  * @param {Array} options.snapshots — snapshot markers
  * @returns {Promise<{ intents: Array<{ id: string, type: string, name: string, description: string }> }>}
  */
-export async function extractIntents({ groups, events, snapshots }) {
-  let model;
-  try {
-    model = getModel();
-  } catch {
-    model = null;
-  }
+export async function extractIntents({ groups, events, snapshots, model }) {
   if (!model) {
     console.warn("[browserwire] intent extractor: no LLM configured, skipping");
     return { intents: [] };

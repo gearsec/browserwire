@@ -17,26 +17,23 @@ import { PlaywrightBrowser } from "./snapshot/playwright-browser.js";
 import { StateMachineManifest } from "../manifest/manifest.js";
 import { runAgent, runViewAgent } from "./state-agent.js";
 import { resolveTransitionRefs } from "./tools-v2/transition.js";
-import { initTelemetry } from "../telemetry.js";
 import { classifyAndConsolidate } from "./state-classifier.js";
 import { extractIntents } from "./intent-extractor.js";
 import { segmentEvents } from "../recording/segment.js";
 import { generateSnapshots } from "../recording/replay-screenshots.js";
 import { z } from "zod";
 import { SystemMessage, HumanMessage } from "@langchain/core/messages";
-import { getModel } from "./ai-provider.js";
-
 /**
  * Process a session recording into a StateMachineManifest.
  *
  * @param {object} options
  * @param {object} options.recording — validated session recording
+ * @param {object} options.model — LangChain ChatModel instance
  * @param {function} [options.onProgress] — called with { phase, detail } on progress
  * @param {string} [options.sessionId]
  * @returns {Promise<{ manifest: object|null, error?: string, totalToolCalls: number }>}
  */
-export async function processRecording({ recording, onProgress, sessionId }) {
-  await initTelemetry();
+export async function processRecording({ recording, model, onProgress, sessionId }) {
 
   const { events } = recording;
   let { snapshots } = recording;
@@ -75,6 +72,7 @@ export async function processRecording({ recording, onProgress, sessionId }) {
   const { groups } = await classifyAndConsolidate({
     snapshots,
     events,
+    model,
     onProgress: onProgress ? ({ snapshot }) => onProgress({ phase: "classification", tool: `Classifying snapshot ${snapshot}/${snapshots.length}` }) : undefined,
   });
   const consolidatedSnapshots = groups.map((g) => g.representative);
@@ -96,7 +94,7 @@ export async function processRecording({ recording, onProgress, sessionId }) {
 
   // ── Pass 2: Extract API intents ──
   console.log(`[browserwire] ── Pass 2: Intent Extraction ──`);
-  const { intents } = await extractIntents({ groups, events, snapshots: consolidatedSnapshots });
+  const { intents } = await extractIntents({ groups, events, snapshots: consolidatedSnapshots, model });
 
   if (intents.length === 0) {
     console.warn("[browserwire] no intents extracted, auto-generating one view intent per unique state");
@@ -163,6 +161,7 @@ export async function processRecording({ recording, onProgress, sessionId }) {
               snapshotIndex: snapshotIdx,
               stateInfo: targetGroup.stateIdentity,
               intent,
+              model,
               onProgress: ({ tool }) => {
                 if (onProgress) onProgress({ phase: "extraction", intent: intent.name, tool });
               },
@@ -192,6 +191,7 @@ export async function processRecording({ recording, onProgress, sessionId }) {
           spec,
           events,
           snapshots: consolidatedSnapshots,
+          model,
           onProgress: ({ tool }) => {
             if (onProgress) onProgress({ phase: "extraction", intent: `transition_${spec.index + 1}`, tool });
           },
@@ -212,7 +212,7 @@ export async function processRecording({ recording, onProgress, sessionId }) {
     console.log(`[browserwire] ── Pass 3.5: Workflow Assembly (${workflowIntents.length} workflows, ${allActions.length} actions) ──`);
 
     const workflowAssignments = await Promise.all(
-      workflowIntents.map((intent) => runWorkflowAssemblyAgent({ actions: allActions, intent }))
+      workflowIntents.map((intent) => runWorkflowAssemblyAgent({ actions: allActions, intent, model }))
     );
 
     const claimedIndices = new Set();
@@ -369,7 +369,7 @@ export function detectTransitions(snapshots, groups, precomputedTransitions) {
  * @param {string} [options.sessionId]
  * @returns {Promise<{ action: object|null, toolCallCount: number }>}
  */
-async function runSingleTransition({ spec, events, snapshots, onProgress, sessionId }) {
+async function runSingleTransition({ spec, events, snapshots, model, onProgress, sessionId }) {
   const { index: i, triggerKind } = spec;
   const snapshot = snapshots[i];
   const nextSnapshot = snapshots[i + 1];
@@ -405,6 +405,7 @@ async function runSingleTransition({ spec, events, snapshots, onProgress, sessio
       stateInfo: spec.stateInfo,
       eventRange: spec.eventRange,
       transitionData: spec.transitionData,
+      model,
       onProgress,
       sessionId,
     });
@@ -460,13 +461,7 @@ Return a JSON object with:
  * @param {object} options.intent — { name, description }
  * @returns {Promise<{ selected_actions: number[], workflow_name: string }>}
  */
-async function runWorkflowAssemblyAgent({ actions, intent }) {
-  let model;
-  try {
-    model = getModel();
-  } catch {
-    model = null;
-  }
+async function runWorkflowAssemblyAgent({ actions, intent, model }) {
   if (!model) return { selected_actions: [], workflow_name: intent.name };
 
   const actionSummaries = actions.map((action, idx) => ({

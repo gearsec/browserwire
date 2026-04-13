@@ -15,7 +15,7 @@
     ]
   },
   "include": [
-    "src",
+    "core",
     "tests",
     "vitest.config.ts"
   ]
