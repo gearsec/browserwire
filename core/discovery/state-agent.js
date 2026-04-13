@@ -13,7 +13,6 @@
 
 import { HumanMessage, AIMessage, ToolMessage } from "@langchain/core/messages";
 import { createReactAgent } from "@langchain/langgraph/prebuilt";
-import { getModel } from "./ai-provider.js";
 import { getTransitionAgentTools, getViewAgentTools } from "./tools-v2/index.js";
 import { compactMessagesHook } from "./graphs/utils.js";
 import { view_screenshot } from "./tools-v2/query.js";
@@ -167,8 +166,8 @@ export async function runAgent({
   transitionData,
   onProgress,
   sessionId,
+  model,
 }) {
-  const model = getModel();
   if (!model) {
     return { error: "No LLM provider configured", toolCallCount: 0 };
   }
@@ -270,8 +269,8 @@ export async function runViewAgent({
   intent,
   onProgress,
   sessionId,
+  model,
 }) {
-  const model = getModel();
   if (!model) {
     return { error: "No LLM provider configured", toolCallCount: 0 };
   }

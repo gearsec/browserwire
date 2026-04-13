@@ -12,7 +12,6 @@
  * Future: augment with Judge-style DOM fingerprinting as a fast pre-filter.
  */
 
-import { getModel } from "./ai-provider.js";
 import { createClassifierGraph } from "./graphs/classifier-graph.js";
 
 // ---------------------------------------------------------------------------
@@ -53,13 +52,7 @@ Field rules:
  * @param {Array} options.events — full rrweb event stream
  * @returns {Promise<{ groups: ConsolidatedGroup[], stateCount: number }>}
  */
-export async function classifyAndConsolidate({ snapshots, events, onProgress }) {
-  let model;
-  try {
-    model = getModel();
-  } catch {
-    model = null;
-  }
+export async function classifyAndConsolidate({ snapshots, events, onProgress, model }) {
   if (!model) {
     console.warn("[browserwire] classifier: no LLM configured, using passthrough");
     return passthroughClassify(snapshots, events);
