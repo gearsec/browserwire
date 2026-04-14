@@ -178,7 +178,7 @@ function deriveSnapshots(events, triggers) {
  */
 export function segmentEvents(events) {
   if (events.length === 0) {
-    return { triggers: [], snapshots: [] };
+    return { triggers: [], snapshots: [], transitions: [] };
   }
 
   const focusedNodeIds = collectFocusedNodeIds(events);
@@ -194,6 +194,7 @@ export function segmentEvents(events) {
           trigger: null,
         },
       ],
+      transitions: [],
     };
   }
 
