@@ -22,6 +22,7 @@ import { extractIntents } from "./intent-extractor.js";
 import { segmentEvents } from "../recording/segment.js";
 import { generateSnapshots } from "../recording/replay-screenshots.js";
 import { z } from "zod";
+import { getBrowserLimiter } from "./concurrency.js";
 import { SystemMessage, HumanMessage } from "@langchain/core/messages";
 /**
  * Process a session recording into a StateMachineManifest.
@@ -122,12 +123,13 @@ export async function processRecording({ recording, model, onProgress, sessionId
   console.log(`[browserwire] ── Pass 3: Agent Execution (${viewIntents.length} views, ${transitionSpecs.length} transitions) ──`);
 
   let totalToolCalls = 0;
+  const limit = getBrowserLimiter();
 
   // ── Pass 3: Parallel view + transition agents ──
   const [viewResults, transitionResults] = await Promise.all([
     // View agents — one per view intent
     Promise.all(
-      viewIntents.map(async (intent) => {
+      viewIntents.map((intent) => limit(async () => {
         console.log(`[browserwire]   launching view agent: ${intent.name}`);
         try {
           const targetGroup = groups.find((g) => g.isFirstOccurrence && g.stateIdentity?.name === intent.name)
@@ -181,11 +183,11 @@ export async function processRecording({ recording, model, onProgress, sessionId
           console.warn(`[browserwire]   view "${intent.name}" error: ${err.message}`);
           return { intent, error: err.message, pendingViews: [], pendingActions: [], toolCallCount: 0 };
         }
-      })
+      }))
     ),
-    // Transition agents — one per detected transition, all parallel
+    // Transition agents — one per detected transition, concurrency-limited
     Promise.all(
-      transitionSpecs.map(async (spec) => {
+      transitionSpecs.map((spec) => limit(async () => {
         console.log(`[browserwire]   launching transition agent: #${spec.index + 1}→#${spec.index + 2}`);
         return runSingleTransition({
           spec,
@@ -197,7 +199,7 @@ export async function processRecording({ recording, model, onProgress, sessionId
           },
           sessionId,
         });
-      })
+      }))
     ),
   ]);
 
