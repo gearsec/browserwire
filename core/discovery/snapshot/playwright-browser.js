@@ -36,7 +36,7 @@ export class PlaywrightBrowser {
    */
   async ensureBrowser() {
     if (this._browser) return;
-    this._browser = await chromium.launch({ headless: true });
+    this._browser = await chromium.launch({ headless: true, args: ["--disable-dev-shm-usage"] });
   }
 
   /**
