@@ -7,7 +7,7 @@
  * Single browser instance per session, fresh page per snapshot.
  */
 
-import { chromium } from "playwright";
+import { chromium } from "patchright";
 import { readFile } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,9 +23,9 @@ const RRWEB_SNAPSHOT_UMD_PATH = resolve(
 
 export class PlaywrightBrowser {
   constructor() {
-    /** @type {import('playwright').Browser|null} */
+    /** @type {import('patchright').Browser|null} */
     this._browser = null;
-    /** @type {import('playwright').Page|null} */
+    /** @type {import('patchright').Page|null} */
     this.page = null;
     /** @type {string|null} Cached UMD script content */
     this._rrwebScript = null;
@@ -45,7 +45,7 @@ export class PlaywrightBrowser {
    *
    * @param {object} rrwebSnapshotJson - The raw rrweb snapshot tree (JSON object)
    * @param {string} [url] - The page URL (for context)
-   * @returns {Promise<import('playwright').Page>}
+   * @returns {Promise<import('patchright').Page>}
    */
   async loadSnapshot(rrwebSnapshotJson, url = "http://localhost") {
     await this.ensureBrowser();
@@ -70,8 +70,9 @@ export class PlaywrightBrowser {
       { waitUntil: "domcontentloaded" }
     );
 
-    // Inject rrweb-snapshot UMD
-    await page.addScriptTag({ content: this._rrwebScript });
+    // Inject rrweb-snapshot UMD — use evaluate so the script lands in patchright's
+    // isolated execution context (same context that later evaluate() calls use)
+    await page.evaluate(this._rrwebScript);
 
     // Rebuild the full rrweb snapshot (including <head> for stylesheets) into the real DOM
     await page.evaluate((snapshotJson) => {
@@ -125,7 +126,7 @@ export class PlaywrightBrowser {
   /**
    * Run a CSS selector via document.querySelectorAll and return rrweb IDs.
    *
-   * @param {import('playwright').Page} page
+   * @param {import('patchright').Page} page
    * @param {string} selector - CSS selector
    * @returns {Promise<number[]>} Array of rrweb node IDs
    */
@@ -145,7 +146,7 @@ export class PlaywrightBrowser {
    * Locate elements using Playwright's locator API and return rrweb IDs.
    * Supports: css, xpath, text, role_name, data_testid, attribute.
    *
-   * @param {import('playwright').Page} page
+   * @param {import('patchright').Page} page
    * @param {string} kind - Locator kind
    * @param {string} value - Locator value
    * @returns {Promise<number[]>} Array of rrweb node IDs
@@ -208,7 +209,7 @@ export class PlaywrightBrowser {
   /**
    * Get the full accessibility tree from Chrome's CDP Accessibility domain.
    *
-   * @param {import('playwright').Page} page
+   * @param {import('patchright').Page} page
    * @returns {Promise<object[]>} Array of CDP AXTree nodes
    */
   async getAccessibilityTree(page) {
@@ -228,7 +229,7 @@ export class PlaywrightBrowser {
    * reference and evaluates `window.__rrwebMirror.getId(element)` to get the
    * rrweb node ID.
    *
-   * @param {import('playwright').Page} page
+   * @param {import('patchright').Page} page
    * @param {object[]} cdpNodes - CDP AXTree nodes from getAccessibilityTree()
    * @returns {Promise<Map<string, number>>} Map<cdpNodeId, rrwebId>
    */

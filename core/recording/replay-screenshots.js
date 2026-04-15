@@ -11,7 +11,7 @@
  * Uses local UMD bundles from node_modules (no CDN dependency).
  */
 
-import { chromium } from "playwright";
+import { chromium } from "patchright";
 import { readFile } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -74,9 +74,11 @@ export async function generateSnapshots(events, segments) {
     );
 
     // Inject rrweb UMD (exposes global `rrweb` with Replayer)
-    await page.addScriptTag({ content: rrwebScript });
+    // Use evaluate instead of addScriptTag so scripts land in patchright's
+    // isolated execution context — the same context that later evaluate() calls use.
+    await page.evaluate(rrwebScript);
     // Inject rrweb-snapshot UMD (exposes global `rrwebSnapshot` with snapshot())
-    await page.addScriptTag({ content: rrwebSnapshotScript });
+    await page.evaluate(rrwebSnapshotScript);
 
     const snapshots = [];
 

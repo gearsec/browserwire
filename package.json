@@ -57,6 +57,6 @@
     "zod": "^4.3.6"
   },
   "optionalDependencies": {
-    "playwright": "^1.58.2"
+    "patchright": "^1.58.2"
   }
 }
