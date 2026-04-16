@@ -34,7 +34,11 @@ import { SystemMessage, HumanMessage } from "@langchain/core/messages";
  * @param {string} [options.sessionId]
  * @returns {Promise<{ manifest: object|null, error?: string, totalToolCalls: number }>}
  */
-export async function processRecording({ recording, model, onProgress, sessionId }) {
+export async function processRecording({ recording, model, onProgress, sessionId, log }) {
+  // Fallback logger for standalone/CLI usage
+  if (!log) {
+    log = { info: (...a) => console.log("[browserwire]", ...a), warn: (...a) => console.warn("[browserwire]", ...a), error: (...a) => console.error("[browserwire]", ...a) };
+  }
 
   const { events } = recording;
   let { snapshots } = recording;
@@ -42,16 +46,16 @@ export async function processRecording({ recording, model, onProgress, sessionId
 
   // ── Pass 0: Segment events + generate snapshots (if not provided) ──
   if (!snapshots || snapshots.length === 0) {
-    console.log(`[browserwire] ── Pass 0: Segmentation + Snapshot Generation ──`);
+    log.info("── Pass 0: Segmentation + Snapshot Generation ──");
 
     const { triggers, snapshots: segments, transitions } = segmentEvents(events);
     precomputedTransitions = transitions;
-    console.log(`[browserwire]   ${triggers.length} triggers detected, ${segments.length} snapshot boundaries, ${transitions.length} transitions`);
+    log.info(`${triggers.length} triggers detected, ${segments.length} snapshot boundaries, ${transitions.length} transitions`);
 
     if (onProgress) onProgress({ phase: "segmentation", tool: `Segmented: ${triggers.length} triggers → ${segments.length} snapshots` });
 
     snapshots = await generateSnapshots(events, segments);
-    console.log(`[browserwire]   ${snapshots.length} snapshots generated via replay`);
+    log.info(`${snapshots.length} snapshots generated via replay`);
 
     if (onProgress) onProgress({ phase: "segmentation", tool: `Generated ${snapshots.length} snapshots` });
 
@@ -60,20 +64,19 @@ export async function processRecording({ recording, model, onProgress, sessionId
   }
 
   if (!snapshots || snapshots.length === 0) {
-    console.warn("[browserwire] no snapshots available, cannot process");
+    log.warn("no snapshots available, cannot process");
     return { manifest: null, error: "No snapshots", totalToolCalls: 0, segmentation: null };
   }
 
-  console.log(
-    `[browserwire] processing session: ${snapshots.length} snapshots, ${events.length} events`
-  );
+  log.info(`processing session: ${snapshots.length} snapshots, ${events.length} events`);
 
   // ── Pass 1: Classify snapshots into states ──
-  console.log(`[browserwire] ── Pass 1: Classification ──`);
+  log.info("── Pass 1: Classification ──");
   const { groups } = await classifyAndConsolidate({
     snapshots,
     events,
     model,
+    log,
     onProgress: onProgress ? ({ snapshot }) => onProgress({ phase: "classification", tool: `Classifying snapshot ${snapshot}/${snapshots.length}` }) : undefined,
   });
   const consolidatedSnapshots = groups.map((g) => g.representative);
@@ -94,11 +97,11 @@ export async function processRecording({ recording, model, onProgress, sessionId
   }
 
   // ── Pass 2: Extract API intents ──
-  console.log(`[browserwire] ── Pass 2: Intent Extraction ──`);
-  const { intents } = await extractIntents({ groups, events, snapshots: consolidatedSnapshots, model });
+  log.info("── Pass 2: Intent Extraction ──");
+  const { intents } = await extractIntents({ groups, events, snapshots: consolidatedSnapshots, model, log });
 
   if (intents.length === 0) {
-    console.warn("[browserwire] no intents extracted, auto-generating one view intent per unique state");
+    log.warn("no intents extracted, auto-generating one view intent per unique state");
     const seenLabels = new Set();
     for (const group of groups) {
       if (seenLabels.has(group.stateLabel)) continue;
@@ -118,9 +121,9 @@ export async function processRecording({ recording, model, onProgress, sessionId
 
   // ── Pass 2.5: Detect transitions ──
   const transitionSpecs = detectTransitions(consolidatedSnapshots, groups, precomputedTransitions);
-  console.log(`[browserwire] ── Pass 2.5: Transition Detection (${transitionSpecs.length} actionable transitions) ──`);
+  log.info(`── Pass 2.5: Transition Detection (${transitionSpecs.length} actionable transitions) ──`);
 
-  console.log(`[browserwire] ── Pass 3: Agent Execution (${viewIntents.length} views, ${transitionSpecs.length} transitions) ──`);
+  log.info(`── Pass 3: Agent Execution (${viewIntents.length} views, ${transitionSpecs.length} transitions) ──`);
 
   let totalToolCalls = 0;
   const limit = getBrowserLimiter();
@@ -130,7 +133,7 @@ export async function processRecording({ recording, model, onProgress, sessionId
     // View agents — one per view intent
     Promise.all(
       viewIntents.map((intent) => limit(async () => {
-        console.log(`[browserwire]   launching view agent: ${intent.name}`);
+        log.info(`launching view agent: ${intent.name}`);
         try {
           const targetGroup = groups.find((g) => g.isFirstOccurrence && g.stateIdentity?.name === intent.name)
             || groups.find((g) => g.isFirstOccurrence)
@@ -174,13 +177,13 @@ export async function processRecording({ recording, model, onProgress, sessionId
               view._snapshotIndex = snapshotIdx;
             }
 
-            console.log(`[browserwire]   view "${intent.name}" done: ${result.pendingViews?.length || 0} views`);
+            log.info(`view "${intent.name}" done: ${result.pendingViews?.length || 0} views`);
             return { intent, pendingViews: result.pendingViews, pendingActions: [], toolCallCount: result.toolCallCount };
           } finally {
             await browser.close().catch(() => {});
           }
         } catch (err) {
-          console.warn(`[browserwire]   view "${intent.name}" error: ${err.message}`);
+          log.warn(`view "${intent.name}" error: ${err.message}`);
           return { intent, error: err.message, pendingViews: [], pendingActions: [], toolCallCount: 0 };
         }
       }))
@@ -188,7 +191,7 @@ export async function processRecording({ recording, model, onProgress, sessionId
     // Transition agents — one per detected transition, concurrency-limited
     Promise.all(
       transitionSpecs.map((spec) => limit(async () => {
-        console.log(`[browserwire]   launching transition agent: #${spec.index + 1}→#${spec.index + 2}`);
+        log.info(`launching transition agent: #${spec.index + 1}→#${spec.index + 2}`);
         return runSingleTransition({
           spec,
           events,
@@ -211,7 +214,7 @@ export async function processRecording({ recording, model, onProgress, sessionId
 
   // ── Pass 3.5: Workflow assembly — one LLM agent per workflow intent ──
   if (workflowIntents.length > 0 && allActions.length > 0) {
-    console.log(`[browserwire] ── Pass 3.5: Workflow Assembly (${workflowIntents.length} workflows, ${allActions.length} actions) ──`);
+    log.info(`── Pass 3.5: Workflow Assembly (${workflowIntents.length} workflows, ${allActions.length} actions) ──`);
 
     const workflowAssignments = await Promise.all(
       workflowIntents.map((intent) => runWorkflowAssemblyAgent({ actions: allActions, intent, model }))
@@ -246,7 +249,7 @@ export async function processRecording({ recording, model, onProgress, sessionId
         }
       }
 
-      console.log(`[browserwire]   workflow "${assignment.workflow_name}": ${workflowActions.length} actions`);
+      log.info(`workflow "${assignment.workflow_name}": ${workflowActions.length} actions`);
       agentResults.push({
         intent: workflowIntents[w],
         pendingViews: [],
@@ -265,7 +268,7 @@ export async function processRecording({ recording, model, onProgress, sessionId
         pendingActions: unclaimedActions,
         toolCallCount: 0,
       });
-      console.log(`[browserwire]   standalone actions: ${unclaimedActions.length}`);
+      log.info(`standalone actions: ${unclaimedActions.length}`);
     }
   } else if (allActions.length > 0) {
     // No workflow intents — all actions are standalone
@@ -284,14 +287,11 @@ export async function processRecording({ recording, model, onProgress, sessionId
   totalToolCalls += transitionToolCalls;
 
   // ── Pass 4: Assemble manifest ──
-  console.log(`[browserwire] ── Pass 4: Assembly ──`);
+  log.info("── Pass 4: Assembly ──");
   const manifest = assembleManifest({ groups, agentResults });
   const manifestJson = manifest.toJSON();
 
-  console.log(
-    `[browserwire] session processing complete: ` +
-    `${manifest.getStates().length} states, ${totalToolCalls} total tool calls`
-  );
+  log.info(`session processing complete: ${manifest.getStates().length} states, ${totalToolCalls} total tool calls`);
 
   // Build segmentation data for persistence
   const segmentation = precomputedTransitions ? {
@@ -364,7 +364,7 @@ export function detectTransitions(snapshots, groups, precomputedTransitions) {
  */
 function buildFailedAction(spec, reason) {
   const { index: i, triggerKind } = spec;
-  console.warn(`[browserwire]   transition #${i + 1} failed: ${reason}`);
+  console.warn(`[browserwire] transition #${i + 1} failed: ${reason}`);
   return {
     name: `${triggerKind}_transition_${i + 1}`,
     kind: triggerKind === "type" ? "input" : "click",
@@ -421,7 +421,7 @@ async function runSingleTransition({ spec, events, snapshots, model, onProgress,
       return { action: buildFailedAction(spec, "no_resolved_events"), toolCallCount: 0 };
     }
 
-    console.log(`[browserwire]   transition #${i + 1}→#${i + 2} (${triggerKind}): ${transitionEvents.length} events`);
+    console.log(`[browserwire] transition #${i + 1}→#${i + 2} (${triggerKind}): ${transitionEvents.length} events`);
 
     const result = await runAgent({
       index,

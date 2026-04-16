@@ -189,7 +189,6 @@ export async function runAgent({
   let toolCallCount = 0;
   ctx._onProgress = ({ tool }) => {
     toolCallCount++;
-    console.log(`[browserwire]   → ${tool}`);
     if (onProgress) onProgress({ tool: `transition-agent:${tool}` });
   };
 
@@ -228,7 +227,7 @@ export async function runAgent({
 
   console.log(
     `[browserwire] transition-agent: #${snapshotIndex + 1}→#${snapshotIndex + 2} done — ` +
-    `${ctx._transitionCode ? "code produced" : "no code"}, ${toolCallCount} tool calls`
+    `${ctx._transitionCode ? "code" : "no code"}, ${toolCallCount} tool calls`
   );
 
   return {
@@ -290,7 +289,6 @@ export async function runViewAgent({
   let toolCallCount = 0;
   ctx._onProgress = ({ tool }) => {
     toolCallCount++;
-    console.log(`[browserwire]   → ${tool}`);
     if (onProgress) onProgress({ tool: `view-agent:${tool}` });
   };
 

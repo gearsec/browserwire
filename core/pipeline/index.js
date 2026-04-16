@@ -22,6 +22,7 @@
 import { createModel } from "../discovery/ai-provider.js";
 import { processRecording } from "../discovery/session-processor.js";
 import { initTelemetryFromConfig } from "./telemetry.js";
+import { createCoreLogger } from "./logger.js";
 
 /**
  * Run the full discovery pipeline.
@@ -39,10 +40,11 @@ import { initTelemetryFromConfig } from "./telemetry.js";
  * @param {string} [options.sessionId] — session identifier for tracing
  * @returns {Promise<{ manifest: object|null, segmentation: object|null, totalToolCalls: number, error?: string }>}
  */
-export async function runPipeline({ recording, config, onProgress, sessionId }) {
+export async function runPipeline({ recording, config, onProgress, sessionId, logger }) {
   const model = createModel(config);
+  const log = createCoreLogger({ logger, sessionId });
 
-  initTelemetryFromConfig(config);
+  initTelemetryFromConfig(config, log);
 
-  return processRecording({ recording, model, onProgress, sessionId });
+  return processRecording({ recording, model, onProgress, sessionId, log });
 }
