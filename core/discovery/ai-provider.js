@@ -25,7 +25,7 @@ export function createModel(config) {
         model: config.llmModel,
         apiKey: config.llmApiKey,
         temperature: 0.3,
-        timeout: 120_000,
+        timeout: 180_000,
         ...(config.llmBaseUrl ? { configuration: { baseURL: config.llmBaseUrl } } : {}),
       });
 
@@ -34,7 +34,7 @@ export function createModel(config) {
         model: config.llmModel,
         apiKey: config.llmApiKey,
         temperature: 0.3,
-        clientOptions: { timeout: 120_000 },
+        clientOptions: { timeout: 180_000 },
       });
 
     case "gemini":
@@ -49,7 +49,7 @@ export function createModel(config) {
         model: config.llmModel,
         apiKey: "ollama",
         temperature: 0.3,
-        timeout: 120_000,
+        timeout: 180_000,
         configuration: { baseURL: config.llmBaseUrl || "http://localhost:11434/v1" },
       });
 

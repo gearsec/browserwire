@@ -133,7 +133,7 @@ export function createClassifierGraph({
     console.log(`[browserwire] classifier: classifying snapshot ${i + 1}/${snapshots.length}...`);
     try {
       const result = await modelWithOutput.invoke([...compactedMessages, humanMsg], {
-        signal: AbortSignal.timeout(90_000),
+        signal: AbortSignal.timeout(180_000),
       });
       json = result.parsed;
       response = result.raw;
