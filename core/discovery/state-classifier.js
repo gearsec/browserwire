@@ -53,9 +53,10 @@ Field rules:
  * @param {Array} options.events — full rrweb event stream
  * @returns {Promise<{ groups: ConsolidatedGroup[], stateCount: number }>}
  */
-export async function classifyAndConsolidate({ snapshots, events, onProgress, model }) {
+export async function classifyAndConsolidate({ snapshots, events, onProgress, model, log }) {
   if (!model) {
-    console.warn("[browserwire] classifier: no LLM configured, using passthrough");
+    if (log) log.warn("classifier: no LLM configured, using passthrough");
+    else console.warn("[browserwire] classifier: no LLM configured, using passthrough");
     return passthroughClassify(snapshots, events);
   }
 
@@ -65,6 +66,7 @@ export async function classifyAndConsolidate({ snapshots, events, onProgress, mo
     snapshots,
     systemPrompt: CLASSIFIER_PROMPT,
     onProgress,
+    log,
   });
 
   const { assignments, knownStates } = await invoke();

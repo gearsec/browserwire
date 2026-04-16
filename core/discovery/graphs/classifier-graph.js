@@ -70,7 +70,9 @@ export function createClassifierGraph({
   snapshots,
   systemPrompt,
   onProgress,
+  log,
 }) {
+  const _log = log || { info: (...a) => console.log("[browserwire]", ...a), warn: (...a) => console.warn("[browserwire]", ...a) };
   let nextStateNum = 0;
 
   // --- Classify node: process one snapshot per invocation ---
@@ -130,7 +132,7 @@ export function createClassifierGraph({
     let response;
     const modelWithOutput = model.withStructuredOutput(ClassifyResultSchema, { includeRaw: true });
 
-    console.log(`[browserwire] classifier: classifying snapshot ${i + 1}/${snapshots.length}...`);
+    _log.info(`classifier: classifying snapshot ${i + 1}/${snapshots.length}...`);
     try {
       const result = await modelWithOutput.invoke([...compactedMessages, humanMsg], {
         signal: AbortSignal.timeout(180_000),
@@ -138,7 +140,7 @@ export function createClassifierGraph({
       json = result.parsed;
       response = result.raw;
     } catch (err) {
-      console.warn(`[browserwire] classifier graph: LLM error on snapshot ${i + 1}: ${err.message}`);
+      _log.warn(`classifier graph: LLM error on snapshot ${i + 1}: ${err.message}`);
       json = null;
       response = new AIMessage(JSON.stringify({
         state_id: "new",
@@ -185,8 +187,8 @@ export function createClassifierGraph({
 
     if (onProgress) onProgress({ snapshot: i + 1 });
 
-    console.log(
-      `[browserwire] classifier: snapshot ${i + 1}/${snapshots.length} → ` +
+    _log.info(
+      `classifier: snapshot ${i + 1}/${snapshots.length} → ` +
       (assignment.isNew
         ? `new state "${assignment.stateIdentity?.name}"`
         : `existing ${assignment.stateLabel}`)

@@ -16,7 +16,7 @@ let _initialized = false;
  * @param {{ langsmithApiKey?: string, langsmithProject?: string }} config
  * @returns {boolean} true if telemetry was enabled
  */
-export function initTelemetryFromConfig(config) {
+export function initTelemetryFromConfig(config, log) {
   if (_initialized) return _initialized === "ok";
 
   const apiKey = config.langsmithApiKey || process.env.LANGCHAIN_API_KEY || process.env.LANGSMITH_API_KEY;
@@ -32,6 +32,7 @@ export function initTelemetryFromConfig(config) {
   if (project) process.env.LANGCHAIN_PROJECT = project;
 
   _initialized = "ok";
-  console.log(`[browserwire] pipeline telemetry: LangSmith enabled (project: ${project || "default"})`);
+  if (log) log.info(`pipeline telemetry: LangSmith enabled (project: ${project || "default"})`);
+  else console.log(`[browserwire] pipeline telemetry: LangSmith enabled (project: ${project || "default"})`);
   return true;
 }

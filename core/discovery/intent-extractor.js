@@ -55,13 +55,15 @@ Return a JSON array:
  * @param {Array} options.snapshots — snapshot markers
  * @returns {Promise<{ intents: Array<{ id: string, type: string, name: string, description: string }> }>}
  */
-export async function extractIntents({ groups, events, snapshots, model }) {
+export async function extractIntents({ groups, events, snapshots, model, log }) {
+  const _log = log || { info: (...a) => console.log("[browserwire]", ...a), warn: (...a) => console.warn("[browserwire]", ...a) };
+
   if (!model) {
-    console.warn("[browserwire] intent extractor: no LLM configured, skipping");
+    _log.warn("intent extractor: no LLM configured, skipping");
     return { intents: [] };
   }
 
-  console.log(`[browserwire] intent extractor: building state inputs from ${groups.length} groups`);
+  _log.info(`intent extractor: building state inputs from ${groups.length} groups`);
 
   // Build state inputs: load each unique state's snapshot to get screenshot + AX tree
   const seenStates = new Set();
@@ -101,7 +103,7 @@ export async function extractIntents({ groups, events, snapshots, model }) {
         axTree: index.toAccessibilityTree(),
       });
     } catch (err) {
-      console.warn(`[browserwire] intent extractor: failed to load state ${group.stateLabel}: ${err.message}`);
+      _log.warn(`intent extractor: failed to load state ${group.stateLabel}: ${err.message}`);
       // Still include with metadata only
       stateInputs.push({
         label: group.stateLabel,
@@ -115,7 +117,7 @@ export async function extractIntents({ groups, events, snapshots, model }) {
     }
   }
 
-  console.log(`[browserwire] intent extractor: ${stateInputs.length} unique states prepared`);
+  _log.info(`intent extractor: ${stateInputs.length} unique states prepared`);
 
   // Build multimodal message with all states
   const content = [];
@@ -160,7 +162,7 @@ export async function extractIntents({ groups, events, snapshots, model }) {
     ]);
     intents = Array.isArray(result.intents) ? result.intents : [];
   } catch (err) {
-    console.warn(`[browserwire] intent extractor: LLM error: ${err.message}`);
+    _log.warn(`intent extractor: LLM error: ${err.message}`);
     intents = [];
   }
 
@@ -172,8 +174,8 @@ export async function extractIntents({ groups, events, snapshots, model }) {
     description: intent.description || "",
   }));
 
-  console.log(
-    `[browserwire] intent extractor: ${intents.length} API intents ` +
+  _log.info(
+    `intent extractor: ${intents.length} API intents ` +
     `(${intents.filter((i) => i.type === "view").length} views, ` +
     `${intents.filter((i) => i.type === "workflow").length} workflows)`
   );
