@@ -45,23 +45,51 @@ You will receive the transition events between two snapshots — these show exac
    - Click/button: \`page.locator('...').click()\` (no inputs needed)
    - Guard optional fields: \`if (inputs.field_name !== undefined)\`
 4. **Test**: Use test_code with \`verify_against_recording: true\` and \`target_refs: [ref]\`. If the test fails, inspect the element again and fix the selector.
-5. **Return**: Call done(code, inputs) with your tested code and input definitions.
+5. **Return**: Call done(inputs, name, description). The code from your last successful test_code call is used automatically — do NOT pass code to done().
 
 ## Code conventions
 
 - Code signature: \`async (page, inputs) => { ... }\`
-- When testing with test_code, use hardcoded sample values: \`async (page) => { await page.locator('input').fill('test'); }\`
-- For done(), pass the parameterized version: \`async (page, inputs) => { await page.locator('input').fill(inputs.name); }\`
+- When testing with test_code, write the FINAL parameterized code and pass sample values as a JSON string via the inputs parameter:
+  \`test_code({ code: "async (page, inputs) => { await page.locator('input').fill(inputs.city); }", inputs: "{\\"city\\": \\"test\\"}" })\`
+- For done(), pass inputs schema, name, and description only. Code is taken from your last successful test_code call.
 - Use \`page.locator()\` with CSS selectors. Keep code simple and direct.
 - NEVER use [href="..."] CSS attribute selectors.
 - Use snake_case for input names.
+
+## Multi-step interactions
+
+You will see adjacent transition context (±2 transitions before/after). Use this to identify multi-step patterns:
+
+- **Searchable dropdown** (previous transition was type/input, current is click on list item/option):
+  This is selecting from an autocomplete. Don't hardcode the clicked text.
+  Write: click the FIRST option in the dropdown. No new input needed — the previous action's typing already filtered the list.
+  Example: \`await page.locator('li[role="option"]').first().click()\`
+
+- **Date picker** (a sequence of clicks on calendar UI — month arrows, day cells):
+  If the transition events show a click on a date cell with an aria-label containing a date,
+  parameterize it: \`await page.locator(\\\`[aria-label="\${inputs.date}"]\\\`).click()\`
+  If it's an intermediate navigation click (month arrow), use a fixed selector.
+
+- **Multi-step form control**: When the current click is clearly part of a larger interaction
+  started by an adjacent transition, write minimal code — just the click needed,
+  and let the previous action's input drive the selection. Do NOT hardcode recorded values.
+
+## Naming accuracy
+
+When naming your action via done(), use ALL available context:
+- **Inspect the element's label**: Use inspect_element to check for nearby labels, headings, or aria attributes that describe the field. A date picker under a "DEPARTURE" label is select_departure_date, not select_return_date.
+- **Use adjacent transitions**: Review the adjacent transition context to understand where this action sits in the user's flow. Name the action based on its role in the sequence.
+- **Don't guess generic names**: If the element is a date picker, calendar, or dropdown, look at the surrounding DOM text to determine its specific purpose before naming.
 
 ## Rules
 
 - You MUST test your code with test_code before calling done.
 - Do NOT inspect elements unrelated to the transition events.
 - Do NOT call done without code — if you can't write working code, call done() with no arguments.
-- When calling done(), include a snake_case \`name\` (e.g., \`fill_calendar_name\`, \`click_submit_button\`, \`select_color\`) and a one-line \`description\` of what the action does.`;
+- When calling done(), include a snake_case \`name\` (e.g., \`fill_calendar_name\`, \`click_submit_button\`, \`select_color\`) and a one-line \`description\` of what the action does.
+- Every input MUST include the expected format in its description. The user of the API should know exactly what to pass without guessing.
+- If the site uses a non-standard format internally, accept a standard format from the user and convert it in the code.`;
 
 // ---------------------------------------------------------------------------
 // View mode prompt
@@ -161,6 +189,7 @@ export async function runAgent({
   snapshots,
   snapshotIndex,
   transitionEvents,
+  adjacentContext,
   stateInfo,
   eventRange,
   transitionData,
@@ -210,6 +239,7 @@ export async function runAgent({
     `State: ${stateInfo?.name || "unknown"}\n\n` +
     `## Transition Events\n` +
     `\`\`\`json\n${eventsJson}\n\`\`\`\n\n` +
+    (adjacentContext ? `## ${adjacentContext}\n\n` : "") +
     `Write Playwright code that reproduces the primary interaction shown in these events. ` +
     `Inspect the target element, write code, test it, then call done(code, inputs).`;
 

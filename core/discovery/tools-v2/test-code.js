@@ -21,10 +21,10 @@ import { resolveTransitionRefs } from "./transition.js";
  * Execute a code string as a self-contained async function against a Playwright page.
  * The code receives only the Playwright page — no external inputs.
  */
-async function executeCode(page, code) {
+async function executeCode(page, code, inputs) {
   try {
-    const fn = new Function("page", `return (${code})(page);`);
-    const result = await fn(page);
+    const fn = new Function("page", "inputs", `return (${code})(page, inputs);`);
+    const result = await fn(page, inputs || {});
     return { success: true, result };
   } catch (err) {
     return { success: false, error: err.message };
@@ -177,8 +177,12 @@ export const test_code = {
     "Use 'verify_against_recording' to verify the code targets the same elements the user interacted with.",
   parameters: z.object({
     code: z.string().describe(
-      "Self-contained Playwright async function: async (page) => { ... }. " +
-      "Hardcode any test values directly — e.g. async (page) => { await page.locator('input').fill('test query'); }"
+      "Playwright async function. For transitions, use the FINAL parameterized version: " +
+      "async (page, inputs) => { await page.locator('input').fill(inputs.city); } " +
+      "and pass sample values via the inputs parameter."
+    ),
+    inputs: z.string().optional().describe(
+      "Sample input values as a JSON string, e.g. {\"city\": \"test\"}. Parsed and passed to code as (code)(page, inputs)."
     ),
     expected: z.string().optional().describe(
       "Expected return value as a JSON string. When provided, compares actual vs expected."
@@ -194,7 +198,9 @@ export const test_code = {
     ),
   }),
   execute: async (ctx, params) => {
-    const { code, expected, verify_against_recording, target_refs } = params;
+    const { code, inputs: sampleInputsRaw, expected, verify_against_recording, target_refs } = params;
+    let sampleInputs;
+    try { sampleInputs = sampleInputsRaw ? JSON.parse(sampleInputsRaw) : {}; } catch { sampleInputs = {}; }
     const { browser } = ctx;
 
     // Reject [href="..."] selectors — they pass on replayed DOM (absolute URLs)
@@ -222,13 +228,18 @@ export const test_code = {
       }
     }
 
-    const execResult = await executeCode(browser.page, code);
+    const execResult = await executeCode(browser.page, code, sampleInputs);
 
     const response = { success: execResult.success };
     if (execResult.success) {
       response.result = execResult.result;
     } else {
       response.error = execResult.error;
+    }
+
+    // Store last successfully tested code for done() to use
+    if (execResult.success) {
+      ctx._lastTestedCode = code;
     }
 
     if (expected !== undefined && execResult.success) {

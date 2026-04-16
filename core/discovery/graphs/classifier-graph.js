@@ -133,22 +133,29 @@ export function createClassifierGraph({
     const modelWithOutput = model.withStructuredOutput(ClassifyResultSchema, { includeRaw: true });
 
     _log.info(`classifier: classifying snapshot ${i + 1}/${snapshots.length}...`);
-    try {
-      const result = await modelWithOutput.invoke([...compactedMessages, humanMsg], {
-        signal: AbortSignal.timeout(180_000),
-      });
-      json = result.parsed;
-      response = result.raw;
-    } catch (err) {
-      _log.warn(`classifier graph: LLM error on snapshot ${i + 1}: ${err.message}`);
-      json = null;
-      response = new AIMessage(JSON.stringify({
-        state_id: "new",
-        name: `state_s${nextStateNum}`,
-        description: `State at ${snapshot.url}`,
-        url_pattern: safePathname(snapshot.url),
-        page_purpose: snapshot.title || "unknown",
-      }));
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const result = await modelWithOutput.invoke([...compactedMessages, humanMsg], {
+          signal: AbortSignal.timeout(180_000),
+        });
+        json = result.parsed;
+        response = result.raw;
+        break;
+      } catch (err) {
+        if (attempt === 0) {
+          _log.warn(`classifier graph: LLM error on snapshot ${i + 1}, retrying: ${err.message}`);
+          continue;
+        }
+        _log.warn(`classifier graph: LLM error on snapshot ${i + 1} after retry: ${err.message}`);
+        json = null;
+        response = new AIMessage(JSON.stringify({
+          state_id: "new",
+          name: `state_s${nextStateNum}`,
+          description: `State at ${snapshot.url}`,
+          url_pattern: safePathname(snapshot.url),
+          page_purpose: snapshot.title || "unknown",
+        }));
+      }
     }
 
     // Build assignment from structured result
