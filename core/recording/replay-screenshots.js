@@ -124,6 +124,9 @@ export async function generateSnapshots(events, segments) {
           // Wait for rendering
           await page.waitForTimeout(150);
 
+          // Wait for external stylesheets to load in the replay iframe
+          await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
+
           // Get the replayer's iframe
           const iframeHandle = await page.$("iframe");
 

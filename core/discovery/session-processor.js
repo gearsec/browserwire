@@ -204,7 +204,7 @@ export async function processRecording({ recording, model, onProgress, sessionId
   ]);
 
   // Collect atomic actions in snapshot order (Promise.all preserves input order)
-  const allActions = transitionResults.map((r) => r.action).filter(Boolean);
+  const allActions = transitionResults.map((r) => r.action);
   const transitionToolCalls = transitionResults.reduce((s, r) => s + (r.toolCallCount || 0), 0);
 
   const agentResults = [...viewResults];
@@ -335,7 +335,6 @@ export function detectTransitions(snapshots, groups, precomputedTransitions) {
     const nextSnapshot = snapshots[i + 1];
     const triggerKind = nextSnapshot.trigger?.kind;
     if (!triggerKind || !ACTION_TRIGGERS.has(triggerKind)) continue;
-    if (!snapshots[i].rrwebTree) continue;
     const group = i < groups.length ? groups[i] : null;
 
     // Attach pre-computed transition data (interaction events + event range)
@@ -360,6 +359,27 @@ export function detectTransitions(snapshots, groups, precomputedTransitions) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Build a failed action marker when the transition agent can't produce code.
+ * Ensures every segmentation transition is represented in the manifest.
+ */
+function buildFailedAction(spec, reason) {
+  const { index: i, triggerKind } = spec;
+  console.warn(`[browserwire]   transition #${i + 1} failed: ${reason}`);
+  return {
+    name: `${triggerKind}_transition_${i + 1}`,
+    kind: triggerKind === "type" ? "input" : "click",
+    description: `Transition #${i + 1} (${triggerKind})`,
+    inputs: [],
+    code: null,
+    _snapshotIndex: i,
+    _triggerKind: triggerKind,
+    _stateInfo: spec.stateInfo,
+    _failed: true,
+    _failReason: reason,
+  };
+}
+
+/**
  * Run one transition agent for a single snapshot transition.
  * Owns its own browser lifecycle — safe for parallel execution.
  *
@@ -369,12 +389,16 @@ export function detectTransitions(snapshots, groups, precomputedTransitions) {
  * @param {Array} options.snapshots — snapshot markers
  * @param {function} [options.onProgress]
  * @param {string} [options.sessionId]
- * @returns {Promise<{ action: object|null, toolCallCount: number }>}
+ * @returns {Promise<{ action: object, toolCallCount: number }>}
  */
 async function runSingleTransition({ spec, events, snapshots, model, onProgress, sessionId }) {
   const { index: i, triggerKind } = spec;
   const snapshot = snapshots[i];
   const nextSnapshot = snapshots[i + 1];
+
+  if (!snapshot.rrwebTree) {
+    return { action: buildFailedAction(spec, "no_rrweb_tree"), toolCallCount: 0 };
+  }
 
   const browser = new PlaywrightBrowser();
   try {
@@ -393,7 +417,9 @@ async function runSingleTransition({ spec, events, snapshots, model, onProgress,
     const rawEvents = spec.transitionData?.interactionEvents || [];
     const transitionEvents = resolveTransitionRefs(rawEvents, index);
 
-    if (transitionEvents.length === 0) return { action: null, toolCallCount: 0 };
+    if (transitionEvents.length === 0) {
+      return { action: buildFailedAction(spec, "no_resolved_events"), toolCallCount: 0 };
+    }
 
     console.log(`[browserwire]   transition #${i + 1}→#${i + 2} (${triggerKind}): ${transitionEvents.length} events`);
 
@@ -412,7 +438,9 @@ async function runSingleTransition({ spec, events, snapshots, model, onProgress,
       sessionId,
     });
 
-    if (!result.code) return { action: null, toolCallCount: result.toolCallCount };
+    if (!result.code) {
+      return { action: buildFailedAction(spec, "agent_no_code"), toolCallCount: result.toolCallCount };
+    }
 
     return {
       action: {

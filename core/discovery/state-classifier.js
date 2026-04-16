@@ -24,7 +24,8 @@ A "state" is a distinct page or view — identified by its layout and purpose.
 - NOT identified by URL alone (SPAs reuse URLs across different views).
 - NOT by transient input values (form field contents, search queries, checkboxes).
 - Two snapshots of the SAME form page are the SAME state even if the user typed into fields, toggled checkboxes, or opened/closed dropdowns between them.
-- A page with a modal overlay or dropdown popup is the SAME state as without it.
+- A dropdown, date picker, autocomplete, or tooltip is the SAME state as without it — these are transient UI elements triggered by the user's form interaction.
+- A blocking modal or overlay that appears on its own (e.g. promotional popup, cookie banner, login gate) and must be explicitly dismissed before the user can proceed IS a DIFFERENT state — it changes what actions are available.
 - A fundamentally different page layout (list → detail, form → confirmation) is a DIFFERENT state.
 
 You will see a screenshot, URL, and title. You will also see previously discovered states.
