@@ -23,18 +23,18 @@ export const done = {
   returnDirect: true,
   description:
     "Signal that you have finished. " +
-    "In transition mode, pass the tested Playwright code and input definitions. " +
+    "In transition mode, code is taken from your last successful test_code call — do NOT pass code here. " +
+    "Pass input definitions, name, and description only. " +
     "CRITICAL: You MUST call this tool to complete your task.",
   parameters: z.object({
-    code: z.string().optional().describe("Playwright async function body: (page, inputs) => { ... }. Required in transition mode."),
     inputs: z.array(actionInputSchema).optional().describe("Input parameter definitions for the action. Required in transition mode."),
     name: z.string().optional().describe("Short snake_case name for this action, e.g., fill_calendar_name, click_submit_button"),
     description: z.string().optional().describe("One-line description of what this action does"),
   }),
-  execute: (ctx, { code, inputs, name, description } = {}) => {
+  execute: (ctx, { inputs, name, description } = {}) => {
     ctx._done = true;
-    if (code) {
-      ctx._transitionCode = code;
+    if (ctx._lastTestedCode) {
+      ctx._transitionCode = ctx._lastTestedCode;
       ctx._transitionInputs = inputs || [];
       ctx._transitionName = name || null;
       ctx._transitionDescription = description || null;

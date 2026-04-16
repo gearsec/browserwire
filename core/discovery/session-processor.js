@@ -96,6 +96,10 @@ export async function processRecording({ recording, model, onProgress, sessionId
     }});
   }
 
+  // Free screenshots — classifier is done, agents use their own browser + CDP
+  for (const snap of consolidatedSnapshots) { snap.screenshot = null; }
+  log.info(`memory after Pass 1: ${Math.round(process.memoryUsage.rss() / 1024 / 1024)}MB RSS`);
+
   // ── Pass 2: Extract API intents ──
   log.info("── Pass 2: Intent Extraction ──");
   const { intents } = await extractIntents({ groups, events, snapshots: consolidatedSnapshots, model, log });
@@ -122,6 +126,8 @@ export async function processRecording({ recording, model, onProgress, sessionId
   // ── Pass 2.5: Detect transitions ──
   const transitionSpecs = detectTransitions(consolidatedSnapshots, groups, precomputedTransitions);
   log.info(`── Pass 2.5: Transition Detection (${transitionSpecs.length} actionable transitions) ──`);
+
+  log.info(`memory after Pass 2: ${Math.round(process.memoryUsage.rss() / 1024 / 1024)}MB RSS`);
 
   log.info(`── Pass 3: Agent Execution (${viewIntents.length} views, ${transitionSpecs.length} transitions) ──`);
 
@@ -190,10 +196,15 @@ export async function processRecording({ recording, model, onProgress, sessionId
     ),
     // Transition agents — one per detected transition, concurrency-limited
     Promise.all(
-      transitionSpecs.map((spec) => limit(async () => {
+      transitionSpecs.map((spec, idx) => limit(async () => {
         log.info(`launching transition agent: #${spec.index + 1}→#${spec.index + 2}`);
+        // Pass ±2 adjacent transitions for multi-step interaction context
+        const adjacentSpecs = transitionSpecs
+          .slice(Math.max(0, idx - 2), idx + 3)
+          .filter((s) => s !== spec);
         return runSingleTransition({
           spec,
+          adjacentSpecs,
           events,
           snapshots: consolidatedSnapshots,
           model,
@@ -380,18 +391,35 @@ function buildFailedAction(spec, reason) {
 }
 
 /**
+ * Build a human-readable summary of adjacent transitions for agent context.
+ * Helps agents recognize multi-step interactions (autocomplete, date pickers).
+ */
+function buildAdjacentContext(spec, adjacentSpecs) {
+  if (!adjacentSpecs?.length) return "";
+  return "Adjacent transitions (for context):\n" + adjacentSpecs.map((s) => {
+    const dir = s.index < spec.index ? `[before, -${spec.index - s.index}]` : `[after, +${s.index - spec.index}]`;
+    const events = s.transitionData?.interactionEvents || [];
+    const summary = events.slice(0, 3).map((e) =>
+      `${e.type}(${e.interaction || e.text || ""})`
+    ).join(", ");
+    return `  ${dir} #${s.index + 1}→#${s.index + 2} (${s.triggerKind})${summary ? ": " + summary : ""}`;
+  }).join("\n");
+}
+
+/**
  * Run one transition agent for a single snapshot transition.
  * Owns its own browser lifecycle — safe for parallel execution.
  *
  * @param {object} options
  * @param {object} options.spec — { index, triggerKind, stateInfo }
+ * @param {Array} [options.adjacentSpecs] — ±2 neighboring transition specs
  * @param {Array} options.events — full rrweb event stream
  * @param {Array} options.snapshots — snapshot markers
  * @param {function} [options.onProgress]
  * @param {string} [options.sessionId]
  * @returns {Promise<{ action: object, toolCallCount: number }>}
  */
-async function runSingleTransition({ spec, events, snapshots, model, onProgress, sessionId }) {
+async function runSingleTransition({ spec, adjacentSpecs, events, snapshots, model, onProgress, sessionId }) {
   const { index: i, triggerKind } = spec;
   const snapshot = snapshots[i];
   const nextSnapshot = snapshots[i + 1];
@@ -423,6 +451,8 @@ async function runSingleTransition({ spec, events, snapshots, model, onProgress,
 
     console.log(`[browserwire] transition #${i + 1}→#${i + 2} (${triggerKind}): ${transitionEvents.length} events`);
 
+    const adjacentContext = buildAdjacentContext(spec, adjacentSpecs);
+
     const result = await runAgent({
       index,
       browser,
@@ -430,6 +460,7 @@ async function runSingleTransition({ spec, events, snapshots, model, onProgress,
       snapshots,
       snapshotIndex: i,
       transitionEvents,
+      adjacentContext,
       stateInfo: spec.stateInfo,
       eventRange: spec.eventRange,
       transitionData: spec.transitionData,
