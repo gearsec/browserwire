@@ -20,6 +20,8 @@ export class StateMachineManifest {
     /** @type {Map<string, object>} state id → state object */
     this._states = new Map();
     this._stateIdCounter = 0;
+    /** @type {Array<object>} top-level workflow definitions */
+    this._workflows = [];
   }
 
   // -------------------------------------------------------------------------
@@ -135,6 +137,28 @@ export class StateMachineManifest {
   }
 
   // -------------------------------------------------------------------------
+  // Workflow management
+  // -------------------------------------------------------------------------
+
+  /**
+   * Add a workflow to the manifest.
+   *
+   * @param {{ name: string, description?: string, steps: Array<{ state: string, action?: string, view?: string }> }} workflow
+   */
+  addWorkflow({ name, description, steps }) {
+    this._workflows.push({ name, description, steps });
+  }
+
+  /**
+   * Get all workflows.
+   *
+   * @returns {object[]}
+   */
+  getWorkflows() {
+    return [...this._workflows];
+  }
+
+  // -------------------------------------------------------------------------
   // Serialization
   // -------------------------------------------------------------------------
 
@@ -149,6 +173,7 @@ export class StateMachineManifest {
       domainDescription: this.domainDescription,
       initial_state: this.initial_state,
       states: this.getStates(),
+      workflows: this.getWorkflows(),
     };
   }
 
@@ -194,6 +219,11 @@ export class StateMachineManifest {
           to_state: a.to_state,
         })),
       })),
+      workflows: this.getWorkflows().map((w) => ({
+        name: w.name,
+        description: w.description,
+        steps: w.steps,
+      })),
     };
   }
 
@@ -231,6 +261,8 @@ export class StateMachineManifest {
         m._stateIdCounter = num + 1;
       }
     }
+
+    m._workflows = [...(obj.workflows || [])];
 
     return m;
   }

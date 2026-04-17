@@ -233,6 +233,8 @@ export async function processRecording({ recording, model, onProgress, sessionId
   const agentResults = [...viewResults];
 
   // ── Pass 3.5: Workflow assembly — one LLM agent per workflow intent ──
+  const workflows = [];
+
   if (workflowIntents.length > 0 && allActions.length > 0) {
     log.info(`── Pass 3.5: Workflow Assembly (${workflowIntents.length} workflows, ${allActions.length} actions) ──`);
 
@@ -255,18 +257,30 @@ export async function processRecording({ recording, model, onProgress, sessionId
       workflowActions.sort((a, b) => a._snapshotIndex - b._snapshotIndex);
 
       if (workflowActions.length > 0) {
-        const workflowName = assignment.workflow_name || workflowIntents[w].name;
-        const formGroupName = workflowName.replace(/\s+/g, "_").toLowerCase();
-        for (let j = 0; j < workflowActions.length; j++) {
-          workflowActions[j].form_group = formGroupName;
-          workflowActions[j].sequence_order = j;
-        }
+        const workflowName = (assignment.workflow_name || workflowIntents[w].name)
+          .replace(/\s+/g, "_").toLowerCase();
+
         // Detect form pattern: inputs + final click = form_submit
         const hasInputs = workflowActions.some((a) => a.kind === "input");
         const lastAction = workflowActions[workflowActions.length - 1];
         if (hasInputs && lastAction.kind === "click") {
           lastAction.kind = "form_submit";
         }
+
+        // Build workflow steps referencing state names + action names
+        const steps = workflowActions.map((a) => {
+          const snapshotIdx = a._snapshotIndex;
+          const stateName = (snapshotIdx !== undefined && snapshotIdx < groups.length)
+            ? groups[snapshotIdx].stateIdentity?.name || `state_${groups[snapshotIdx].stateLabel}`
+            : "unknown";
+          return { state: stateName, action: a.name };
+        });
+
+        workflows.push({
+          name: workflowName,
+          description: workflowIntents[w].description,
+          steps,
+        });
       }
 
       log.info(`workflow "${assignment.workflow_name}": ${workflowActions.length} actions`);
@@ -278,21 +292,19 @@ export async function processRecording({ recording, model, onProgress, sessionId
       });
     }
 
-    // Unclaimed actions kept as standalone
+    // Unclaimed actions still get merged into states but no workflow is created
     const unclaimedActions = allActions.filter((_, idx) => !claimedIndices.has(idx));
     if (unclaimedActions.length > 0) {
-      assignFormGroups(unclaimedActions, groups);
       agentResults.push({
         intent: { name: "standalone_actions", type: "workflow" },
         pendingViews: [],
         pendingActions: unclaimedActions,
         toolCallCount: 0,
       });
-      log.info(`standalone actions: ${unclaimedActions.length}`);
+      log.info(`standalone actions (no workflow): ${unclaimedActions.length}`);
     }
   } else if (allActions.length > 0) {
-    // No workflow intents — all actions are standalone
-    assignFormGroups(allActions, groups);
+    // No workflow intents — actions exist in states but no workflows
     agentResults.push({
       intent: { name: "standalone_actions", type: "workflow" },
       pendingViews: [],
@@ -308,7 +320,7 @@ export async function processRecording({ recording, model, onProgress, sessionId
 
   // ── Pass 4: Assemble manifest ──
   log.info("── Pass 4: Assembly ──");
-  const manifest = assembleManifest({ groups, agentResults });
+  const manifest = assembleManifest({ groups, agentResults, workflows });
   const manifestJson = manifest.toJSON();
 
   log.info(`session processing complete: ${manifest.getStates().length} states, ${totalToolCalls} total tool calls`);
@@ -563,65 +575,6 @@ async function runWorkflowAssemblyAgent({ actions, intent, model }) {
   }
 }
 
-/**
- * Deterministically assign form_group, sequence_order, and to_state
- * to a sequence of per-transition actions.
- *
- * Groups consecutive actions on the same state. If a group has input
- * actions followed by a click/submit, they form a workflow group.
- */
-export function assignFormGroups(actions, groups) {
-  if (actions.length === 0) return;
-
-  // Group consecutive actions by state label
-  let currentGroup = [];
-  let currentLabel = null;
-
-  const flushGroup = () => {
-    if (currentGroup.length === 0) return;
-
-    // Check if this is a form pattern: input actions + final click
-    const hasInputs = currentGroup.some((a) => a.kind === "input");
-    const lastAction = currentGroup[currentGroup.length - 1];
-    const endsWithClick = lastAction.kind === "click";
-
-    if (hasInputs && endsWithClick) {
-      // This is a form workflow
-      const stateName = getStateName(currentGroup[0], groups);
-      const formGroupName = `${stateName}_form`.replace(/\s+/g, "_").toLowerCase();
-
-      for (let j = 0; j < currentGroup.length; j++) {
-        currentGroup[j].form_group = formGroupName;
-        currentGroup[j].sequence_order = j;
-      }
-      // Mark the last action as form_submit
-      lastAction.kind = "form_submit";
-    }
-
-    currentGroup = [];
-  };
-
-  for (const action of actions) {
-    const snapshotIdx = action._snapshotIndex;
-    const label = snapshotIdx < groups.length ? groups[snapshotIdx].stateLabel : null;
-
-    if (label !== currentLabel) {
-      flushGroup();
-      currentLabel = label;
-    }
-    currentGroup.push(action);
-  }
-  flushGroup();
-}
-
-function getStateName(action, groups) {
-  const idx = action._snapshotIndex;
-  if (idx !== undefined && idx < groups.length) {
-    return groups[idx].stateIdentity?.name || `state_${groups[idx].stateLabel}`;
-  }
-  return "unknown";
-}
-
 // ---------------------------------------------------------------------------
 // Pass 4: Assemble manifest from parallel agent results
 // ---------------------------------------------------------------------------
@@ -633,7 +586,7 @@ function getStateName(action, groups) {
  * views and actions into the appropriate states. Deduplicates actions
  * by name within each state.
  */
-function assembleManifest({ groups, agentResults }) {
+function assembleManifest({ groups, agentResults, workflows = [] }) {
   const manifest = new StateMachineManifest();
   const labelToManifestId = new Map();
 
@@ -704,6 +657,11 @@ function assembleManifest({ groups, agentResults }) {
         }
       }
     }
+  }
+
+  // Add workflows
+  for (const wf of workflows) {
+    manifest.addWorkflow(wf);
   }
 
   return manifest;

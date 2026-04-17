@@ -58,9 +58,23 @@ export const actionSchema = z.object({
   description: z.string(),
   inputs: z.array(actionInputSchema).optional(),
   to_state: z.string().describe("Destination state after executing this action"),
-  form_group: z.string().optional().describe("Groups actions belonging to the same form (e.g. 'registration_form'). Actions sharing a form_group are replayed in sequence_order by a single workflow endpoint."),
-  sequence_order: z.number().optional().describe("Execution order within the form_group (0, 1, 2, ...). The submit action gets the highest sequence_order."),
   code: z.string().describe("Playwright async function body: (page, inputs) => { ... }"),
+});
+
+// ---------------------------------------------------------------------------
+// Workflow schema (compositions of actions and views across states)
+// ---------------------------------------------------------------------------
+
+export const workflowStepSchema = z.object({
+  state: z.string().describe("State name where this step executes"),
+  action: z.string().optional().describe("Action name to execute (mutation step)"),
+  view: z.string().optional().describe("View name to execute (data-gathering step)"),
+});
+
+export const workflowSchema = z.object({
+  name: z.string(),
+  description: z.string().optional(),
+  steps: z.array(workflowStepSchema).min(1),
 });
 
 // ---------------------------------------------------------------------------
@@ -96,4 +110,5 @@ export const stateMachineManifestSchema = z.object({
   domainDescription: z.string().optional(),
   initial_state: z.string(),
   states: z.array(stateSchema).min(1),
+  workflows: z.array(workflowSchema).default([]),
 });
