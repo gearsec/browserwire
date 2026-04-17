@@ -113,6 +113,44 @@ export function validateManifest(manifest) {
     }
   }
 
+  // Workflow validation
+  const stateNameSet = new Set(data.states.map((s) => s.name));
+  const stateByName = new Map(data.states.map((s) => [s.name, s]));
+  const workflowNames = new Set();
+
+  for (const workflow of data.workflows || []) {
+    if (workflowNames.has(workflow.name)) {
+      errors.push(`Duplicate workflow name: "${workflow.name}"`);
+    }
+    workflowNames.add(workflow.name);
+
+    for (const step of workflow.steps) {
+      if (!stateNameSet.has(step.state)) {
+        errors.push(`Workflow "${workflow.name}": step references unknown state "${step.state}"`);
+        continue;
+      }
+
+      if (!step.action && !step.view) {
+        errors.push(`Workflow "${workflow.name}": step in state "${step.state}" must have an action or view`);
+      }
+      if (step.action && step.view) {
+        errors.push(`Workflow "${workflow.name}": step in state "${step.state}" must have action or view, not both`);
+      }
+
+      const state = stateByName.get(step.state);
+      if (step.action && state) {
+        if (!state.actions.some((a) => a.name === step.action)) {
+          errors.push(`Workflow "${workflow.name}": unknown action "${step.action}" in state "${step.state}"`);
+        }
+      }
+      if (step.view && state) {
+        if (!state.views.some((v) => v.name === step.view)) {
+          errors.push(`Workflow "${workflow.name}": unknown view "${step.view}" in state "${step.state}"`);
+        }
+      }
+    }
+  }
+
   if (errors.length > 0) {
     return { valid: false, errors };
   }
