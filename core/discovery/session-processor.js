@@ -120,7 +120,6 @@ export async function processRecording({ recording, model, onProgress, sessionId
   }
 
   // Split intents by type
-  const viewIntents = intents.filter((i) => i.type === "view");
   const workflowIntents = intents.filter((i) => i.type === "workflow");
 
   // ── Pass 2.5: Detect transitions ──
@@ -129,38 +128,48 @@ export async function processRecording({ recording, model, onProgress, sessionId
 
   log.info(`memory after Pass 2: ${Math.round(process.memoryUsage.rss() / 1024 / 1024)}MB RSS`);
 
-  log.info(`── Pass 3: Agent Execution (${viewIntents.length} views, ${transitionSpecs.length} transitions) ──`);
+  // Group snapshots by state label for view agents
+  const stateSnapshotMap = new Map();
+  for (const group of groups) {
+    if (!stateSnapshotMap.has(group.stateLabel)) stateSnapshotMap.set(group.stateLabel, []);
+    stateSnapshotMap.get(group.stateLabel).push(group);
+  }
+  const uniqueStates = [...stateSnapshotMap.entries()].filter(
+    ([, stateGroups]) => stateGroups.some((g) => g.representative?.rrwebTree)
+  );
+
+  log.info(`── Pass 3: Agent Execution (${uniqueStates.length} states for views, ${transitionSpecs.length} transitions) ──`);
 
   let totalToolCalls = 0;
   const limit = getBrowserLimiter();
 
   // ── Pass 3: Parallel view + transition agents ──
   const [viewResults, transitionResults] = await Promise.all([
-    // View agents — one per view intent
+    // View agents — one per unique state, with all snapshots for that state
     Promise.all(
-      viewIntents.map((intent) => limit(async () => {
-        log.info(`launching view agent: ${intent.name}`);
+      uniqueStates.map(([stateLabel, stateGroups]) => limit(async () => {
+        const stateInfo = stateGroups[0]?.stateIdentity;
+        const stateName = stateInfo?.name || stateLabel;
+        log.info(`launching view agent for state: ${stateName}`);
         try {
-          const targetGroup = groups.find((g) => g.isFirstOccurrence && g.stateIdentity?.name === intent.name)
-            || groups.find((g) => g.isFirstOccurrence)
-            || groups[0];
-          const snapshot = targetGroup.representative;
-          const snapshotIdx = groups.indexOf(targetGroup);
-
-          if (!snapshot?.rrwebTree) {
-            return { intent, error: "No rrwebTree", pendingViews: [], pendingActions: [], toolCallCount: 0 };
+          const stateSnapshots = stateGroups.map((g) => g.representative).filter((s) => s?.rrwebTree);
+          if (stateSnapshots.length === 0) {
+            return { pendingViews: [], pendingActions: [], toolCallCount: 0 };
           }
+
+          const firstSnapshot = stateSnapshots[0];
+          const snapshotIdx = groups.indexOf(stateGroups[0]);
 
           const browser = new PlaywrightBrowser();
           try {
             await browser.ensureBrowser();
 
             const index = new SnapshotIndex({
-              rrwebSnapshot: snapshot.rrwebTree,
+              rrwebSnapshot: firstSnapshot.rrwebTree,
               browser,
-              screenshot: snapshot.screenshot || null,
-              url: snapshot.url,
-              title: snapshot.title,
+              screenshot: firstSnapshot.screenshot || null,
+              url: firstSnapshot.url,
+              title: firstSnapshot.title,
             });
             await index.enrichWithCDP();
 
@@ -170,11 +179,11 @@ export async function processRecording({ recording, model, onProgress, sessionId
               events,
               snapshots: consolidatedSnapshots,
               snapshotIndex: snapshotIdx,
-              stateInfo: targetGroup.stateIdentity,
-              intent,
+              stateSnapshots,
+              stateInfo,
               model,
               onProgress: ({ tool }) => {
-                if (onProgress) onProgress({ phase: "extraction", intent: intent.name, tool });
+                if (onProgress) onProgress({ phase: "extraction", intent: stateName, tool });
               },
               sessionId,
             });
@@ -183,14 +192,14 @@ export async function processRecording({ recording, model, onProgress, sessionId
               view._snapshotIndex = snapshotIdx;
             }
 
-            log.info(`view "${intent.name}" done: ${result.pendingViews?.length || 0} views`);
-            return { intent, pendingViews: result.pendingViews, pendingActions: [], toolCallCount: result.toolCallCount };
+            log.info(`view agent "${stateName}" done: ${result.pendingViews?.length || 0} views`);
+            return { pendingViews: result.pendingViews, pendingActions: [], toolCallCount: result.toolCallCount };
           } finally {
             await browser.close().catch(() => {});
           }
         } catch (err) {
-          log.warn(`view "${intent.name}" error: ${err.message}`);
-          return { intent, error: err.message, pendingViews: [], pendingActions: [], toolCallCount: 0 };
+          log.warn(`view agent "${stateName}" error: ${err.message}`);
+          return { error: err.message, pendingViews: [], pendingActions: [], toolCallCount: 0 };
         }
       }))
     ),
@@ -644,6 +653,7 @@ function assembleManifest({ groups, agentResults }) {
       name,
       description,
       url_pattern,
+      url: group.representative.url,
       signature: { page_purpose, views: [], actions: [] },
       views: [],
       actions: [],

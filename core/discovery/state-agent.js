@@ -81,6 +81,7 @@ When naming your action via done(), use ALL available context:
 - **Inspect the element's label**: Use inspect_element to check for nearby labels, headings, or aria attributes that describe the field. A date picker under a "DEPARTURE" label is select_departure_date, not select_return_date.
 - **Use adjacent transitions**: Review the adjacent transition context to understand where this action sits in the user's flow. Name the action based on its role in the sequence.
 - **Don't guess generic names**: If the element is a date picker, calendar, or dropdown, look at the surrounding DOM text to determine its specific purpose before naming.
+- **Each action MUST have a unique, specific name**: "fill_X" is for typing into a field. "select_X" is for clicking a dropdown/autocomplete option. Never reuse the same name for different interactions — e.g. typing a city and selecting from the dropdown are different actions (fill_to_city vs select_to_city).
 
 ## Rules
 
@@ -294,8 +295,8 @@ export async function runViewAgent({
   events,
   snapshots,
   snapshotIndex,
+  stateSnapshots,
   stateInfo,
-  intent,
   onProgress,
   sessionId,
   model,
@@ -311,6 +312,7 @@ export async function runViewAgent({
     events,
     snapshots,
     currentSnapshotIndex: snapshotIndex,
+    _stateSnapshots: stateSnapshots || [],
     _isExistingState: false,
     _pendingViews: [],
     _done: false,
@@ -323,20 +325,24 @@ export async function runViewAgent({
   };
 
   const tools = getViewAgentTools(ctx);
-  const snapshot = snapshots[snapshotIndex];
+  const snapshot = stateSnapshots?.[0] || snapshots[snapshotIndex];
 
   const agent = createReactAgent({
     llm: model,
     tools,
     prompt: VIEW_PROMPT,
     preModelHook: compactMessagesHook,
-    name: `browserwire:view:${intent?.name || stateInfo?.name || snapshotIndex + 1}`,
+    name: `browserwire:view:${stateInfo?.name || snapshotIndex + 1}`,
   });
+
+  const snapshotList = (stateSnapshots || []).map((s, i) =>
+    `  [${i}] ${s.url}${i === 0 ? " (current)" : ""}`
+  ).join("\n");
 
   const humanText =
     `## State: ${stateInfo?.name || "unknown"}\n` +
     `URL: ${snapshot.url}\n` +
-    (intent ? `Intent: ${intent.name} — ${intent.description}\n` : "") +
+    (snapshotList ? `\nAvailable snapshots for this state:\n${snapshotList}\nUse load_snapshot(index) to switch between them.\n` : "") +
     `\nExtract business data views from this page. Test each view, submit via submit_view, then call done.`;
 
   try {

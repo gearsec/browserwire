@@ -87,7 +87,7 @@ export function createClassifierGraph({
     const stateListText = statesSoFar.length === 0
       ? "No states discovered yet. This is the first snapshot."
       : statesSoFar.map((s) =>
-          `- ${s.id}: "${s.name}" — ${s.description} (purpose: ${s.page_purpose})`
+          `- ${s.id}: "${s.name}" — ${s.description} (purpose: ${s.page_purpose}, url: ${s.url || "unknown"})`
         ).join("\n");
 
     // Build multimodal human message
@@ -171,7 +171,7 @@ export function createClassifierGraph({
         url_pattern: safePathname(snapshot.url),
         page_purpose: snapshot.title || "unknown",
       };
-      newStates.push({ id: stateId, ...identity });
+      newStates.push({ id: stateId, ...identity, url: snapshot.url });
       assignment = { stateLabel: stateId, stateIdentity: identity, isNew: true };
     } else if (json.existing_state_id) {
       assignment = {
@@ -188,7 +188,7 @@ export function createClassifierGraph({
         page_purpose: json.page_purpose || "",
         ...(json.domain ? { domain: json.domain, domainDescription: json.domain_description || "" } : {}),
       };
-      newStates.push({ id: stateId, ...identity });
+      newStates.push({ id: stateId, ...identity, url: snapshot.url });
       assignment = { stateLabel: stateId, stateIdentity: identity, isNew: true };
     }
 

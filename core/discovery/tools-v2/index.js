@@ -18,6 +18,7 @@ import { view_screenshot, get_accessibility_tree, get_page_regions, find_interac
 import { inspect_element } from "./inspect.js";
 import { test_code } from "./test-code.js";
 import { submit_view, done } from "./submit.js";
+import { load_snapshot } from "./navigate.js";
 
 // ---------------------------------------------------------------------------
 // Tool set: Transition mode
@@ -51,6 +52,7 @@ const viewTools = [
   find_interactive,
   inspect_element,
   test_code,
+  load_snapshot,
   submit_view,
   done,
 ];
