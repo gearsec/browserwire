@@ -211,6 +211,7 @@ export class StateMachineManifest {
           name: v.name,
           isList: v.isList,
           returns: v.returns,
+          ...(v.pagination ? { pagination: v.pagination } : {}),
         })),
         actions: s.actions.map((a) => ({
           name: a.name,

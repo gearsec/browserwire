@@ -28,16 +28,21 @@ A "state" is a distinct page or view — identified by its layout and purpose.
 - A blocking modal or overlay that appears on its own (e.g. promotional popup, cookie banner, login gate) and must be explicitly dismissed before the user can proceed IS a DIFFERENT state — it changes what actions are available.
 - A fundamentally different page layout (list → detail, form → confirmation) is a DIFFERENT state.
 
+NAMING (critical):
+- name MUST be a descriptive snake_case label derived from what the user can DO or SEE on the page.
+- Good: "product_search_results", "user_registration", "shopping_cart", "account_settings", "order_confirmation", "login_page", "invoice_detail", "dashboard_overview"
+- Bad: "state_0", "page_1", "s0", "new_state" — NEVER use generic or numbered names.
+
 You will see a screenshot, URL, and title. You will also see previously discovered states.
 
 Respond with ONLY a JSON object (no markdown, no explanation):
-- If it matches an existing state: { "existing_state_id": "s0" }
+- If it matches an existing state: { "existing_state_id": "s0", "name": "existing_state_name" }
 - If it's a new state: { "state_id": "new", "name": "snake_case_name", "description": "What this state represents", "url_pattern": "/path/{param}", "page_purpose": "short purpose" }
 
 For the FIRST snapshot only, also include: "domain": "category", "domain_description": "1-2 sentence site description"
 
 Field rules:
-- name: snake_case semantic name (e.g. "product_list", "checkout_form")
+- name: always required — descriptive snake_case semantic name (e.g. "product_list", "checkout_form")
 - url_pattern: RFC 6570 URI template. Use {param} for path params, {?param} for query params.
 - page_purpose: short phrase for deduplication (e.g. "browse products")`;
 

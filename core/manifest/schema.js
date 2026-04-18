@@ -22,12 +22,18 @@ export const viewReturnFieldSchema = z.object({
   description: z.string().optional(),
 });
 
+export const paginationSchema = z.object({
+  type: z.literal("infinite_scroll"),
+  scroll_target: z.string().optional().describe("CSS selector for the scrollable container. Omit for window scroll."),
+});
+
 export const viewSchema = z.object({
   name: z.string(),
   description: z.string(),
   isList: z.boolean(),
   returns: z.array(viewReturnFieldSchema).describe("Fields returned by this view"),
   code: z.string().describe("Playwright async function body: (page) => { ... }"),
+  pagination: paginationSchema.optional().describe("Set when the view targets an infinite-scroll list"),
 });
 
 // ---------------------------------------------------------------------------

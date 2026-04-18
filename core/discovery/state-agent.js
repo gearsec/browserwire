@@ -127,6 +127,7 @@ You have a LIMITED iteration budget (~30 tool calls). Be efficient:
 ## Code conventions
 
 - View code: \`async (page) => { ... }\` — returns an object (single) or array of objects (list) with named fields
+- If the list loads more items on scroll (infinite scroll / virtual list), set \`pagination: { type: "infinite_scroll" }\` on the view. If the scrollable container is NOT the window (e.g., a specific div), also set \`scroll_target\` to its CSS selector. The view code should extract only the currently visible items — the runtime handles scrolling and accumulation.
 - Use \`page.locator()\` with CSS selectors. Keep code simple and direct.
 - NEVER use [href="..."] CSS attribute selectors.
 - Wrap each field read in try/catch so missing elements return null: \`let text; try { text = await loc.innerText(); } catch { text = null; }\`
