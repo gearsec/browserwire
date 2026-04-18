@@ -237,6 +237,8 @@ export const test_code = {
       response.error = execResult.error;
     }
 
+    // Store last attempted code (fallback for done() when no test succeeds)
+    ctx._lastAttemptedCode = code;
     // Store last successfully tested code for done() to use
     if (execResult.success) {
       ctx._lastTestedCode = code;

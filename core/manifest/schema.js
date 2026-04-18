@@ -23,7 +23,7 @@ export const viewReturnFieldSchema = z.object({
 });
 
 export const paginationSchema = z.object({
-  type: z.literal("infinite_scroll"),
+  type: z.enum(["infinite_scroll"]),
   scroll_target: z.string().optional().describe("CSS selector for the scrollable container. Omit for window scroll."),
 });
 
