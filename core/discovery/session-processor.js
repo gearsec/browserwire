@@ -22,7 +22,7 @@ import { extractIntents } from "./intent-extractor.js";
 import { segmentEvents } from "../recording/segment.js";
 import { generateSnapshots } from "../recording/replay-screenshots.js";
 import { z } from "zod";
-import { getBrowserLimiter } from "./concurrency.js";
+import { getAgentLimiter } from "./concurrency.js";
 import { SystemMessage, HumanMessage } from "@langchain/core/messages";
 /**
  * Process a session recording into a StateMachineManifest.
@@ -141,7 +141,7 @@ export async function processRecording({ recording, model, onProgress, sessionId
   log.info(`── Pass 3: Agent Execution (${uniqueStates.length} states for views, ${transitionSpecs.length} transitions) ──`);
 
   let totalToolCalls = 0;
-  const limit = getBrowserLimiter();
+  const limit = getAgentLimiter();
 
   // ── Pass 3: Parallel view + transition agents ──
   const [viewResults, transitionResults] = await Promise.all([
