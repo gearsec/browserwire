@@ -37,7 +37,7 @@ You will receive the transition events between two snapshots — these show exac
 1. **Identify the target**: Review the transition events. Find the primary element the user interacted with (the ref with input events, or the clicked ref).
 2. **Inspect**: Use inspect_element on the target ref to see tag, attributes, form context.
 3. **Write code**: Write a Playwright async function that reproduces the interaction.
-   - Text/email/tel/url/textarea: \`page.locator('...').fill(inputs.field_name)\`
+   - Text/email/tel/url/textarea: \`page.locator('...').pressSequentially(inputs.field_name, { delay: 100 })\`
    - Native <select>: \`page.locator('select').selectOption(inputs.field_name)\`
    - Custom dropdown (role=combobox): click trigger → wait for listbox → click option
    - Checkbox: \`page.locator('...').setChecked(inputs.field_name)\`
@@ -51,7 +51,7 @@ You will receive the transition events between two snapshots — these show exac
 
 - Code signature: \`async (page, inputs) => { ... }\`
 - When testing with test_code, write the FINAL parameterized code and pass sample values as a JSON string via the inputs parameter:
-  \`test_code({ code: "async (page, inputs) => { await page.locator('input').fill(inputs.city); }", inputs: "{\\"city\\": \\"test\\"}" })\`
+  \`test_code({ code: "async (page, inputs) => { await page.locator('input').pressSequentially(inputs.city, { delay: 100 }); }", inputs: "{\\"city\\": \\"test\\"}" })\`
 - For done(), pass inputs schema, name, and description only. Code is taken from your last successful test_code call.
 - Use \`page.locator()\` with CSS selectors. Keep code simple and direct.
 - NEVER use [href="..."] CSS attribute selectors.
@@ -86,8 +86,8 @@ When naming your action via done(), use ALL available context:
 ## Rules
 
 - You MUST test your code with test_code before calling done.
+- You MUST always call done() before finishing. If test_code keeps failing after a few attempts, submit your best attempt — call done() with your best code. Never exhaust the iteration limit without calling done(). Submitting imperfect code is better than producing nothing.
 - Do NOT inspect elements unrelated to the transition events.
-- Do NOT call done without code — if you can't write working code, call done() with no arguments.
 - When calling done(), include a snake_case \`name\` (e.g., \`fill_calendar_name\`, \`click_submit_button\`, \`select_color\`) and a one-line \`description\` of what the action does.
 - Every input MUST include the expected format in its description. The user of the API should know exactly what to pass without guessing.
 - If the site uses a non-standard format internally, accept a standard format from the user and convert it in the code.`;

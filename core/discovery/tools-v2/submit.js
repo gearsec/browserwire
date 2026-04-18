@@ -33,8 +33,9 @@ export const done = {
   }),
   execute: (ctx, { inputs, name, description } = {}) => {
     ctx._done = true;
-    if (ctx._lastTestedCode) {
-      ctx._transitionCode = ctx._lastTestedCode;
+    const code = ctx._lastTestedCode || ctx._lastAttemptedCode;
+    if (code) {
+      ctx._transitionCode = code;
       ctx._transitionInputs = inputs || [];
       ctx._transitionName = name || null;
       ctx._transitionDescription = description || null;
