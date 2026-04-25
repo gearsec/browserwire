@@ -137,6 +137,59 @@ export class StateMachineManifest {
   }
 
   // -------------------------------------------------------------------------
+  // View / Action updates on existing states
+  // -------------------------------------------------------------------------
+
+  /**
+   * Update an existing view's fields (e.g. code, returns).
+   *
+   * @param {string} stateId
+   * @param {string} viewName
+   * @param {object} updates — fields to merge into the view
+   * @returns {boolean} true if found and updated
+   */
+  updateView(stateId, viewName, updates) {
+    const state = this._states.get(stateId);
+    if (!state) return false;
+    const view = state.views.find((v) => v.name === viewName);
+    if (!view) return false;
+    Object.assign(view, updates);
+    return true;
+  }
+
+  /**
+   * Update an existing action's fields (e.g. code, inputs).
+   *
+   * @param {string} stateId
+   * @param {string} actionName
+   * @param {object} updates — fields to merge into the action
+   * @returns {boolean} true if found and updated
+   */
+  updateAction(stateId, actionName, updates) {
+    const state = this._states.get(stateId);
+    if (!state) return false;
+    const action = state.actions.find((a) => a.name === actionName);
+    if (!action) return false;
+    Object.assign(action, updates);
+    return true;
+  }
+
+  /**
+   * Find a state whose url_pattern matches a given URL.
+   *
+   * @param {string} url
+   * @returns {string|null} state ID or null
+   */
+  findStateByUrl(url) {
+    for (const state of this._states.values()) {
+      if (state.url_pattern && url.includes(state.url_pattern.replace(/\{[^}]+\}/g, ""))) {
+        return state.id;
+      }
+    }
+    return null;
+  }
+
+  // -------------------------------------------------------------------------
   // Workflow management
   // -------------------------------------------------------------------------
 
