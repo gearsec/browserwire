@@ -10,10 +10,7 @@ import { doneTool } from "./done.js";
 /**
  * Create the full tool set for the agent.
  *
- * Build mode: all 10 tools.
- * Execute mode: observation + execute_js + read_manifest + update tools + done.
- *
- * @param {{ page: import('patchright').Page, manifest: import('../../manifest/manifest.js').StateMachineManifest, mode: "build"|"execute", _done: boolean, _result: any }} ctx
+ * @param {{ page: import('patchright').Page, manifest: import('../../manifest/manifest.js').StateMachineManifest, _done: boolean, _result: any }} ctx
  * @returns {import('@langchain/core/tools').StructuredToolInterface[]}
  */
 export function createTools(ctx) {

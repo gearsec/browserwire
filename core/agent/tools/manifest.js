@@ -131,5 +131,77 @@ export function manifestTools(ctx) {
     }
   );
 
-  return [read_manifest, add_state, add_view, add_action, update_view, update_action];
+  const create_workflow = tool(
+    async ({ name, description }) => {
+      ctx.manifest.addWorkflow({ name, description, steps: [] });
+      return `Workflow '${name}' created`;
+    },
+    {
+      name: "create_workflow",
+      description: "Create a new workflow (API endpoint). Add steps to it with add_step.",
+      schema: z.object({
+        name: z.string().describe("Snake_case workflow name, e.g. 'search_products'"),
+        description: z.string().describe("What this workflow/API does"),
+      }),
+    }
+  );
+
+  const stepSchema = z.object({
+    workflow: z.string().describe("Workflow name"),
+    state: z.string().describe("State ID for this step, e.g. 's0'"),
+    action: z.string().optional().describe("Action name to execute at this state"),
+    view: z.string().optional().describe("View name to extract at this state"),
+  }).refine(
+    (d) => (d.action ? 1 : 0) + (d.view ? 1 : 0) === 1,
+    { message: "Exactly one of 'action' or 'view' must be set" }
+  );
+
+  const add_step = tool(
+    async ({ workflow, state, action, view }) => {
+      const step = { state, ...(action ? { action } : { view }) };
+      const idx = ctx.currentStep ?? 0;
+      const ok = ctx.manifest.insertStep(workflow, idx, step);
+      if (!ok) return `Error: workflow '${workflow}' not found or invalid position`;
+      return `Step added at position ${idx} in '${workflow}': ${JSON.stringify(step)}`;
+    },
+    {
+      name: "add_step",
+      description: "Add a step to the workflow at the current position. Exactly one of action or view must be set.",
+      schema: stepSchema,
+    }
+  );
+
+  const update_step = tool(
+    async ({ workflow, state, action, view }) => {
+      const idx = ctx.currentStep ?? 0;
+      const updates = { state, ...(action ? { action, view: undefined } : { view, action: undefined }) };
+      const ok = ctx.manifest.updateStep(workflow, idx, updates);
+      return ok ? `Step ${idx} updated in '${workflow}'` : `Error: no step at position ${idx} in '${workflow}'`;
+    },
+    {
+      name: "update_step",
+      description: "Update the current workflow step. Exactly one of action or view must be set.",
+      schema: stepSchema,
+    }
+  );
+
+  const remove_step = tool(
+    async ({ workflow }) => {
+      const idx = ctx.currentStep ?? 0;
+      const ok = ctx.manifest.removeStep(workflow, idx);
+      return ok ? `Step ${idx} removed from '${workflow}'` : `Error: no step at position ${idx} in '${workflow}'`;
+    },
+    {
+      name: "remove_step",
+      description: "Remove the current step from the workflow.",
+      schema: z.object({
+        workflow: z.string().describe("Workflow name"),
+      }),
+    }
+  );
+
+  return [
+    read_manifest, add_state, add_view, add_action, update_view, update_action,
+    create_workflow, add_step, update_step, remove_step,
+  ];
 }

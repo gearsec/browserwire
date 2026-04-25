@@ -203,6 +203,74 @@ export class StateMachineManifest {
   }
 
   /**
+   * Get a workflow by name.
+   *
+   * @param {string} name
+   * @returns {object|null}
+   */
+  getWorkflow(name) {
+    return this._workflows.find((w) => w.name === name) || null;
+  }
+
+  /**
+   * Append a step to a workflow.
+   *
+   * @param {string} workflowName
+   * @param {{ state: string, action?: string, view?: string }} step
+   * @returns {number|false} new step index, or false if workflow not found
+   */
+  appendStep(workflowName, step) {
+    const wf = this._workflows.find((w) => w.name === workflowName);
+    if (!wf) return false;
+    wf.steps.push(step);
+    return wf.steps.length - 1;
+  }
+
+  /**
+   * Update a step at a specific index.
+   *
+   * @param {string} workflowName
+   * @param {number} index
+   * @param {object} updates — fields to merge into the step
+   * @returns {boolean}
+   */
+  updateStep(workflowName, index, updates) {
+    const wf = this._workflows.find((w) => w.name === workflowName);
+    if (!wf || index < 0 || index >= wf.steps.length) return false;
+    Object.assign(wf.steps[index], updates);
+    return true;
+  }
+
+  /**
+   * Insert a step before a specific index.
+   *
+   * @param {string} workflowName
+   * @param {number} index
+   * @param {{ state: string, action?: string, view?: string }} step
+   * @returns {boolean}
+   */
+  insertStep(workflowName, index, step) {
+    const wf = this._workflows.find((w) => w.name === workflowName);
+    if (!wf || index < 0 || index > wf.steps.length) return false;
+    wf.steps.splice(index, 0, step);
+    return true;
+  }
+
+  /**
+   * Remove a step at a specific index.
+   *
+   * @param {string} workflowName
+   * @param {number} index
+   * @returns {boolean}
+   */
+  removeStep(workflowName, index) {
+    const wf = this._workflows.find((w) => w.name === workflowName);
+    if (!wf || index < 0 || index >= wf.steps.length) return false;
+    wf.steps.splice(index, 1);
+    return true;
+  }
+
+  /**
    * Get all workflows.
    *
    * @returns {object[]}
