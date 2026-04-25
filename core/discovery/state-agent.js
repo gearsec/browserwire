@@ -182,6 +182,10 @@ function injectScreenshot(ctx, messages) {
  * @param {object} [options.stateInfo] — { name, description }
  * @param {function} [options.onProgress]
  * @param {string} [options.sessionId]
+ * @param {string} [options.existingCode] — existing code to fix (if populated, included in prompt)
+ * @param {string} [options.errorMessage] — runtime error from the existing code
+ * @param {string} [options.userPrompt] — user-provided context about the issue
+ * @param {Array<{code: string, error: string}>} [options.priorAttempts] — prior fix attempts to avoid repeating
  * @returns {Promise<{ code?: string, inputs?: Array, toolCallCount: number, error?: string }>}
  */
 export async function runAgent({
@@ -198,6 +202,10 @@ export async function runAgent({
   onProgress,
   sessionId,
   model,
+  existingCode,
+  errorMessage,
+  userPrompt,
+  priorAttempts,
 }) {
   if (!model) {
     return { error: "No LLM provider configured", toolCallCount: 0 };
@@ -223,7 +231,13 @@ export async function runAgent({
     if (onProgress) onProgress({ tool: `transition-agent:${tool}` });
   };
 
-  const tools = getTransitionAgentTools(ctx);
+  let tools = getTransitionAgentTools(ctx);
+
+  // No transition events to verify against → remove test_code (prevents infinite retry loops)
+  if (!transitionEvents?.length && existingCode) {
+    tools = tools.filter((t) => t.name !== "test_code");
+  }
+
   const snapshot = snapshots[snapshotIndex];
 
   const agent = createReactAgent({
@@ -235,15 +249,38 @@ export async function runAgent({
   });
 
   const eventsJson = JSON.stringify(transitionEvents, null, 2);
+
+  let codeContext = "";
+  if (existingCode) {
+    codeContext += `\n## Existing Code\n\n\`\`\`js\n${existingCode}\n\`\`\`\n`;
+    if (errorMessage) codeContext += `\n**Error:** ${errorMessage}\n`;
+    if (userPrompt) codeContext += `\n**User context:** ${userPrompt}\n`;
+    if (priorAttempts?.length) {
+      codeContext += `\n**Prior fix attempts (avoid repeating these):**\n`;
+      for (const [i, a] of priorAttempts.entries()) {
+        codeContext += `- Attempt ${i + 1}: error="${a.error}"\n`;
+      }
+    }
+    codeContext += transitionEvents?.length
+      ? `\nFix the code so it works on the current page. Inspect the page, fix selectors/logic, test with test_code, then call done().\n`
+      : `\nFix the code so it works on the current page. Inspect the page, fix selectors/logic, then call done(code, inputs, name, description) with your fixed code. test_code is not available — pass your code directly to done().\n`;
+  }
+
   const humanText =
     `## Snapshot #${snapshotIndex + 1} → #${snapshotIndex + 2}\n` +
     `URL: ${snapshot.url}\n` +
     `State: ${stateInfo?.name || "unknown"}\n\n` +
-    `## Transition Events\n` +
-    `\`\`\`json\n${eventsJson}\n\`\`\`\n\n` +
+    (transitionEvents?.length
+      ? `## Transition Events\n\`\`\`json\n${eventsJson}\n\`\`\`\n\n`
+      : (existingCode ? '' : `## Transition Events\n\`\`\`json\n${eventsJson}\n\`\`\`\n\n`)) +
     (adjacentContext ? `## ${adjacentContext}\n\n` : "") +
-    `Write Playwright code that reproduces the primary interaction shown in these events. ` +
-    `Inspect the target element, write code, test it, then call done(code, inputs).`;
+    codeContext +
+    (existingCode
+      ? (transitionEvents?.length
+          ? `Review the existing code and the error. Inspect the page, fix the code, test it, then call done().`
+          : `Review the existing code and the error. Inspect the page, fix the code, then call done(code, inputs, name, description) with your fixed code.`)
+      : `Write Playwright code that reproduces the primary interaction shown in these events. ` +
+        `Inspect the target element, write code, test it, then call done(code, inputs).`);
 
   try {
     const initialMessages = [new HumanMessage(humanText)];
@@ -251,7 +288,7 @@ export async function runAgent({
 
     await agent.invoke(
       { messages: initialMessages },
-      { recursionLimit: 50, tags: ["pass:3", "transition-agent", `snapshot:${snapshotIndex + 1}`] }
+      { recursionLimit: 30, tags: ["pass:3", "transition-agent", `snapshot:${snapshotIndex + 1}`] }
     );
   } catch (err) {
     return { error: `Transition agent error: ${err.message}`, toolCallCount };
@@ -288,6 +325,10 @@ export async function runAgent({
  * @param {object} [options.intent] — { id, type, name, description }
  * @param {function} [options.onProgress]
  * @param {string} [options.sessionId]
+ * @param {string} [options.existingCode] — existing view code to fix (if populated, included in prompt)
+ * @param {string} [options.errorMessage] — runtime error from the existing code
+ * @param {string} [options.userPrompt] — user-provided context about the issue
+ * @param {Array<{code: string, error: string}>} [options.priorAttempts] — prior fix attempts to avoid repeating
  * @returns {Promise<{ pendingViews: Array, toolCallCount: number, error?: string }>}
  */
 export async function runViewAgent({
@@ -301,6 +342,10 @@ export async function runViewAgent({
   onProgress,
   sessionId,
   model,
+  existingCode,
+  errorMessage,
+  userPrompt,
+  priorAttempts,
 }) {
   if (!model) {
     return { error: "No LLM provider configured", toolCallCount: 0 };
@@ -340,11 +385,28 @@ export async function runViewAgent({
     `  [${i}] ${s.url}${i === 0 ? " (current)" : ""}`
   ).join("\n");
 
+  let codeContext = "";
+  if (existingCode) {
+    codeContext += `\n## Existing View Code\n\n\`\`\`js\n${existingCode}\n\`\`\`\n`;
+    if (errorMessage) codeContext += `\n**Error:** ${errorMessage}\n`;
+    if (userPrompt) codeContext += `\n**User context:** ${userPrompt}\n`;
+    if (priorAttempts?.length) {
+      codeContext += `\n**Prior fix attempts (avoid repeating these):**\n`;
+      for (const [i, a] of priorAttempts.entries()) {
+        codeContext += `- Attempt ${i + 1}: error="${a.error}"\n`;
+      }
+    }
+    codeContext += `\nFix the view code so it extracts data correctly from the current page. Inspect the page, fix selectors/logic, test, submit via submit_view, then call done.\n`;
+  }
+
   const humanText =
     `## State: ${stateInfo?.name || "unknown"}\n` +
     `URL: ${snapshot.url}\n` +
     (snapshotList ? `\nAvailable snapshots for this state:\n${snapshotList}\nUse load_snapshot(index) to switch between them.\n` : "") +
-    `\nExtract business data views from this page. Test each view, submit via submit_view, then call done.`;
+    codeContext +
+    (existingCode
+      ? `\nReview the existing view code and the error. Inspect the page, fix the code, test it, submit via submit_view, then call done.`
+      : `\nExtract business data views from this page. Test each view, submit via submit_view, then call done.`);
 
   try {
     const initialMessages = [new HumanMessage(humanText)];
@@ -353,7 +415,7 @@ export async function runViewAgent({
     await agent.invoke(
       { messages: initialMessages },
       {
-        recursionLimit: 100,
+        recursionLimit: 30,
         tags: ["pass:3", "view-agent", `snapshot:${snapshotIndex + 1}`],
       }
     );

@@ -65,6 +65,7 @@ const ClassifierAnnotation = Annotation.Root({
  * @param {Array} options.snapshots — snapshot markers with screenshot, url, title
  * @param {string} options.systemPrompt
  * @param {function} [options.onProgress] — called with { snapshot } per iteration
+ * @param {Array} [options.existingStates] — states from a prior manifest to pre-seed the classifier
  * @returns {{ graph, invoke: () => Promise<{ assignments, knownStates }> }}
  */
 export function createClassifierGraph({
@@ -73,9 +74,29 @@ export function createClassifierGraph({
   systemPrompt,
   onProgress,
   log,
+  existingStates,
 }) {
   const _log = log || { info: (...a) => console.log("[browserwire]", ...a), warn: (...a) => console.warn("[browserwire]", ...a) };
   let nextStateNum = 0;
+
+  // Pre-seed known states from existing manifest for incremental updates
+  const seedStates = [];
+  if (existingStates?.length) {
+    for (const state of existingStates) {
+      seedStates.push({
+        id: state.id,
+        name: state.name,
+        description: state.description,
+        url_pattern: state.url_pattern,
+        page_purpose: state.signature?.page_purpose || "",
+        url: state.url_pattern || "",
+      });
+      // Keep nextStateNum ahead of existing IDs to avoid collisions
+      const num = parseInt(state.id.replace(/^s/, ""), 10);
+      if (!isNaN(num) && num >= nextStateNum) nextStateNum = num + 1;
+    }
+    _log.info(`classifier: seeded ${seedStates.length} existing states, nextStateNum=${nextStateNum}`);
+  }
 
   // --- Classify node: process one snapshot per invocation ---
   const classifyNode = async (state) => {
@@ -229,8 +250,12 @@ export function createClassifierGraph({
 
   // --- Convenience invoke ---
   const invoke = async () => {
+    const initialState = { messages: [new SystemMessage(systemPrompt)] };
+    if (seedStates.length > 0) {
+      initialState.knownStates = seedStates;
+    }
     const finalState = await graph.invoke(
-      { messages: [new SystemMessage(systemPrompt)] },
+      initialState,
       {
         recursionLimit: snapshots.length * 2 + 5,
         runName: "browserwire:classifier",

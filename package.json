@@ -19,7 +19,8 @@
   "exports": {
     ".": "./core/pipeline/index.js",
     "./recording": "./core/recording/index.js",
-    "./manifest": "./core/manifest/index.js"
+    "./manifest": "./core/manifest/index.js",
+    "./healing": "./core/healing/index.js"
   },
   "files": [
     "core/",

@@ -23,17 +23,18 @@ export const done = {
   returnDirect: true,
   description:
     "Signal that you have finished. " +
-    "In transition mode, code is taken from your last successful test_code call — do NOT pass code here. " +
-    "Pass input definitions, name, and description only. " +
+    "In transition mode, code is normally taken from your last successful test_code call. " +
+    "If test_code is not available (healing without recording), pass code directly. " +
     "CRITICAL: You MUST call this tool to complete your task.",
   parameters: z.object({
+    code: z.string().optional().describe("The Playwright code. Pass this directly when test_code is not available (healing without recording). Otherwise omit — code is taken from your last test_code call."),
     inputs: z.array(actionInputSchema).optional().describe("Input parameter definitions for the action. Required in transition mode."),
     name: z.string().optional().describe("Short snake_case name for this action, e.g., fill_calendar_name, click_submit_button"),
     description: z.string().optional().describe("One-line description of what this action does"),
   }),
-  execute: (ctx, { inputs, name, description } = {}) => {
+  execute: (ctx, { code: passedCode, inputs, name, description } = {}) => {
     ctx._done = true;
-    const code = ctx._lastTestedCode || ctx._lastAttemptedCode;
+    const code = passedCode || ctx._lastTestedCode || ctx._lastAttemptedCode;
     if (code) {
       ctx._transitionCode = code;
       ctx._transitionInputs = inputs || [];

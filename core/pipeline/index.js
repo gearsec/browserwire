@@ -38,13 +38,15 @@ import { createCoreLogger } from "./logger.js";
  * @param {string} [options.config.langsmithProject] — LangSmith project name
  * @param {function} [options.onProgress] — progress callback ({ phase, tool, segmentation })
  * @param {string} [options.sessionId] — session identifier for tracing
+ * @param {object} [options.existingManifest] — existing manifest for incremental updates (rrweb + manifest + prompt)
+ * @param {string} [options.userPrompt] — user-provided context to guide pipeline stages
  * @returns {Promise<{ manifest: object|null, segmentation: object|null, totalToolCalls: number, error?: string }>}
  */
-export async function runPipeline({ recording, config, onProgress, sessionId, logger }) {
+export async function runPipeline({ recording, config, onProgress, sessionId, logger, existingManifest, userPrompt }) {
   const model = createModel(config);
   const log = createCoreLogger({ logger, sessionId });
 
   initTelemetryFromConfig(config, log);
 
-  return processRecording({ recording, model, onProgress, sessionId, log });
+  return processRecording({ recording, model, onProgress, sessionId, log, existingManifest, userPrompt });
 }

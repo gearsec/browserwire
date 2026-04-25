@@ -56,9 +56,10 @@ Field rules:
  * @param {object} options
  * @param {Array} options.snapshots — snapshot markers from recording
  * @param {Array} options.events — full rrweb event stream
+ * @param {Array} [options.existingStates] — states from a prior manifest to seed the classifier
  * @returns {Promise<{ groups: ConsolidatedGroup[], stateCount: number }>}
  */
-export async function classifyAndConsolidate({ snapshots, events, onProgress, model, log }) {
+export async function classifyAndConsolidate({ snapshots, events, onProgress, model, log, existingStates }) {
   if (!model) {
     if (log) log.warn("classifier: no LLM configured, using passthrough");
     else console.warn("[browserwire] classifier: no LLM configured, using passthrough");
@@ -72,6 +73,7 @@ export async function classifyAndConsolidate({ snapshots, events, onProgress, mo
     systemPrompt: CLASSIFIER_PROMPT,
     onProgress,
     log,
+    existingStates,
   });
 
   const { assignments, knownStates } = await invoke();

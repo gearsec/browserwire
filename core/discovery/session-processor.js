@@ -32,12 +32,20 @@ import { SystemMessage, HumanMessage } from "@langchain/core/messages";
  * @param {object} options.model — LangChain ChatModel instance
  * @param {function} [options.onProgress] — called with { phase, detail } on progress
  * @param {string} [options.sessionId]
+ * @param {object} [options.existingManifest] — existing manifest JSON for incremental updates
+ * @param {string} [options.userPrompt] — user-provided context to guide pipeline stages
  * @returns {Promise<{ manifest: object|null, error?: string, totalToolCalls: number }>}
  */
-export async function processRecording({ recording, model, onProgress, sessionId, log }) {
+export async function processRecording({ recording, model, onProgress, sessionId, log, existingManifest, userPrompt }) {
   // Fallback logger for standalone/CLI usage
   if (!log) {
     log = { info: (...a) => console.log("[browserwire]", ...a), warn: (...a) => console.warn("[browserwire]", ...a), error: (...a) => console.error("[browserwire]", ...a) };
+  }
+
+  // Reconstruct prior manifest for incremental updates
+  const priorManifest = existingManifest ? StateMachineManifest.fromJSON(existingManifest) : null;
+  if (priorManifest) {
+    log.info(`incremental mode: seeding from existing manifest (${priorManifest.getStates().length} states, ${priorManifest.getWorkflows().length} workflows)`);
   }
 
   const { events } = recording;
@@ -78,6 +86,7 @@ export async function processRecording({ recording, model, onProgress, sessionId
     model,
     log,
     onProgress: onProgress ? ({ snapshot }) => onProgress({ phase: "classification", tool: `Classifying snapshot ${snapshot}/${snapshots.length}` }) : undefined,
+    existingStates: priorManifest ? priorManifest.getStates() : undefined,
   });
   const consolidatedSnapshots = groups.map((g) => g.representative);
 
